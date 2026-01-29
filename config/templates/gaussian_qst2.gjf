@@ -1,0 +1,13 @@
+%chk=qst2.chk
+%mem=32GB
+%nproc=16
+# B3LYP/def2-SVP EmpiricalDispersion=GD3BJ
+# Opt=(QST2, CalcFC) Freq
+
+QST2 TS Search
+
+0 1
+[reactant coordinates]
+
+0 1
+[product coordinates]

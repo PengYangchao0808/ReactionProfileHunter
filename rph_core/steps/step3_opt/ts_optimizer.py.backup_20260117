@@ -1,0 +1,404 @@
+"""
+Step 3: Transition Analyzer
+==========================
+
+反应中心全分析模块 - TS优化验证 + Reactant SP + 片段处理
+
+Author: QCcalc Team
+Date: 2026-01-09
+Updated: 2026-01-13 (合并 S3.5，集成 SP 和片段处理)
+"""
+
+# pyright: reportMissingImports=false, reportMissingTypeStubs=false, reportMissingSuperCall=false, reportMissingTypeArgument=false
+
+import logging
+from pathlib import Path
+from typing import Optional, Tuple, List, Dict, Any
+from dataclasses import dataclass
+import numpy as np
+
+
+from ...utils.log_manager import LoggerMixin
+from ...utils.file_io import write_xyz, read_xyz
+from ...utils.orca_interface import ORCAInterface
+from ...utils.qc_interface import XTBInterface
+from ...utils.geometry_tools import LogParser
+from ...utils.shermo_runner import run_shermo
+
+@dataclass
+class SPMatrixReport:
+    e_ts: float = 0.0
+    e_reactant: float = 0.0
+    e_product: float = 0.0
+    e_reactant_l2: float = 0.0
+    e_product_l2: float = 0.0
+    e_ts_final: Optional[float] = None
+    e_frag_a_ts: Optional[float] = None
+    e_frag_b_ts: Optional[float] = None
+    e_frag_a_relaxed: Optional[float] = None
+    e_frag_b_relaxed: Optional[float] = None
+    method: str = "Berny"
+    solvent: str = "acetone"
+    g_ts: Optional[float] = None
+    h_ts: Optional[float] = None
+    g_reactant: Optional[float] = None
+    h_reactant: Optional[float] = None
+    g_product: Optional[float] = None
+    h_product: Optional[float] = None
+
+    def get_activation_energy(self) -> float:
+        if self.e_ts is None or self.e_reactant is None:
+            return 0.0
+        return (self.e_ts - self.e_reactant) * 627.509
+    def get_reaction_energy(self) -> float:
+        if self.e_product is None or self.e_reactant is None:
+            return 0.0
+        return (self.e_product - self.e_reactant) * 627.509
+
+from .berny_driver import BernyTSDriver, TSOptResult
+from .qst2_rescue import QST2RescueDriver, QST2Result
+from .validator import TSValidator, TSValidationError
+from .irc_driver import IRCDriver, IRCResult
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TransitionAnalysisResult:
+    """
+    Transition Analyzer 完整结果 (S3 输出)
+
+    Attributes:
+        ts_final_xyz: 优化后的 TS 结构 XYZ 文件
+        ts_checkpoint: TS 的 checkpoint 文件 (可选)
+        sp_report: SP 矩阵报告 (SPMatrixReport)
+        method_used: 使用的方法 (Berny 或 QST2)
+    """
+    ts_final_xyz: Path
+    ts_checkpoint: Optional[Path]
+    sp_report: SPMatrixReport
+    method_used: str
+
+
+class TSOptimizer(LoggerMixin):
+    """
+    TS 优化引擎 (Step 3) - v3.0
+
+    策略:
+    1. Berny TS 优化 (Opt=TS, CalcFC, NoEigenTest)
+    2. 虚频检验 (必须恰好 1 个虚频)
+    3. 失败 → QST2 救援
+    4. 可选 IRC 验证
+
+    输入:
+    - ts_guess: TS 初猜 (来自 Step 2，可能是文件或目录)
+    - reactant: 底物复合物 (来自 Step 2，用于 QST2 救援)
+    - product: 产物 (来自 Step 1，用于 QST2 救援)
+
+    输出:
+    - ts_final_xyz: 优化后的 TS 结构
+    """
+
+    def __init__(self, config: Dict[str, Any], molecule_name: Optional[str] = None):
+        super().__init__()
+        self.molecule_name = molecule_name
+        self.config = config
+        self.step3_config = config.get('step3', {})
+        self.theory_opt = config.get('theory', {}).get('optimization', {})
+        self.theory_sp = config.get('theory', {}).get('single_point', {})
+
+        # 几何优化配置
+        self.method = self.theory_opt.get('method', 'B3LYP')
+        self.basis = self.theory_opt.get('basis', 'def2-SVP')
+        self.dispersion = self.theory_opt.get('dispersion', 'GD3BJ')
+
+        # IRC 配置
+        self.verify_irc = self.step3_config.get('verify_irc', False)
+        self.irc_max_points = self.step3_config.get('irc_max_points', 50)
+        self.irc_step_size = self.step3_config.get('irc_step_size', 10)
+
+        # 资源配置
+        self.nprocshared = self.theory_opt.get('nproc', 16)
+        self.mem = self.theory_opt.get('mem', '32GB')
+
+        self.calculate_relaxed_fragments = False
+        self.fragment_opt_level = ""
+
+        self.berny_driver = BernyTSDriver(
+            method=self.method,
+            basis=self.basis,
+            dispersion=self.dispersion,
+            nprocshared=self.nprocshared,
+            mem=self.mem,
+            config=self.config
+        )
+
+        self.qst2_driver = QST2RescueDriver(
+            method=self.method,
+            basis=self.basis,
+            dispersion=self.dispersion,
+            nprocshared=self.nprocshared,
+            mem=self.mem,
+            config=self.config
+        )
+
+        self.validator = TSValidator()
+
+        self.irc_driver: Optional[IRCDriver] = None
+
+        self.orca = ORCAInterface(
+            method=self.theory_sp.get('method', 'WB97M-V'),
+            basis=self.theory_sp.get('basis', 'def2-TZVPP'),
+            aux_basis=self.theory_sp.get('aux_basis', 'def2/J'),
+            nprocs=self.theory_sp.get('nproc', 16),
+            maxcore=self.theory_sp.get('maxcore', 4000),
+            solvent=self.theory_sp.get('solvent', 'acetone'),
+            config=self.config
+        )
+
+        self.xtb = XTBInterface(
+            gfn_level=2,
+            solvent=self.theory_sp.get('solvent', 'acetone'),
+            nproc=self.theory_sp.get('nproc', 8),
+            config=self.config
+        )
+
+        from rph_core.utils.qc_task_runner import QCTaskRunner
+        self.qc_runner = QCTaskRunner(config=config)
+
+        self.logger.info(f"TransitionAnalyzer 初始化: {self.method}/{self.basis} D3={self.dispersion}")
+        self.logger.info(f"  L2 SP: {self.orca.method}/{self.orca.basis}")
+        self.logger.info("  片段处理: 禁用")
+        self.logger.info("  QCTaskRunner 已初始化（统一计算中枢）")
+    
+    def run_with_qctaskrunner(
+        self,
+        ts_guess: Path,
+        reactant: Path,
+        product: Path,
+        output_dir: Path,
+        e_product_l2: float,
+        product_thermo: Optional[Path] = None,
+        forming_bonds: Optional[Tuple[Tuple[int, int], Tuple[int, int]]] = None,
+        old_checkpoint: Optional[Path] = None
+    ) -> TransitionAnalysisResult:
+        """
+        使用 QCTaskRunner 执行 TS 优化（统一计算中枢）- v3.0
+        """
+        def safe_extract_coords(file_path: Path, name: str):
+            coords, symbols, error = LogParser.extract_last_converged_coords(
+                file_path,
+                engine_type='auto'
+            )
+            if coords is None:
+                self.logger.warning(f"无法从 {name} ({file_path}) 提取坐标: {error}")
+                # 回退
+                from rph_core.utils.file_io import read_xyz
+                return read_xyz(file_path)
+            self.logger.info(f"从 {name} 成功提取 {len(coords)} 个原子坐标")
+            return coords, symbols
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        self.logger.info("=" * 60)
+        self.logger.info("Step 3: TS 优化（使用 QCTaskRunner 统一计算中枢）- v3.0")
+        self.logger.info("=" * 60)
+
+        # 提取输入坐标（使用 LogParser）
+        self.logger.info("验证输入文件...")
+        ts_coords, ts_symbols = safe_extract_coords(ts_guess, "TS 初猜")
+        reactant_coords, reactant_symbols = safe_extract_coords(reactant, "底物复合物")
+        product_coords, product_symbols = safe_extract_coords(product, "产物")
+
+        # 1. TS 优化 + L2 SP
+        self.logger.info("步骤 1/3: TS 优化 + 虚频验证 + L2 SP")
+        ts_result = self.qc_runner.run_ts_opt_cycle(
+            xyz_file=ts_guess,
+            output_dir=output_dir / "ts_opt",
+            charge=0,
+            spin=1,
+            enable_l2_sp=True,
+            old_checkpoint=old_checkpoint
+        )
+
+        if not ts_result.converged:
+            raise RuntimeError(f"TS 优化失败: {ts_result.error_message}")
+
+        self.logger.info("步骤 2/3: Reactant (Complex) OPT+FREQ+L2 SP...")
+        reactant_opt = self.qc_runner.run_opt_sp_cycle(
+            xyz_file=reactant,
+            output_dir=output_dir / "reactant_opt",
+            charge=0,
+            spin=1,
+            enable_l2_sp=True,
+            old_checkpoint=old_checkpoint
+        )
+        if not reactant_opt.converged:
+            raise RuntimeError(f"Reactant OPT 失败: {reactant_opt.error_message}")
+        if reactant_opt.l2_energy is None:
+            raise RuntimeError("Reactant L2 SP 能量缺失")
+        e_reactant_l2 = reactant_opt.l2_energy
+
+        self.logger.info("步骤 3/3: 构建 SP 矩阵报告 (含片段)...")
+        sp_report = SPMatrixReport(
+            e_product=e_product_l2,
+            e_reactant=e_reactant_l2,
+            e_ts_final=ts_result.l2_energy,
+            method=f"{self.orca.method}/{self.orca.basis}",
+            solvent=self.orca.solvent
+        )
+
+        ts_freq_log = ts_result.freq_log if ts_result.freq_log and ts_result.freq_log.exists() else None
+        reactant_freq_log = reactant_opt.freq_log if reactant_opt.freq_log and reactant_opt.freq_log.exists() else None
+
+        ts_thermo = self._run_shermo(ts_freq_log, ts_result.l2_energy, output_dir / "ts_opt")
+        reactant_thermo = self._run_shermo(reactant_freq_log, e_reactant_l2, output_dir / "reactant_opt")
+
+        sp_report.g_ts = ts_thermo[0] if ts_thermo else None
+        sp_report.h_ts = ts_thermo[1] if ts_thermo else None
+        sp_report.g_reactant = reactant_thermo[0] if reactant_thermo else None
+        sp_report.h_reactant = reactant_thermo[1] if reactant_thermo else None
+
+        if product_thermo and product_thermo.exists():
+            product_g, product_h = self._load_product_thermo(product_thermo)
+            sp_report.g_product = product_g
+            sp_report.h_product = product_h
+
+        result = TransitionAnalysisResult(
+            ts_final_xyz=ts_result.optimized_xyz,
+            ts_checkpoint=ts_result.optimized_xyz.with_suffix('.chk') if ts_result.optimized_xyz.with_suffix('.chk').exists() else None,
+            sp_report=sp_report,
+            method_used=ts_result.method_used
+        )
+        
+        self.logger.info("=" * 60)
+        self.logger.info(f"ΔG‡ (Complex-based): {sp_report.get_activation_energy():.2f} kcal/mol")
+        if sp_report.g_ts is not None and sp_report.g_reactant is not None:
+            self.logger.info(f"ΔG‡ (thermo): {(sp_report.g_ts - sp_report.g_reactant) * 627.509:.2f} kcal/mol")
+        if sp_report.g_product is not None and sp_report.g_reactant is not None:
+            self.logger.info(f"ΔG_rxn (thermo): {(sp_report.g_product - sp_report.g_reactant) * 627.509:.2f} kcal/mol")
+        self.logger.info("Step 3 完成")
+        self.logger.info("=" * 60)
+        
+        return result
+
+    def _build_sp_matrix(
+        self,
+        ts_final_xyz: Path,
+        reactant: Path,
+        e_product_l2: float,
+        output_dir: Path,
+        forming_bonds: Optional[Tuple[Tuple[int, int], Tuple[int, int]]]
+    ) -> SPMatrixReport:
+        """
+        构建完整 SP 矩阵 (TS SP + Reactant SP + Fragments SP)
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. TS L2 SP
+        self.logger.info("  [TS_Final] 执行 L2 SP...")
+        e_ts_l2 = self._run_sp(ts_final_xyz, output_dir / "ts_sp")
+
+        # 2. Reactant L2 SP
+        self.logger.info("  [Reactant] 执行 L2 SP...")
+        e_reactant_l2 = self._run_sp(reactant, output_dir / "reactant_sp")
+
+        e_frag_a_l2 = None
+        e_frag_b_l2 = None
+        e_frag_a_relaxed = None
+        e_frag_b_relaxed = None
+
+        # 构建报告
+        report = SPMatrixReport(
+            e_product=e_product_l2,
+            e_reactant=e_reactant_l2,
+            e_ts_final=e_ts_l2,
+            e_frag_a_ts=e_frag_a_l2,
+            e_frag_b_ts=e_frag_b_l2,
+            e_frag_a_relaxed=e_frag_a_relaxed,
+            e_frag_b_relaxed=e_frag_b_relaxed,
+            method=f"{self.orca.method}/{self.orca.basis}",
+            solvent=self.orca.solvent
+        )
+
+        return report
+
+    def _run_sp(self, xyz_file: Path, output_dir: Path) -> float:
+        result = self.orca.single_point(xyz_file, output_dir)
+        if not result.converged:
+             raise RuntimeError(f"SP 计算失败: {result.error_message}")
+        if result.energy is None:
+             raise RuntimeError("SP 能量缺失")
+        return result.energy
+
+    def _run_shermo(self, freq_source: Optional[Path], sp_energy: Optional[float], output_dir: Path) -> Optional[Tuple[float, float]]:
+        if sp_energy is None or freq_source is None:
+            return None
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        shermo_out = output_dir / "shermo.sum"
+        shermo_bin = Path(self.config.get("executables", {}).get("shermo", {}).get("path", "Shermo"))
+        thermo = run_shermo(
+            shermo_bin=shermo_bin,
+            freq_output=freq_source,
+            sp_energy=sp_energy,
+            output_file=shermo_out,
+            temperature_k=self.config.get("thermo", {}).get("temperature_k", 298.15),
+            pressure_atm=self.config.get("thermo", {}).get("pressure_atm", 1.0),
+            scl_zpe=self.config.get("thermo", {}).get("scl_zpe", 0.9905),
+            ilowfreq=self.config.get("thermo", {}).get("ilowfreq", 2),
+            imagreal=self.config.get("thermo", {}).get("imagreal", 0),
+            conc=self.config.get("thermo", {}).get("conc")
+        )
+        g_used = thermo.g_conc if thermo.g_conc is not None else thermo.g_sum
+        return g_used, thermo.h_sum
+
+    def _load_product_thermo(self, thermo_csv: Path) -> Tuple[Optional[float], Optional[float]]:
+        content = thermo_csv.read_text().splitlines()
+        if len(content) < 2:
+            return None, None
+        header = [item.strip() for item in content[0].split(",")]
+        g_index = header.index("g_used") if "g_used" in header else None
+        h_index = header.index("h_sum") if "h_sum" in header else None
+        weight_index = header.index("weight") if "weight" in header else None
+        if g_index is None or h_index is None:
+            return None, None
+        best_row = None
+        best_weight = None
+        for line in content[1:]:
+            row = [item.strip() for item in line.split(",")]
+            if not row or len(row) <= max(g_index, h_index):
+                continue
+            weight_value = None
+            if weight_index is not None and len(row) > weight_index:
+                try:
+                    weight_value = float(row[weight_index]) if row[weight_index] else None
+                except ValueError:
+                    weight_value = None
+            if best_row is None:
+                best_row = row
+                best_weight = weight_value
+                continue
+            if weight_value is None or best_weight is None:
+                continue
+            if weight_value > best_weight:
+                best_row = row
+                best_weight = weight_value
+        if best_row is None:
+            return None, None
+        try:
+            g_value = float(best_row[g_index]) if best_row[g_index] else None
+        except ValueError:
+            g_value = None
+        try:
+            h_value = float(best_row[h_index]) if best_row[h_index] else None
+        except ValueError:
+            h_value = None
+        return g_value, h_value
+
+    def run(self, *args, **kwargs):
+        # 保持旧接口兼容性（内部调用新逻辑）
+        return self.run_with_qctaskrunner(*args, **kwargs)

@@ -1,0 +1,73 @@
+# Multiwfn Recipes (V4.2 Phase B/C)
+# ====================================
+#
+# Configuration file for Multiwfn NICS descriptor generation.
+# Phase A: Interface stub only - recipes defined but not executed.
+# Phase B/C: Will be used to generate Multiwfn job specifications.
+#
+# Format:
+#   <recipe_name>:
+#     description: <description>
+#     menu_sequence: [ <menu_choice_1>, <menu_choice_2>, ... ]
+#     outputs: [ <expected_output_file_1>, ... ]
+#     version: <recipe_version>  # Optional
+#
+# Placeholder values:
+#   {input_fchk} -> Path to Gaussian .fchk file
+#   {workdir} -> Working directory
+#   {output_prefix} -> Prefix for output files
+#
+# Example NICS recipes (to be expanded in Phase B/C):
+nics_1zz:
+  description: "NICS(1)_ZZ (1 bohr above ring plane) for aromaticity analysis"
+  menu_sequence:
+    - "12"
+    - "9"
+    - "{input_fchk}"
+    - "n"
+    - "y"
+    - "4"
+    - "1.0"
+    - "n"
+    - "n"
+    - "7"
+    - "{workdir}/nics_1zz.txt"
+    - "n"
+    - "0"
+  outputs:
+    - "nics_1zz.txt"
+  version: "1.0"
+
+nics_0zz:
+  description: "NICS(0)_ZZ (at ring center) for aromaticity analysis"
+  menu_sequence:
+    - "12"
+    - "9"
+    - "{input_fchk}"
+    - "n"
+    - "y"
+    - "4"
+    - "0.0"
+    - "n"
+    - "n"
+    - "7"
+    - "{workdir}/nics_0zz.txt"
+    - "n"
+    - "0"
+  outputs:
+    - "nics_0zz.txt"
+  version: "1.0"
+
+wiberg:
+  description: "Wiberg bond orders for analyzing bond strengths"
+  menu_sequence:
+    - "3"
+    - "{input_fchk}"
+    - "n"
+    - "y"
+    - "{workdir}/wiberg.txt"
+    - "n"
+    - "0"
+  outputs:
+    - "wiberg.txt"
+  version: "1.0"

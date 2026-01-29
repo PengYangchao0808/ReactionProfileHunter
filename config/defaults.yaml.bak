@@ -1,0 +1,160 @@
+# ReactionProfileHunter v2.1 默认配置
+# =====================================
+
+# ==================== 路径配置 (Executables) ====================
+# 统一管理所有量子化学软件的绝对路径
+# 支持环境变量覆盖（如 export ORCA_PATH=/custom/path/orca）
+executables:
+  orca:
+    path: "/root/orca/orca"  # 可执行文件的绝对路径，或命令名如 "orca"
+    ld_library_path: "/root/orca"  # ORCA 共享库路径（MPI 支持）
+  gaussian:
+    path: "/root/g16/g16"
+    root: "/root/g16"
+    profile: "/root/g16/g16.profile"
+    use_wrapper: true
+    wrapper_path: "./scripts/run_g16_worker.sh"
+  xtb:
+    path: "/root/XTB/bin/xtb"
+  crest:
+    path: "/root/crest/crest"
+
+# ==================== 资源配置 (Resources) ====================
+# 内存配置格式："32GB", "16GB", "4096MB" 等
+resources:
+  mem: "32GB"  # 总内存
+  nproc: 16     # 并行核数
+  # 派生值（maxcore 等）由代码根据 mem/nproc 自动计算
+  orca_maxcore_safety: 0.8  # ORCA maxcore 安全系数（避免内存溢出）
+
+# 全局理论水平配置 (Theory Levels)
+# ================================
+# 统一管理几何优化和高精度单点能的参数
+theory:
+  # 几何优化级别 (用于 S1 产物优化, S3 TS 优化)
+  optimization:
+    method: B3LYP
+    basis: def2-SVP
+    dispersion: GD3BJ
+    engine: gaussian  # 可选: gaussian, orca
+    nproc: 16
+    mem: 32GB
+    solvent: acetone
+
+  # 高精度单点能级别 (L2)
+  # 用于 S1 产物精修, S3 TS/Reactant/Fragments 精修
+  single_point:
+    method: WB97M-V
+    basis: def2-TZVPP
+    aux_basis: def2/J
+    engine: orca  # 可选: orca, gaussian
+    nproc: 16
+    maxcore: 4000
+    solvent: acetone
+    fallback_to_gaussian: true  # ORCA 失败时是否降级到 Gaussian
+    fallback_method: B3LYP
+    fallback_basis: def2-TZVP
+
+# 优化控制配置 (Optimization Control)
+# ===================================
+# 统一管理几何优化的各种控制参数
+# 这些参数会自动转换为 Gaussian/ORCA 的相应关键词
+optimization_control:
+  # 超时设置
+  timeout:
+    enabled: false  # QC 计算通常需要长时间，默认禁用超时
+    default_seconds: null  # null = 无限制
+
+  # 振荡检测
+  oscillation:
+    window_size: 10  # 检测窗口（步数）
+    energy_tolerance: 0.0001  # Hartree, 能量变化容忍阈值
+    max_oscillation_count: 3  # 最大允许振荡次数
+
+  # Hessian 控制
+  hessian:
+    initial: calcfc  # 初始 Hessian: calcfc, calcall, read, model
+    recalc_every: 10  # 每隔 N 步重算 Hessian
+
+  # 步长控制
+  step:
+    max_step: 30  # Gaussian: N/100 Bohr, ORCA: Bohr
+    trust_radius: 0.3  # 信任半径 (Bohr)
+    adaptive: true  # 自适应步长
+
+  # 收敛级别
+  convergence:
+    level: normal  # loose, normal, tight, verytight
+
+  # TS 特定设置
+  ts:
+    eigentest: false  # Gaussian: NoEigenTest
+    follow_mode: 1  # 跟踪第几个虚频 (1 或 2)
+    step_type: eigenvalue  # eigenvalue 或 step
+
+# Step 1: Product Anchor (产物锚定)
+step1:
+  # CREST 构象搜索配置
+  crest:
+    gfn_level: 2  # GFN-xTB 方法级别 (0, 1, 2)
+    solvent: acetone
+    energy_window: 6.0  # kcal/mol, 构象能量窗口
+    threads: 16
+
+  # 是否启用 DFT 优化 (在 CREST 之后)
+  enable_dft_opt: false  # 默认使用 CREST 结果 + L2 SP
+
+# Step 2: Retro Scanner (逆向扫描)
+step2:
+  ts_distance: 2.2  # ✅ 统一为 2.2 Å (PROMOTE.md 标准)
+  break_distance: 3.5  # Å, 断裂距离
+  xtb_settings:
+    gfn_level: 2
+    solvent: acetone
+    nproc: 8
+
+# Step 3: Transition Analyzer (反应中心全分析)
+# ================================================
+# 职责:
+# 1. TS 优化与验证 (Berny/QST2 + Freq)
+# 2. Reactant 高精度 SP 计算
+# 3. 片段提取与处理 (Opt + SP)
+# 4. 生成完整能量报告
+step3:
+  # IRC 验证配置
+  verify_irc: false
+  irc_max_points: 50
+  irc_step_size: 10  # IRC 步长 (0.001 amu^1/2 bohr)
+
+  # Gaussian 关键词模板
+  gaussian_keywords:
+    berny: "Opt=(TS, CalcFC, NoEigenTest) Freq"
+    qst2: "Opt=(QST2, CalcFC) Freq"
+    irc: "IRC=(CalcFC, MaxPoints=50, StepSize=10)"
+
+  # 片段处理配置
+  fragments:
+    calculate_relaxed: true  # 是否计算松弛后的片段能量
+    opt_level: xtb          # 片段几何优化级别: xtb (快) 或 dft (准)
+
+# Step 4: Feature Miner (特征提取)
+step4:
+  enable_nbo: false
+  enable_buried_volume: false
+  features:
+    - dG_activation
+    - dG_reaction
+    - E_distortion_sub
+    - E_distortion_rea
+    - E_interaction
+    - r1_forming
+    - r2_forming
+    - asynchronicity
+
+# 全局设置
+global:
+  log_level: INFO  # DEBUG, INFO, WARNING, ERROR
+  work_dir_base: ./rph_output
+  checkpoint: true  # 是否启用断点续算
+  # 程序查找顺序：配置文件 > 环境变量 > 系统 PATH
+  enable_path_search: true  # 允许自动查找（如果配置文件中的路径不存在）

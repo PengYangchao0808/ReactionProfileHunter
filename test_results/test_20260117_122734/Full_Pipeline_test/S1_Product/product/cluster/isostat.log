@@ -1,0 +1,42 @@
+ Command of invoking isostat:
+ /root/molclus/isostat /mnt/e/Calculations/[5+2] Mechain learning/Scripts/ReactionProfileHunter/ReactionProfileHunter/test_results/test_20260117_122734/Full_Pipeline_test/S1_Product/product/cluster/iso
+ Isostat: A statistical analysis tool for a batch of isomers (64 bit)
+ Released as a component of Molclus, last update of isostat: 2022-May-28
+ Developed by Tian Lu, contact: sobereva@sina.com
+ Beijing Kein Research Center for Natural Sciences (http://www.keinsci.com)
+ 
+ Input file: /mnt/e/Calculations/[5+2] Mechain learning/Scripts/ReactionProfileHunter/ReactionProfileHunter/test_results/test_20260117_122734/Full_Pipeline_test/S1_Product/product/cluster/isomers.xyz
+ Number of CPU cores to be used:   16
+ 
+ Energy threshold for distinguishing different clusters is   1.000 kcal/mol
+ 
+ Geometry threshold for distinguishing different clusters is  0.125 Angstrom
+ 
+ Analyzing...
+ 
+ There are    26 atoms
+ There are     4 isomers
+
+ Energy of isomer     1 :    -41.88650949 a.u.,  new cluster
+ Energy of isomer     2 :    -41.88394622 a.u.,  new cluster
+ Energy of isomer     3 :    -41.88051555 a.u.,  new cluster
+ Energy of isomer     4 :    -41.87774507 a.u.,  new cluster
+ 
+ The lowest energy is    -41.88650949 a.u.
+ Sorting clusters according to energy...
+ Calculation took up wall clock time         0 s
+
+ In below output, DE is energy difference with respect to the lowest one. DGmin quantifies minimal geometry difference with respect to all other clusters
+
+ #    1 Count:    1  E=    -41.886509 a.u.  DGmin=   0.18  DE=    0.00 kcal/mol
+ #    2 Count:    1  E=    -41.883946 a.u.  DGmin=   0.18  DE=    1.61 kcal/mol
+ #    3 Count:    1  E=    -41.880516 a.u.  DGmin=   0.23  DE=    3.76 kcal/mol
+ #    4 Count:    1  E=    -41.877745 a.u.  DGmin=   0.25  DE=    5.50 kcal/mol
+ 
+ Representative geometry of each cluster along with their energies have been outputted to cluster.xyz in current folder
+ 
+ Temperature for calculating Boltzmann distribution:  298.15 K
+ #    1   Count:   1   Ratio:  93.63%
+ #    2   Count:   1   Ratio:   6.20%
+ #    3   Count:   1   Ratio:   0.16%
+ #    4   Count:   1   Ratio:   0.01%

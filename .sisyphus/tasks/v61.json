@@ -1,0 +1,53 @@
+{
+  "tasks": [
+    {
+      "id": "task-1",
+      "content": "Execute V6.1–V6.4 plan using project orchestrator",
+      "status": "pending",
+      "priority": "high",
+      "dependencies": []
+    },
+    {
+      "id": "task-2",
+      "content": "Execute V6.2 S3 tasks (molecular_graph, fragment_manipulation, intramolecular_fragmenter)",
+      "status": "pending",
+      "priority": "high",
+      "dependencies": ["task-1"]
+    },
+    {
+      "id": "task-3",
+      "content": "Execute V6.2 S3 tasks (ORCA integration, S3 enrichment stage)",
+      "status": "pending",
+      "priority": "high",
+      "dependencies": ["task-1", "task-2"]
+    },
+    {
+      "id": "task-4",
+      "content": "Execute V6.3 S3 tasks (S3 artifacts_index, S4 asm_enrichment plugin)",
+      "status": "pending",
+      "priority": "high",
+      "dependencies": ["task-1", "task-2", "task-3"]
+    },
+    {
+      "id": "task-5",
+      "content": "Execute V6.3 S3 tasks (S3 artifacts_index writer, S4 fmo_cdft_dipolar parser)",
+      "status": "pending",
+      "priority": "high",
+      "dependencies": ["task-1", "task-2", "task-3", "task-4"]
+    },
+    {
+      "id": "task-6",
+      "content": "Execute V6.4 tasks (update orchestrator, enforce S4 no QC tests, caching, ML scripts, docs)",
+      "status": "pending",
+      "priority": "medium",
+      "dependencies": ["task-1", "task-2", "task-3", "task-4", "task-5"]
+    },
+    {
+      "id": "task-7",
+      "content": "Final verification and cleanup",
+      "status": "pending",
+      "priority": "low",
+      "dependencies": ["task-1", "task-2", "task-3", "task-4", "task-5", "task-6"]
+    }
+  ]
+}

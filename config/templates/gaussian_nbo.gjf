@@ -1,0 +1,8 @@
+%mem={{mem}}
+%nprocshared={{nproc}}
+#p {{method}}/{{basis}} 6D Pop=NBO
+
+Gaussian input file created by ReactionProfileHunter: NBO analysis
+
+{{charge}} {{mult}}
+{{coords_block}}

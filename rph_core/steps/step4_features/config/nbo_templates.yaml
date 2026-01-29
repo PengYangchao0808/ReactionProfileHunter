@@ -1,0 +1,37 @@
+# NBO Templates (V4.2 Phase B/C)
+# ==================================
+#
+# Configuration file for NBO E(2) analysis template whitelist.
+# Phase A: Interface stub only - templates defined but not used.
+# Phase B/C: Will be used to whitelist and match NBO E(2) interactions.
+#
+# Format:
+# nbo_e2_templates:
+#   - name: <template_name>
+#     donor: <atom_spec>  # e.g., "C(1)" or element type
+#     acceptor: <atom_spec>  # e.g., "O(2)" or element type
+#     required_atoms: [<index>, ...]  # Optional: required atom indices
+#     spin: <multiplicity>  # Optional: spin for this interaction
+#     notes: <description>  # Optional: human-readable notes
+#
+# Matching rules (Contract 3):
+#   - Donor and acceptor must match exactly
+#   - If 0 or >1 matches found, result is None + warning
+#   - If template has required_atoms, they must be present
+#
+# Example templates (to be expanded in Phase B/C):
+nbo_e2_templates:
+  - name: "sigma_C_H"
+    donor: "C"
+    acceptor: "H"
+    notes: "C-H sigma bond donation"
+
+  - name: "pi_C_C"
+    donor: "C"
+    acceptor: "C"
+    notes: "C-C pi interaction"
+
+  - name: "lone_pair_O"
+    donor: "O"
+    acceptor: "C"
+    notes: "O lone pair to C antibonding"

@@ -1,0 +1,10 @@
+%chk=irc.chk
+%mem=32GB
+%nproc=16
+# B3LYP/def2-SVP EmpiricalDispersion=GD3BJ
+# IRC=(CalcFC, MaxPoints=50, StepSize=10)
+
+IRC from TS
+
+0 1
+[coordinates]

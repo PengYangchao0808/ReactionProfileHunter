@@ -1,0 +1,61 @@
+# ReactionProfileHunter v2.2 Fast Test Config
+# ==========================================
+
+executables:
+  orca:
+    path: "/root/orca/orca"
+    ld_library_path: "/root/orca"
+  gaussian:
+    path: "/root/g16/g16"
+    root: "/root/g16"
+  xtb:
+    path: "/root/XTB/bin/xtb"
+  crest:
+    path: "/root/crest/crest"
+
+resources:
+  mem: "4GB"
+  nproc: 4
+
+theory:
+  optimization:
+    method: HF
+    basis: STO-3G
+    engine: gaussian
+    nproc: 4
+    mem: 4GB
+    solvent: acetone
+  
+  single_point:
+    method: HF
+    basis: STO-3G
+    engine: orca
+    nproc: 4
+    maxcore: 1000
+    solvent: acetone
+
+step1:
+  crest:
+    gfn_level: 2
+    solvent: acetone
+    energy_window: 6.0
+    threads: 4
+  enable_dft_opt: false
+
+step2:
+  ts_distance: 2.2
+  break_distance: 3.5
+  xtb_settings:
+    gfn_level: 2
+    solvent: acetone
+    nproc: 4
+
+step3:
+  verify_irc: false
+  fragments:
+    calculate_relaxed: true
+    opt_level: xtb
+
+global:
+  log_level: DEBUG
+  work_dir_base: ./tests/tmp_v2_2_test

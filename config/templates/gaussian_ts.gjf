@@ -1,0 +1,10 @@
+%chk=ts.chk
+%mem=32GB
+%nproc=16
+# B3LYP/def2-SVP EmpiricalDispersion=GD3BJ
+# Opt=(TS, CalcFC, NoEigenTest) Freq
+
+TS Optimization for [5+2] Cycloaddition
+
+{{charge}} {{mult}}
+{{coords_block}}

@@ -1,0 +1,25 @@
+{
+  "include": ["rph_core", "bin"],
+  "exclude": [
+    "run_auto_test.py",
+    "rph_core/utils/task_builder.py",
+    "rph_core/utils/dataset_loader.py"
+  ],
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": ["."]
+    }
+  ],
+  "typeCheckingMode": "off",
+  "reportMissingImports": "none",
+  "reportConstantRedefinition": "none",
+  "reportPossiblyUnboundVariable": "none",
+  "reportMissingTypeArgument": "none",
+  "reportArgumentType": "none",
+  "reportIndexIssue": "none",
+  "reportCallIssue": "none",
+  "reportOperatorIssue": "none",
+  "reportAttributeAccessIssue": "none",
+  "reportOptionalSubscript": "none"
+}

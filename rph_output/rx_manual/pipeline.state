@@ -1,0 +1,8 @@
+{
+  "product_smiles": "C=C(C)C(=O)O",
+  "work_dir": "rph_output/rx_manual",
+  "start_time": "2026-01-29T11:14:21.896316",
+  "last_update": "2026-01-29T11:14:21.896326",
+  "steps": {},
+  "config_snapshot": {}
+}

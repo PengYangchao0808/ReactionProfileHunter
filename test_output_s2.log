@@ -1,0 +1,102 @@
+2026-01-13 15:42:58 - rph_core.utils.config_loader - INFO - 已加载配置文件: /mnt/e/Calculations/[5+2] Mechain learning/Scripts/ReactionProfileHunter/ReactionProfileHunter/config/defaults.yaml
+2026-01-13 15:42:58,020 - ReactionProfileHunter - INFO - ============================================================
+2026-01-13 15:42:58 - ReactionProfileHunter - INFO - ============================================================
+2026-01-13 15:42:58,020 - ReactionProfileHunter - INFO - Reaction Profile Hunter v2.1 初始化 (含 S3.5)
+2026-01-13 15:42:58 - ReactionProfileHunter - INFO - Reaction Profile Hunter v2.1 初始化 (含 S3.5)
+2026-01-13 15:42:58,020 - ReactionProfileHunter - INFO - ============================================================
+2026-01-13 15:42:58 - ReactionProfileHunter - INFO - ============================================================
+2026-01-13 15:42:58 - __main__ - INFO - 读取测试数据: /mnt/e/Calculations/[5+2] Mechain learning/Scripts/ReactionProfileHunter/ReactionProfileHunter/reaxys_cleaned.csv
+2026-01-13 15:42:58 - __main__ - INFO - ======================================================================
+2026-01-13 15:42:58 - __main__ - INFO - ReactionProfileHunter v2.1 自动测试
+2026-01-13 15:42:58 - __main__ - INFO - ======================================================================
+2026-01-13 15:42:58 - __main__ - INFO - 测试反应 ID: 39717847
+2026-01-13 15:42:58 - __main__ - INFO - 产物 SMILES: O=C1C=C2CCCC(=O)[C@@H]3C[C@H]1O[C@H]23
+2026-01-13 15:42:58 - __main__ - INFO - 配置文件: /mnt/e/Calculations/[5+2] Mechain learning/Scripts/ReactionProfileHunter/ReactionProfileHunter/config/defaults.yaml
+2026-01-13 15:42:58 - __main__ - INFO - 工作目录: test_results/test_20260113_154258
+2026-01-13 15:42:58 - __main__ - INFO - 
+2026-01-13 15:42:58 - __main__ - INFO - ======================================================================
+2026-01-13 15:42:58 - __main__ - INFO - 开始执行: S1_S2
+2026-01-13 15:42:58 - __main__ - INFO - ======================================================================
+2026-01-13 15:42:58 - rph_core.utils.qc_runner - INFO - 执行 execute_step (尝试 1/3)
+2026-01-13 15:42:58,031 - ReactionProfileHunter - INFO - 🚀 任务启动: O=C1C=C2CCCC(=O)[C@@H]3C[C@H]1O[C@H]23
+2026-01-13 15:42:58 - ReactionProfileHunter - INFO - 🚀 任务启动: O=C1C=C2CCCC(=O)[C@@H]3C[C@H]1O[C@H]23
+2026-01-13 15:42:58,031 - ReactionProfileHunter - INFO - 📁 工作目录: test_results/test_20260113_154258/S1_S2_test
+2026-01-13 15:42:58 - ReactionProfileHunter - INFO - 📁 工作目录: test_results/test_20260113_154258/S1_S2_test
+2026-01-13 15:42:58,031 - ReactionProfileHunter - INFO - >>> Step 1: 寻找产物全局最低构象 (+ L2 SP)...
+2026-01-13 15:42:58 - ReactionProfileHunter - INFO - >>> Step 1: 寻找产物全局最低构象 (+ L2 SP)...
+2026-01-13 15:42:58 - rph_core.utils.resource_utils - INFO - 找到可执行文件（PATH）: /root/XTB/bin/xtb
+2026-01-13 15:42:58 - rph_core.utils.resource_utils - ERROR - 未找到可执行文件: crest
+2026-01-13 15:42:58 - rph_core.utils.qc_interface - WARNING - CREST 可执行文件未找到，将尝试从系统 PATH 调用
+2026-01-13 15:42:58 - rph_core.utils.orca_interface - INFO - 从系统 PATH 找到 ORCA: /root/orca/orca
+2026-01-13 15:42:58 - rph_core.steps.step1_anchor.anchor_manager.ProductAnchor - INFO - ProductAnchor 初始化完成 (使用全局 theory 配置)
+2026-01-13 15:42:59 - rph_core.steps.step1_anchor.anchor_manager.ProductAnchor - INFO - Step 1 开始: O=C1C=C2CCCC(=O)[C@@H]3C[C@H]1O[C@H]23
+2026-01-13 15:42:59 - rph_core.steps.step1_anchor.anchor_manager.ProductAnchor - INFO - 执行 RDKit 3D 嵌入...
+2026-01-13 15:42:59 - rph_core.steps.step1_anchor.anchor_manager.ProductAnchor - INFO - 执行 CREST 全局构象搜索...
+2026-01-13 15:42:59 - rph_core.utils.qc_interface - INFO - 开始 CREST 构象搜索: product_initial.xyz
+2026-01-13 15:42:59 - rph_core.utils.qc_interface - ERROR - CREST 运行失败: [Errno 2] No such file or directory: 'crest'
+2026-01-13 15:42:59 - rph_core.steps.step1_anchor.anchor_manager.ProductAnchor - INFO - 执行 XTB 最终优化...
+2026-01-13 15:42:59 - rph_core.utils.qc_interface - INFO - 开始 XTB 优化: product_initial.xyz
+2026-01-13 15:42:59 - rph_core.utils.qc_interface - ERROR - XTB 优化失败: abnormal termination of xtb
+
+2026-01-13 15:42:59 - rph_core.steps.step1_anchor.anchor_manager.ProductAnchor - WARNING - XTB 优化未完全收敛，使用现有坐标
+2026-01-13 15:42:59 - rph_core.steps.step1_anchor.anchor_manager.ProductAnchor - INFO - 执行 L2 高精度单点能计算 (ORCA)...
+2026-01-13 15:42:59 - rph_core.steps.step1_anchor.anchor_manager.ProductAnchor - INFO -   运行 ORCA L2 SP: product_initial.xyz
+2026-01-13 15:42:59 - rph_core.steps.step1_anchor.anchor_manager.ProductAnchor - INFO -     方法: WB97M-V/def2-TZVPP
+2026-01-13 15:42:59 - rph_core.steps.step1_anchor.anchor_manager.ProductAnchor - INFO -     溶剂: acetone
+2026-01-13 15:42:59 - rph_core.utils.orca_interface.WB97M-V/def2-TZVPP - INFO - 开始 ORCA 单点能计算: product_initial.xyz
+2026-01-13 15:42:59 - rph_core.utils.orca_interface.WB97M-V/def2-TZVPP - INFO -   方法: WB97M-V/def2-TZVPP
+2026-01-13 15:42:59 - rph_core.utils.orca_interface.WB97M-V/def2-TZVPP - INFO -   输出目录: test_results/test_20260113_154258/S1_S2_test/S1_Product/L2_SP
+2026-01-13 15:42:59 - rph_core.utils.orca_interface.WB97M-V/def2-TZVPP - WARNING - 检测到路径包含空格，使用临时目录运行 ORCA
+2026-01-13 15:44:11 - rph_core.utils.orca_interface.WB97M-V/def2-TZVPP - INFO -   ✓ 计算成功: 能量 = -652.08975999 Hartree
+2026-01-13 15:44:11 - rph_core.steps.step1_anchor.anchor_manager.ProductAnchor - INFO -   ✓ L2 SP 计算成功: -652.08975999 Hartree
+2026-01-13 15:44:11 - rph_core.steps.step1_anchor.anchor_manager.ProductAnchor - INFO -   S1 元数据已保存: test_results/test_20260113_154258/S1_S2_test/S1_Product/s1_metadata.json
+2026-01-13 15:44:11 - rph_core.steps.step1_anchor.anchor_manager.ProductAnchor - INFO - Step 1 完成: test_results/test_20260113_154258/S1_S2_test/S1_Product/product_initial.xyz
+2026-01-13 15:44:11 - rph_core.steps.step1_anchor.anchor_manager.ProductAnchor - INFO -   L2 能量: -652.08975999 Hartree
+2026-01-13 15:44:11,332 - ReactionProfileHunter - INFO -     ✓ 产物锚定完成: test_results/test_20260113_154258/S1_S2_test/S1_Product/product_initial.xyz
+2026-01-13 15:44:11 - ReactionProfileHunter - INFO -     ✓ 产物锚定完成: test_results/test_20260113_154258/S1_S2_test/S1_Product/product_initial.xyz
+2026-01-13 15:44:11,332 - ReactionProfileHunter - INFO -     ✓ L2 能量: -652.08975999 Hartree
+2026-01-13 15:44:11 - ReactionProfileHunter - INFO -     ✓ L2 能量: -652.08975999 Hartree
+2026-01-13 15:44:11,332 - ReactionProfileHunter - INFO - >>> Step 2: 逆向生成 TS 初猜与底物...
+2026-01-13 15:44:11 - ReactionProfileHunter - INFO - >>> Step 2: 逆向生成 TS 初猜与底物...
+2026-01-13 15:44:11 - rph_core.utils.resource_utils - INFO - 找到可执行文件（PATH）: /root/XTB/bin/xtb
+[15:44:11] SMARTS Parse Error: unclosed ring for input: '[O;R1;r5]1[C;R2][C;R1][C;R2][C;R1]([C;R2])[C;R1]12'
+2026-01-13 15:44:11 - rph_core.steps.step2_retro.smarts_matcher.SMARTSMatcher - WARNING - SMARTS 模式编译失败: type_E_oxa_bridge_generic
+2026-01-13 15:44:11 - rph_core.steps.step2_retro.smarts_matcher.SMARTSMatcher - INFO - ✓ 编译了 4 个 SMARTS 模式
+2026-01-13 15:44:11 - rph_core.steps.step2_retro.smarts_matcher.SMARTSMatcher - INFO - SMARTSMatcher 初始化完成
+2026-01-13 15:44:11 - rph_core.steps.step2_retro.bond_stretcher - INFO - 键拉伸器初始化: 目标长度 = 2.2 Å
+2026-01-13 15:44:11 - rph_core.steps.step2_retro.retro_scanner.RetroScanner - INFO - RetroScanner 初始化: TS距离=2.2Å, 断裂距离=3.5Å
+2026-01-13 15:44:11 - rph_core.steps.step2_retro.retro_scanner.RetroScanner - INFO - Step 2 开始: 逆向扫描
+2026-01-13 15:44:11 - rph_core.steps.step2_retro.retro_scanner.RetroScanner - INFO - 输入产物: test_results/test_20260113_154258/S1_S2_test/S1_Product/product_initial.xyz
+2026-01-13 15:44:11 - rph_core.steps.step2_retro.retro_scanner.RetroScanner - INFO - 识别反应键位点...
+2026-01-13 15:44:11 - rph_core.steps.step2_retro.smarts_matcher.SMARTSMatcher - WARNING - DetermineConnectivity 不可用，使用默认键级推断
+2026-01-13 15:44:11 - rph_core.steps.step2_retro.smarts_matcher.SMARTSMatcher - WARNING - 未找到精确 SMARTS 匹配，尝试拓扑推断...
+2026-01-13 15:44:11 - rph_core.steps.step2_retro.smarts_matcher.SMARTSMatcher - INFO - 使用后备拓扑分析...
+2026-01-13 15:44:11,352 - ReactionProfileHunter - ERROR - Step 2 失败: SMARTS 匹配失败: 无法识别氧杂桥环结构
+Traceback (most recent call last):
+  File "/mnt/e/Calculations/[5+2] Mechain learning/Scripts/ReactionProfileHunter/ReactionProfileHunter/rph_core/orchestrator.py", line 211, in run_pipeline
+    ts_guess_xyz, reactant_xyz, bonds = self.s2_engine.run(
+                                        ^^^^^^^^^^^^^^^^^^^
+  File "/mnt/e/Calculations/[5+2] Mechain learning/Scripts/ReactionProfileHunter/ReactionProfileHunter/rph_core/steps/step2_retro/retro_scanner.py", line 99, in run
+    raise ValueError(f"SMARTS 匹配失败: {match_result.error_message}")
+ValueError: SMARTS 匹配失败: 无法识别氧杂桥环结构
+2026-01-13 15:44:11 - ReactionProfileHunter - ERROR - Step 2 失败: SMARTS 匹配失败: 无法识别氧杂桥环结构
+Traceback (most recent call last):
+  File "/mnt/e/Calculations/[5+2] Mechain learning/Scripts/ReactionProfileHunter/ReactionProfileHunter/rph_core/orchestrator.py", line 211, in run_pipeline
+    ts_guess_xyz, reactant_xyz, bonds = self.s2_engine.run(
+                                        ^^^^^^^^^^^^^^^^^^^
+  File "/mnt/e/Calculations/[5+2] Mechain learning/Scripts/ReactionProfileHunter/ReactionProfileHunter/rph_core/steps/step2_retro/retro_scanner.py", line 99, in run
+    raise ValueError(f"SMARTS 匹配失败: {match_result.error_message}")
+ValueError: SMARTS 匹配失败: 无法识别氧杂桥环结构
+2026-01-13 15:44:11 - rph_core.utils.qc_runner - ERROR - 未捕获的异常: RuntimeError: Step 1+2 失败: SMARTS 匹配失败: 无法识别氧杂桥环结构
+2026-01-13 15:44:11 - __main__ - ERROR - ✗ S1_S2 失败: Step 1+2 失败: SMARTS 匹配失败: 无法识别氧杂桥环结构
+2026-01-13 15:44:11 - __main__ - ERROR -   错误类型: RuntimeError
+2026-01-13 15:44:11 - __main__ - WARNING - 尝试自动修复 S1_S2 的错误...
+2026-01-13 15:44:11 - __main__ - INFO - 测试报告已保存: test_results/test_report_39717847.json
+2026-01-13 15:44:11 - __main__ - INFO - 
+2026-01-13 15:44:11 - __main__ - INFO - ======================================================================
+2026-01-13 15:44:11 - __main__ - INFO - 测试摘要
+2026-01-13 15:44:11 - __main__ - INFO - ======================================================================
+2026-01-13 15:44:11 - __main__ - INFO -   ✗ S1_S2: failed (尝试 1 次)
+2026-01-13 15:44:11 - __main__ - INFO - 
+2026-01-13 15:44:11 - __main__ - INFO - 生成的文件总数: 0
+2026-01-13 15:44:11 - __main__ - INFO - 测试状态: 成功

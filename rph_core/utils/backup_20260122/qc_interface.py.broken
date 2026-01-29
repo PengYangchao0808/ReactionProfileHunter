@@ -1,0 +1,1510 @@
+"""
+Quantum Chemistry Interface Module - Sterile Pipeline Architecture
+===================================================================
+
+Replaces buggy Gaussian execution module with a robust "Sterile Pipeline"
+architecture to fix I/O freezes on WSL, prevent disk overflow, and ensure
+syntax compliance.
+
+Gaussian Execution Paths:
+========================
+
+This module provides TWO Gaussian execution paths with overlapping responsibilities:
+
+1. Sterile Pipeline Architecture (run_gaussian_optimization):
+   - Entry point: run_gaussian_optimization(atoms, charge, mult, output_dir, config, route)
+   - Uses: LinuxSandbox -> GaussianRunner -> ResultHarvester
+   - Checkpoint naming: input.chk (from input.gjf)
+   - Harvested artifacts: final_output.chk, final_output.log, .fchk (via try_formchk)
+   - Used by: Newer pipeline components (ConformerEngine, etc.)
+   - Pros: Sandboxing, disk space management, error handling
+   - Cons: Different naming convention from GaussianInterface
+
+2. GaussianInterface Legacy Path:
+   - Entry point: GaussianInterface.optimize(xyz_file, output_dir, config, method, basis, ...)
+   - Uses: write_input_file() -> subprocess.run()
+   - Checkpoint naming: {jobname}.chk (from jobname parameter)
+   - Harvested artifacts: {jobname}.log, {jobname}.chk, .fchk (via try_formchk)
+   - Used by: Legacy components (AnchorPhase, TSOptimizer)
+   - Pros: Direct file naming control, flexible jobname handling
+   - Cons: Less robust error handling
+
+Naming Convention Notes:
+========================
+
+Both paths generate .fchk files via try_formchk(), but use different base names:
+- Sterile: final_output.fchk (from input.chk)
+- Legacy: {jobname}.fchk (from {jobname}.chk)
+
+This inconsistency can cause S4 degradation if the wrong artifact path is expected.
+Future refactoring should unify these paths or pick one canonical approach.
+
+Classes:
+- InputFactory: Creates sanitized Gaussian input files
+- LogParser: Extracts final geometry from Gaussian logs
+- LinuxSandbox: Context manager for safe execution environment
+- GaussianRunner: Executes Gaussian calculations safely
+- ResultHarvester: Collects and validates results
+- run_gaussian_optimization: Main pipeline function
+- GaussianInterface: Legacy wrapper (see above)
+
+Author: QC Descriptors Team
+Date: 2026-01-15
+"""
+
+import os
+import re
+import shutil
+import tempfile
+import subprocess
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+from enum import Enum
+import logging
+
+import numpy as np
+
+from rph_core.utils.data_types import QCResult
+from rph_core.utils.file_io import read_energy_from_gaussian, read_xyz
+from rph_core.utils.resource_utils import resolve_executable_config
+from rph_core.utils.xtb_runner import XTBRunner
+
+logger = logging.getLogger(__name__)
+
+# Try import, handle circular/missing gracefully during static analysis
+try:
+    from rph_core.utils.keyword_translator import KeywordTranslator
+except ImportError:
+    KeywordTranslator = None
+
+
+class TaskKind(Enum):
+    """Enumeration of QC task types for resource selection."""
+    OPTIMIZATION = "optimization"
+    SINGLE_POINT = "single_point"
+    FREQUENCY = "frequency"
+    TS_OPTIMIZATION = "ts_optimization"
+    IRC = "irc"
+    NBO = "nbo"
+
+
+    NBO_WHITELIST = {'.47', '.nbo', '.3', '.31', '.41'}
+
+    NMR_WHITELIST = {'.nmrdat', '.shieldings.dat', '.nmrout'}
+
+    def collect_nmr_outputs(output_dir: Path, jobname: str) -> Dict[str, Path]:
+        """
+        M3-4-3: Collect NMR output files using whitelist-based pattern matching.
+
+        Args:
+            output_dir: Base output directory
+            jobname: Job name used to search for NMR files
+
+        Returns:
+            Dict mapping file extensions to absolute paths
+            Only returns files whose extensions are in NMR_WHITELIST.
+        """
+        output_dir = Path(output_dir).resolve()
+
+        nmr_files = {}
+
+        for ext in NMR_WHITELIST:
+            glob_pattern = f"{jobname}{ext}"
+            matching_files = list(output_dir.glob(glob_pattern))
+
+            if matching_files:
+                if len(matching_files) > 1:
+                    matching_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+                    logger.warning(
+                        f"Multiple files found for {jobname}{ext}: {[f.name for f in matching_files]}. "
+                        f"Using most recent: {matching_files[0].name}"
+                    )
+
+                nmr_files[ext] = matching_files[0].resolve()
+                logger.debug(f"Found NMR file: {nmr_files[ext]}")
+
+        if not nmr_files:
+            logger.warning(f"No NMR files found in {output_dir} with whitelist {NMR_WHITELIST}")
+
+        return nmr_files
+
+    def parse_hirshfeld_charges(log_path: Path) -> Optional[Dict[int, float]]:
+        """
+        M3-4-4: Parse Hirshfeld charges from Gaussian output log (regex-based, minimal).
+
+        Args:
+            log_path: Path to Gaussian .log file
+
+        Returns:
+            Dictionary mapping atom indices to charges, or None if not found
+            Uses regex pattern to find Hirshfeld charge section, allowing
+            minimal viable parsing (can return None).
+
+        Note:
+            - Hirshfeld output format in Gaussian logs varies significantly between versions
+            - This implementation uses a flexible regex to find charge blocks
+            - Returns None on parsing failure (graceful degradation)
+        """
+        try:
+            with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
+                log_content = f.read()
+
+            pattern = r'Hirshfeld\s+charges\s*.*?\n(?:=|\s+)\n((?:[+-]?\d+\.\d+\s+)+)'
+            match = re.search(pattern, log_content)
+
+            if not match:
+                logger.warning(f"Hirshfeld charges not found in {log_path}")
+                return None
+
+            charges_str = match.group(1).strip()
+            charge_lines = charges_str.split()
+
+            charges = {}
+            for line in charge_lines:
+                parts = line.split()
+                for part in parts:
+                    match = re.search(r'([+-]?\d+\.\d+)', part)
+                    if match:
+                        charge_value = float(match.group(1))
+                        charges[int(match.start())] = charge_value
+
+            return charges
+
+        except Exception as e:
+            logger.error(f"Failed to parse Hirshfeld charges from {log_path}: {e}")
+            return None
+
+
+    def parse_hirsheld_charges(log_path: Path) -> Optional[Dict[int, float]]:
+        """
+        DEPRECATED: Use parse_hirshfeld_charges instead (correct spelling).
+
+        This function is provided for backward compatibility only.
+        Will be removed in a future version.
+
+        Args:
+            log_path: Path to Gaussian .log file
+
+        Returns:
+            Dictionary mapping atom indices to charges, or None if not found
+        """
+        import warnings
+        warnings.warn(
+            "parse_hirsheld_charges is deprecated. Use parse_hirshfeld_charges instead.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        return parse_hirshfeld_charges(log_path)
+
+
+def parse_hirshfeld_charges(log_path: Path) -> Optional[Dict[int, float]]:
+    """
+    M3-4-4: Parse Hirshfeld charges from Gaussian output log (regex-based, minimal).
+
+    Args:
+        log_path: Path to Gaussian .log file
+
+    Returns:
+            Dictionary mapping atom indices to charges, or None if not found
+    Uses regex pattern to find Hirshfeld charge section, allowing
+            minimal viable parsing (can return None).
+
+    Note:
+            - Hirshfeld output format in Gaussian logs varies significantly between versions
+            - This implementation uses a flexible regex to find charge blocks
+            - Returns None on parsing failure (graceful degradation)
+        """
+    try:
+        with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
+            log_content = f.read()
+
+            pattern = r'Hirshfeld\s+charges\s*.*?\n(?:=|\s+)\n((?:[+-]?\d+\.\d+\s+)+)'
+            match = re.search(pattern, log_content)
+
+            if not match:
+                logger.warning(f"Hirshfeld charges not found in {log_path}")
+                return None
+
+            charges_str = match.group(1).strip()
+            charge_lines = charges_str.split()
+            charges = {}
+
+            for line in charge_lines:
+                parts = line.split()
+                for part in parts:
+                    match = re.search(r'([+-]?\d+\.\d+\s+)+)', part)
+                    if match:
+                        charge_value = float(match.group(1))
+                        charges[int(match.start())] = charge_value
+
+            return charges
+
+    except Exception as e:
+        logger.error(f"Failed to parse Hirshfeld charges from {log_path}: {e}")
+        return None
+
+
+    def collect_nmr_outputs(self, output_dir: Path, jobname: str = "gaussian") -> List[Path]:
+        """
+        Mock NMR output collection - generate fake .nmrdat files.
+
+        Args:
+            output_dir: Output directory for NMR files
+            jobname: Job name for file naming
+
+        Returns:
+            List of paths to fake NMR output files
+        """
+        return self._write_file(output_dir / f"{jobname}_nmrdat", f"Fake NMR Shieldings for {jobname}\n")
+
+    def collect_hirshfeld_outputs(self, output_dir: Path, jobname: str = "gaussian") -> Dict[str, Path]:
+        """
+        Mock Hirshfeld output collection - generate fake .json files.
+
+        Args:
+            output_dir: Output directory for Hirshfeld JSON files
+            jobname: Job name for file naming
+
+        Returns:
+            Dictionary mapping QC keys to fake Hirsheld JSON file paths
+        """
+        from typing import Dict
+
+        hirshfeld_files = {}
+        for qc_key in ["charges", "dipole_moments", "populations"]:
+            output_file = output_dir / f"{jobname}_hirshfeld_{qc_key}.json"
+            fake_content = f"# Fake Hirshfeld {qc_key.upper()}\n"
+            hirshfeld_files[qc_key] = output_file
+
+        fake_content += f"# Generated at: {datetime.now().isoformat()}\n"
+        output_file.write_text(fake_content)
+            logger.debug(f"FakeBackend: Created fake Hirshfeld {qc_key} file: {output_file}")
+
+        logger.info(f"FakeBackend: Collected {len(hirshfeld_files)} Hirshfeld output files")
+        return hirshfeld_files
+
+
+class FakeBackend:
+    """
+    M4-D-1: Mock QC backend for testing without executing real Gaussian/ORCA.
+
+    Simulates QC task execution by writing fake output files to disk.
+    Used for end-to-end testing of pack_mechanism_assets() and qc artifact collection.
+    """
+    def __init__(self, work_dir: Path):
+        self.work_dir = work_dir
+
+    def _write_file(self, filename: str, content: str) -> Path:
+        """Write fake output file for QC simulation."""
+        output_path = self.work_dir / filename
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(content)
+        logger.info(f"FakeBackend: Wrote fake file: {output_path}")
+        return output_path
+
+    def run_gaussian(self, input_file: Path, method: str = "SP", qc_key: str = "freq") -> Dict[str, Any]:
+        """
+        Mock Gaussian execution - write fake output files without running real Gaussian.
+
+        Args:
+            input_file: Path to input structure file (e.g., TS geometry)
+            method: QC method (SP = single point, freq = frequency)
+            qc_key: TaskKind enum key (e.g., TaskKind.NMR, TaskKind.HIRSHFELD)
+
+        Returns:
+            Dictionary with keys matching TaskKind enum
+            - output_log: Path to fake .log file
+            - success: Boolean indicating success
+        """
+        output_log = self.work_dir / f"{input_file.stem}_{method}_output.log"
+        fake_content = f"# Fake Gaussian {method} output\n"
+        fake_content += f"# QC Key: {qc_key}\n"
+        fake_content += f"# Input file: {input_file.name}\n"
+        fake_content += f"# Output files generated at: {datetime.now().isoformat()}\n"
+
+        if qc_key == "NMR":
+            fake_content += "NMR Shieldings: 1.0 2.0 3.0 4.0\n"
+            fake_content += "Isotropic J: 157.2 157.2 157.2 157.2\n"
+
+        output_path = self._write_file(output_log, fake_content)
+        logger.info(f"FakeBackend: Mock {method} execution completed for {qc_key}")
+        return {
+            "output_log": output_log,
+            "success": True,
+            "input_file": str(input_file),
+            "method": method,
+            "qc_key": qc_key
+        }
+
+    def collect_nmr_outputs(self, output_dir: Path, jobname: str = "gaussian") -> List[Path]:
+        """
+        Mock NMR output collection - generate fake .nmrdat files.
+
+        Args:
+            output_dir: Output directory for NMR files
+            jobname: Job name for file naming
+
+        Returns:
+            List of paths to fake NMR output files
+        """
+        from typing import List, Dict
+
+        nmr_files = []
+        for ext in [".nmrdat", ".shieldings.dat"]:
+            output_file = output_dir / f"{jobname}_gauge.{ext}"
+            nmr_files.append(output_file)
+            fake_content = f"Fake NMR Shieldings for {jobname}\n"
+            output_file.write_text(fake_content)
+            logger.debug(f"FakeBackend: Created fake NMR file: {output_file}")
+
+        logger.info(f"FakeBackend: Collected {len(nmr_files)} NMR files")
+        return nmr_files
+
+
+def _select_task_resources(task_kind: TaskKind, config: Dict[str, Any], fallback_to_global: bool = True) -> Dict[str, Any]:
+    """
+    Select resources and theory parameters for a specific task kind.
+
+    Args:
+        task_kind: Type of QC task (TaskKind enum value)
+        config: Full configuration dictionary
+        fallback_to_global: If True, fall back to global resources when task-specific ones missing
+
+    Returns:
+        Dict with keys: 'mem', 'nproc', 'method', 'basis'
+    """
+    task_resources = config.get('task_resources', {}).get(task_kind.value, {})
+    global_resources = config.get('resources', {})
+
+    mem = task_resources.get('mem') or global_resources.get('mem', '32GB')
+    nproc = task_resources.get('nproc') or global_resources.get('nproc', 16)
+
+    theory_key = 'optimization'
+    if task_kind in (TaskKind.SINGLE_POINT,):
+        theory_key = 'single_point'
+
+    method = task_resources.get('method') or config.get('theory', {}).get(theory_key, {}).get('method', 'B3LYP')
+    basis = task_resources.get('basis') or config.get('theory', {}).get(theory_key, {}).get('basis', 'def2-SVP')
+
+    return {'mem': mem, 'nproc': nproc, 'method': method, 'basis': basis}
+
+
+def harvest_nbo_files(output_dir: Path, jobname: str, sub_dir: str = "nbo_analysis") -> Dict[str, Path]:
+    """
+    Collect NBO output files using whitelist-based pattern matching.
+    
+    This function robustly searches for NBO files using a whitelist of
+    standard extensions. It uses defensive globbing to avoid picking up
+    old files from previous runs.
+    
+    Args:
+        output_dir: Base output directory
+        jobname: Job name used to search for NBO files
+        sub_dir: Subdirectory within output_dir to search (default: "nbo_analysis")
+    
+    Returns:
+        Dict mapping file extensions to absolute paths (e.g., {'.47': Path(...), '.nbo': Path(...)})
+        Only returns files whose extensions are in NBO_WHITELIST.
+    
+    Note:
+        - Uses whitelist approach: only .47, .nbo, .3, .31, .41 files are collected
+        - Defensive: won't pick up old files that don't match whitelist
+        - All returned paths are absolute for consistency
+    """
+    output_dir = Path(output_dir).resolve()
+    search_dir = output_dir / sub_dir
+    
+    if not search_dir.exists():
+        logger.warning(f"NBO directory not found: {search_dir}")
+        return {}
+    
+    nbo_files = {}
+    
+    for ext in NBO_WHITELIST:
+        glob_pattern = f"{jobname}{ext}"
+        matching_files = list(search_dir.glob(glob_pattern))
+
+        if matching_files:
+            if len(matching_files) > 1:
+                matching_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+                logger.warning(
+                    f"Multiple files found for {jobname}{ext}: {[f.name for f in matching_files]}. "
+                    f"Using most recent: {matching_files[0].name}"
+                )
+
+            nbo_files[ext] = matching_files[0].resolve()
+            logger.debug(f"Found NBO file: {nbo_files[ext]}")
+    
+    if not nbo_files:
+        logger.warning(f"No NBO files found in {search_dir} with whitelist {NBO_WHITELIST}")
+    
+    return nbo_files
+
+
+def try_formchk(chk_path: Path) -> Optional[Path]:
+    """
+    Attempt to convert Gaussian checkpoint (.chk) to formatted checkpoint (.fchk).
+
+    This function is called after every Gaussian job completion to enable
+    downstream feature extraction (Step 4) to read wavefunction data.
+
+    Args:
+        chk_path: Path to Gaussian .chk file
+
+    Returns:
+        Path to .fchk file if conversion succeeds, None otherwise
+
+    Note:
+        - formchk must be available in PATH
+        - Failure does NOT raise exception (graceful degradation)
+        - Warning is logged on failure to enable tracking
+    """
+    if not chk_path.exists():
+        logger.warning(f"Checkpoint file not found, skipping formchk: {chk_path}")
+        return None
+
+    fchk_path = chk_path.with_suffix(".fchk")
+
+    try:
+        result = subprocess.run(
+            ["formchk", str(chk_path), str(fchk_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=300  # 5 minute timeout for conversion
+        )
+
+        if result.returncode != 0:
+            logger.warning(
+                f"formchk failed for {chk_path.name}: "
+                f"returncode={result.returncode}, stderr={result.stderr[:200]}"
+            )
+            return None
+
+        if not fchk_path.exists():
+            logger.warning(f"formchk completed but .fchk not found: {fchk_path}")
+            return None
+
+        logger.info(f"Successfully generated formatted checkpoint: {fchk_path}")
+        return fchk_path
+
+    except subprocess.TimeoutExpired:
+        logger.warning(f"formchk timed out for {chk_path.name}")
+        return None
+    except Exception as e:
+        logger.warning(f"formchk raised exception for {chk_path.name}: {e}")
+        return None
+
+
+class GaussianRouteBuilder:
+    @staticmethod
+    def build(config: dict) -> str:
+        """
+        Constructs the Gaussian Route string from the full config dictionary.
+        Uses KeywordTranslator to handle dialects.
+        """
+        theory = config.get('theory', {}).get('optimization', {})
+        opt_ctrl = config.get('optimization_control', {})
+
+        # 2. Method & Basis (Core)
+        method = theory.get('method', 'B3LYP')
+        basis_raw = theory.get('basis', 'def2-SVP')
+        if KeywordTranslator:
+            basis = KeywordTranslator.to_gaussian_basis(basis_raw)
+        else:
+            basis = basis_raw
+
+        # 3. Dispersion
+        disp_raw = theory.get('dispersion')
+        if KeywordTranslator:
+            dispersion = KeywordTranslator.to_gaussian_dispersion(disp_raw)
+        else:
+            dispersion = ""
+        if dispersion:
+            logger.debug(f"Applied Dispersion: {dispersion}")
+
+        solv_raw = theory.get('solvent')
+        if KeywordTranslator:
+            solvent = KeywordTranslator.to_gaussian_solvent(solv_raw)
+        else:
+            solvent = ""
+        if solvent:
+            logger.debug(f"Applied Solvent: {solvent}")
+
+        # 5. Opt & Hessian
+        hess_cfg = opt_ctrl.get('hessian', {})
+        initial_hess = hess_cfg.get('initial')
+
+        opt_cmd = "Opt"
+        if initial_hess:
+            opt_cmd = f"Opt=({initial_hess})"
+
+        # 6. Assemble Route
+        # Order: #p Method/Basis Dispersion Solvent Opt Freq
+        parts = [f"#p {method}/{basis}"]
+
+        if dispersion: parts.append(dispersion)
+        if solvent: parts.append(solvent)
+
+        parts.append(opt_cmd)
+        parts.append("Freq")
+
+        final_route = " ".join(parts)
+        logger.info(f"Built Gaussian Route: {final_route}")
+        return final_route
+
+
+class GaussianError(Exception):
+    """Custom exception for Gaussian execution errors."""
+    pass
+
+
+class InputFactory:
+    """
+    Creates sanitized Gaussian input files.
+
+    Enforces scientific policies and ensures syntax compliance.
+    """
+
+    @staticmethod
+    def create(route, atoms, charge, mult, mem, nproc):
+        """
+        Generates a Gaussian input file string with strict formatting.
+        """
+        import re
+        import unicodedata
+
+        clean_route = unicodedata.normalize('NFKD', route).encode('ascii', 'replace').decode('ascii')
+        clean_route = clean_route.replace('?', ' ').replace('\r\n', '\n').replace('\r', '\n')
+
+        if clean_route.lstrip().startswith('#p '):
+            clean_route = clean_route.lstrip()[3:].strip()
+
+        clean_route = re.sub(r',\s*,', ',', clean_route)
+        clean_route = re.sub(r'\(\s*\)', '', clean_route)
+        clean_route = re.sub(r'Opt=\s*(?=\s|$)', 'Opt ', clean_route)
+        clean_route = re.sub(r'\s+', ' ', clean_route).strip()
+
+        # 3. Format Coordinates (Fixed Width)
+        coords_lines = []
+        for atom in atoms:
+            line = f"{atom['symbol']:<2} {atom['x']:14.8f} {atom['y']:14.8f} {atom['z']:14.8f}"
+            coords_lines.append(line)
+        coords_str = "\n".join(coords_lines)
+
+        # 4. Template Assembly
+        # MUST end with exactly 2 blank lines
+        template = (
+            f"%chk=input.chk\n"
+            f"%mem={mem}\n"
+            f"%nprocshared={nproc}\n"
+            f"#p {clean_route}\n"
+            f"\n"
+            f"RPH_Auto_Job\n"
+            f"\n"
+            f"{charge} {mult}\n"
+            f"{coords_str}\n"
+            f"\n\n"
+        )
+
+        return template
+
+
+class LogParser:
+    """
+    Parses Gaussian log files to extract critical information.
+
+    Focuses on robust extraction of final geometry.
+    """
+
+    @staticmethod
+    def extract_final_geometry(log_content: str) -> List[Dict[str, float]]:
+        """
+        Extract final geometry from Gaussian log file.
+
+        Locates the LAST "Standard orientation" or "Input orientation" block
+        and returns atomic coordinates.
+
+        Args:
+            log_content: Full content of Gaussian log file
+
+        Returns:
+            List of dicts with keys 'symbol', 'x', 'y', 'z'
+            Returns empty list if parsing fails
+        """
+        # Pattern for orientation blocks
+        # Matches both "Standard orientation" and "Input orientation"
+        orientation_pattern = re.compile(
+            r'(?:Standard orientation|Input orientation):.*?\n'
+            r'[-]+\s*\n'
+            r'\s+\d+\s+\d+\s+\d+\s+\d+\s+[\d\.\-]+\s+[\d\.\-]+\s+[\d\.\-]+\s+.*?\n'  # header
+            r'(.*?)'  # capture atoms
+            r'[-]+\s*\n',
+            re.DOTALL
+        )
+
+        blocks = list(orientation_pattern.finditer(log_content))
+
+        if not blocks:
+            logger.warning("No orientation blocks found in log file")
+            return []
+
+        # Get the LAST block
+        last_block = blocks[-1]
+
+        # Parse atomic coordinates
+        # Format: atomic_number, atomic_type, X, Y, Z, ...
+        atom_pattern = re.compile(
+            r'\s+\d+\s+\d+\s+\d+\s+\d+\s+([\d\.\-]+)\s+([\d\.\-]+)\s+([\d\.\-]+)\s+.*?\n'
+        )
+
+        atoms = []
+        for match in atom_pattern.finditer(last_block.group(1)):
+            x = float(match.group(1))
+            y = float(match.group(2))
+            z = float(match.group(3))
+
+            # Convert atomic number to symbol (using periodic table)
+            # For now, use atomic number as symbol placeholder
+            # In a full implementation, you'd have a mapping
+            atomic_num_line = re.search(r'\s+(\d+)\s+\d+', match.group(0))
+            if atomic_num_line:
+                atomic_num = int(atomic_num_line.group(1))
+                symbol = LogParser._atomic_num_to_symbol(atomic_num)
+            else:
+                symbol = 'X'
+
+            atoms.append({
+                'symbol': symbol,
+                'x': x,
+                'y': y,
+                'z': z
+            })
+
+        logger.debug(f"Extracted {len(atoms)} atoms from final orientation")
+        return atoms
+
+    @staticmethod
+    def _atomic_num_to_symbol(atomic_num: int) -> str:
+        """
+        Convert atomic number to element symbol.
+
+        Args:
+            atomic_num: Atomic number (1-118)
+
+        Returns:
+            Element symbol string
+        """
+        periodic_table = [
+            'X', 'H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne',
+            'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl', 'Ar', 'K', 'Ca',
+            'Sc', 'Ti', 'V', 'Cr', 'Mn', 'Fe', 'Co', 'Ni', 'Cu', 'Zn',
+            'Ga', 'Ge', 'As', 'Se', 'Br', 'Kr', 'Rb', 'Sr', 'Y', 'Zr',
+            'Nb', 'Mo', 'Tc', 'Ru', 'Rh', 'Pd', 'Ag', 'Cd', 'In', 'Sn',
+            'Sb', 'Te', 'I', 'Xe', 'Cs', 'Ba', 'La', 'Ce', 'Pr', 'Nd',
+            'Pm', 'Sm', 'Eu', 'Gd', 'Tb', 'Dy', 'Ho', 'Er', 'Tm', 'Yb',
+            'Lu', 'Hf', 'Ta', 'W', 'Re', 'Os', 'Ir', 'Pt', 'Au', 'Hg',
+            'Tl', 'Pb', 'Bi', 'Po', 'At', 'Rn', 'Fr', 'Ra', 'Ac', 'Th',
+            'Pa', 'U', 'Np', 'Pu', 'Am', 'Cm', 'Bk', 'Cf', 'Es', 'Fm',
+            'Md', 'No', 'Lr', 'Rf', 'Db', 'Sg', 'Bh', 'Hs', 'Mt', 'Ds',
+            'Rg', 'Cn', 'Nh', 'Fl', 'Mc', 'Lv', 'Ts', 'Og'
+        ]
+
+        if 1 <= atomic_num < len(periodic_table):
+            return periodic_table[atomic_num]
+        else:
+            logger.warning(f"Unknown atomic number: {atomic_num}")
+            return 'X'
+
+
+class LinuxSandbox:
+    """
+    Context manager for safe Gaussian execution.
+
+    Features:
+    - Automatic cleanup of old sandboxes (Janitor)
+    - Disk space validation
+    - WSL path safety checks
+    - Dedicated scratch directory
+    """
+
+    def __init__(self, base_dir: str = "/tmp", min_free_gb: float = 100.0):
+        """
+        Initialize sandbox context manager.
+
+        Args:
+            base_dir: Base directory for sandbox creation
+            min_free_gb: Minimum required free disk space in GB
+
+        Raises:
+            RuntimeError: If base_dir is unsafe or insufficient disk space
+        """
+        self.base_dir = Path(base_dir)
+        self.min_free_gb = min_free_gb
+        self.sandbox_path: Optional[Path] = None
+
+    def __enter__(self) -> Path:
+        """
+        Enter sandbox context.
+
+        Performs safety checks, janitor cleanup, and creates sandbox.
+
+        Returns:
+            Path to sandbox directory
+
+        Raises:
+            RuntimeError: If safety checks fail
+        """
+        # Safety: Reject /mnt/ paths (WSL mount points cause I/O issues)
+        if str(self.base_dir).startswith('/mnt/'):
+            raise RuntimeError(
+                f"Safety violation: base_dir '{self.base_dir}' is a WSL mount point. "
+                "This causes I/O freezes on WSL. Use a native Linux path like /tmp."
+            )
+
+        # Safety: Check disk space
+        free_gb = self._get_free_disk_space_gb(self.base_dir)
+        if free_gb < self.min_free_gb:
+            raise RuntimeError(
+                f"Insufficient disk space: {free_gb:.2f} GB free, "
+                f"required {self.min_free_gb} GB minimum"
+            )
+
+        # Janitor: Clean old RPH_G16_* folders (older than 6 hours)
+        self._janitor_cleanup()
+
+        # Create sandbox
+        self.sandbox_path = Path(tempfile.mkdtemp(
+            prefix="RPH_G16_",
+            dir=str(self.base_dir)
+        ))
+
+        # CRITICAL: Create scratch directory
+        scratch_path = self.sandbox_path / "scratch"
+        scratch_path.mkdir(parents=True, exist_ok=True)
+
+        logger.info(f"Sandbox created: {self.sandbox_path}")
+        return self.sandbox_path
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """
+        Exit sandbox context and cleanup.
+
+        Args:
+            exc_type: Exception type if an error occurred
+            exc_val: Exception value if an error occurred
+            exc_tb: Exception traceback if an error occurred
+        """
+        if self.sandbox_path and self.sandbox_path.exists():
+            try:
+                shutil.rmtree(self.sandbox_path, ignore_errors=True)
+                logger.info(f"Sandbox cleaned: {self.sandbox_path}")
+            except Exception as e:
+                logger.warning(f"Failed to clean sandbox: {e}")
+
+        return False  # Don't suppress exceptions
+
+    @staticmethod
+    def _get_free_disk_space_gb(path: Path) -> float:
+        """
+        Get free disk space in GB.
+
+        Args:
+            path: Path to check disk space
+
+        Returns:
+            Free space in GB
+        """
+        stat = shutil.disk_usage(path)
+        return stat.free / (1024 ** 3)
+
+    def _janitor_cleanup(self):
+        """
+        Clean up old RPH_G16_* sandbox directories.
+
+        Deletes folders older than 6 hours.
+        """
+        import time
+
+        if not self.base_dir.exists():
+            return
+
+        max_age_hours = 6
+        current_time = time.time()
+        max_age_seconds = max_age_hours * 3600
+
+        cleaned_count = 0
+
+        for item in self.base_dir.iterdir():
+            if item.is_dir() and item.name.startswith('RPH_G16_'):
+                try:
+                    mtime = item.stat().st_mtime
+                    age_seconds = current_time - mtime
+
+                    if age_seconds > max_age_seconds:
+                        logger.info(f"Janitor: removing old sandbox {item.name} "
+                                  f"({age_seconds / 3600:.1f} hours old)")
+                        shutil.rmtree(item, ignore_errors=True)
+                        cleaned_count += 1
+                except Exception as e:
+                    logger.warning(f"Janitor: failed to clean {item.name}: {e}")
+
+        if cleaned_count > 0:
+            logger.info(f"Janitor: cleaned {cleaned_count} old sandbox(es)")
+
+
+class GaussianRunner:
+    """
+    Executes Gaussian calculations in a controlled environment.
+
+    Ensures proper environment setup, safe subprocess execution,
+    and comprehensive error handling.
+    """
+
+    @staticmethod
+    def run(sandbox_path: Path, input_content: str,
+            timeout: int = 86400) -> str:
+        """
+        Run Gaussian calculation.
+
+        Args:
+            sandbox_path: Path to sandbox directory (must exist)
+            input_content: Gaussian input file content
+            timeout: Timeout in seconds (default: 24 hours)
+
+        Returns:
+            Content of Gaussian log file
+
+        Raises:
+            GaussianError: If execution fails
+        """
+        # Write input file
+        input_file = sandbox_path / "input.gjf"
+        with open(input_file, 'w', newline='\n') as f:
+            f.write(input_content)
+
+        logger.info(f"Input file written: {input_file}")
+
+        # Prepare environment
+        env = os.environ.copy()
+
+        # Force override GAUSS_SCRDIR to sandbox scratch
+        env["GAUSS_SCRDIR"] = str(sandbox_path / "scratch")
+
+        logger.debug(f"GAUSS_SCRDIR set to: {env['GAUSS_SCRDIR']}")
+
+        # Execute Gaussian
+        try:
+            logger.info(f"Starting Gaussian execution in: {sandbox_path}")
+
+            result = subprocess.run(
+                ["g16", "input.gjf"],
+                cwd=str(sandbox_path),
+                env=env,
+                timeout=timeout,
+                capture_output=True,
+                text=True,
+                shell=False  # Explicitly disable shell=True
+            )
+
+            # Always read log file content
+            log_file = sandbox_path / "input.log"
+            if log_file.exists():
+                log_content = log_file.read_text()
+            else:
+                log_content = ""
+                logger.warning(f"Log file not found: {log_file}")
+
+            # Check return code
+            if result.returncode != 0:
+                error_msg = (
+                    f"Gaussian failed with return code {result.returncode}\n"
+                    f"STDOUT: {result.stdout}\n"
+                    f"STDERR: {result.stderr}\n"
+                    f"Log preview (first 500 chars): {log_content[:500]}"
+                )
+                logger.error(error_msg)
+                raise GaussianError(log_content)
+
+            logger.info("Gaussian execution completed successfully")
+            return log_content
+
+        except subprocess.TimeoutExpired:
+            error_msg = f"Gaussian execution timed out after {timeout} seconds"
+            logger.error(error_msg)
+
+            # Try to read log file even on timeout
+            log_file = sandbox_path / "input.log"
+            if log_file.exists():
+                log_content = log_file.read_text()
+                raise GaussianError(log_content)
+            else:
+                raise GaussianError(error_msg)
+
+
+class ResultHarvester:
+    """
+    Collects and validates Gaussian calculation results.
+
+    Ensures only essential files are copied, avoiding disk overflow.
+    """
+
+    @staticmethod
+    def harvest(sandbox_path: Path,
+                destination_dir: Path) -> Dict[str, Optional[Path]]:
+        """
+        Harvest Gaussian results from sandbox.
+
+        Args:
+            sandbox_path: Path to sandbox directory
+            destination_dir: Path to destination directory
+
+        Returns:
+            Dict with keys 'log', 'chk', and 'fchk' (Path objects or None)
+
+        Raises:
+            RuntimeError: If log file is missing
+        """
+        destination_dir = Path(destination_dir)
+        destination_dir.mkdir(parents=True, exist_ok=True)
+
+        results: Dict[str, Optional[Path]] = {}
+
+        # Copy log file (REQUIRED)
+        log_source = sandbox_path / "input.log"
+        if not log_source.exists():
+            raise RuntimeError(f"Log file missing: {log_source}")
+
+        log_dest = destination_dir / "final_output.log"
+        shutil.copy(log_source, log_dest)
+        results['log'] = log_dest
+        logger.info(f"Log file harvested: {log_dest}")
+
+        chk_source = sandbox_path / "input.chk"
+        if chk_source.exists():
+            chk_dest = destination_dir / "final_output.chk"
+            shutil.copy(chk_source, chk_dest)
+            results['chk'] = chk_dest
+            logger.info(f"Checkpoint file harvested: {chk_dest}")
+
+            fchk_dest = try_formchk(chk_dest)
+            results['fchk'] = fchk_dest
+        else:
+            logger.warning("Checkpoint file not found (this may be expected)")
+            results['chk'] = None
+            results['fchk'] = None
+
+        # Forbidden: Do NOT copy .rwf, .int, or scratch/
+        forbidden_patterns = ['*.rwf', '*.int', 'scratch']
+        for pattern in forbidden_patterns:
+            for item in sandbox_path.glob(pattern):
+                logger.debug(f"Skipped forbidden file/directory: {item}")
+
+        return results
+
+
+def run_gaussian_optimization(atoms, charge, mult, output_dir, config, route=None):
+    """
+    Main Entry Point.
+    Args:
+        config: Full configuration dictionary.
+        route: Optional override. If None, built via GaussianRouteBuilder.
+    """
+    # 1. Route Generation
+    if not route:
+        try:
+            route = GaussianRouteBuilder.build(config)
+        except Exception as e:
+            logger.error(f"Failed to build route from config: {e}")
+            raise RuntimeError("Route construction failed") from e
+
+    res = config.get('resources', {})
+    mem = res.get('mem', '48GB')
+    nproc = res.get('nproc', 16)
+    timeout = res.get('timeout', 86400)
+    min_disk = res.get('min_disk_free_gb', 20.0)
+
+    try:
+        gjf_content = InputFactory.create(route, atoms, charge, mult, mem, nproc)
+
+        with LinuxSandbox(min_free_gb=min_disk) as sandbox:
+            runner = GaussianRunner()
+            log_content = runner.run(sandbox, gjf_content, timeout=timeout)
+
+            results = ResultHarvester.harvest(sandbox, output_dir)
+            final_atoms = LogParser.extract_final_geometry(log_content)
+
+            return {
+                "success": True,
+                "final_geometry": final_atoms,
+                "log_path": results['log'],
+                "chk_path": results['chk']
+            }
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+toxic_chars = {' ', '[', ']', '(', ')', '{', '}'}
+
+
+def is_path_toxic(path: Path) -> bool:
+    path_str = str(path)
+    return any(char in path_str for char in toxic_chars)
+
+
+def run_in_sandbox(
+    cmd: List[str],
+    input_files: Dict[str, Path],
+    output_files: List[str],
+    output_dir: Path,
+    timeout: Optional[int] = None
+) -> subprocess.CompletedProcess:
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not is_path_toxic(output_dir):
+        for name, path in input_files.items():
+            shutil.copy(path, output_dir / name)
+        return subprocess.run(
+            cmd,
+            cwd=output_dir,
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+
+    sandbox_dir = Path(tempfile.mkdtemp(prefix="rph_sandbox_"))
+    try:
+        for name, path in input_files.items():
+            shutil.copy(path, sandbox_dir / name)
+        result = subprocess.run(
+            cmd,
+            cwd=sandbox_dir,
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+        for output_name in output_files:
+            output_path = sandbox_dir / output_name
+            if output_path.exists():
+                shutil.copy(output_path, output_dir / output_name)
+        return result
+    finally:
+        shutil.rmtree(sandbox_dir, ignore_errors=True)
+
+
+class XTBInterface:
+    def __init__(
+        self,
+        gfn_level: int = 2,
+        solvent: Optional[str] = None,
+        nproc: int = 1,
+        config: Optional[dict] = None
+    ):
+        self.gfn_level = gfn_level
+        self.solvent = solvent
+        self.nproc = nproc
+        self.config = config or {}
+
+    def optimize(
+        self,
+        xyz_file: Path,
+        output_dir: Path,
+        constraints: Optional[Dict[str, float]] = None,
+        charge: int = 0,
+        spin: int = 1
+    ) -> QCResult:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        config = dict(self.config)
+        config.setdefault('resources', {})
+        config['resources']['nproc'] = self.nproc
+
+        if is_path_toxic(output_dir):
+            sandbox_dir = Path(tempfile.mkdtemp(prefix="rph_xtb_"))
+            try:
+                runner = XTBRunner(config=config, work_dir=sandbox_dir)
+                result = runner.optimize(
+                    structure=xyz_file,
+                    constraints=constraints,
+                    solvent=self.solvent,
+                    charge=charge,
+                    uhf=max(spin - 1, 0)
+                )
+                if isinstance(result.coordinates, Path):
+                    dest_path = output_dir / result.coordinates.name
+                    shutil.copy(result.coordinates, dest_path)
+                    result.output_file = dest_path
+                    try:
+                        coords, _ = read_xyz(dest_path)
+                        result.coordinates = coords
+                    except Exception as exc:
+                        result.error_message = f"无法读取 XTB 坐标: {exc}"
+                        result.converged = False
+                        result.success = False
+                return result
+            finally:
+                shutil.rmtree(sandbox_dir, ignore_errors=True)
+
+        runner = XTBRunner(config=config, work_dir=output_dir)
+        result = runner.optimize(
+            structure=xyz_file,
+            constraints=constraints,
+            solvent=self.solvent,
+            charge=charge,
+            uhf=max(spin - 1, 0)
+        )
+        if isinstance(result.coordinates, Path):
+            result.output_file = result.coordinates
+            try:
+                coords, _ = read_xyz(result.output_file)
+                result.coordinates = coords
+            except Exception as exc:
+                result.error_message = f"无法读取 XTB 坐标: {exc}"
+                result.converged = False
+                result.success = False
+        return result
+
+
+class CRESTInterface:
+    def __init__(
+        self,
+        gfn_level: int = 2,
+        solvent: Optional[str] = None,
+        nproc: int = 1,
+        config: Optional[dict] = None
+    ):
+        self.gfn_level = gfn_level
+        self.solvent = solvent
+        self.nproc = nproc
+        self.config = config or {}
+
+        exe_config = resolve_executable_config(
+            self.config,
+            'crest',
+            env_vars=['CREST_PATH', 'CREST_BIN']
+        )
+        crest_path = exe_config.get('path')
+        if crest_path:
+            self.crest_cmd = str(crest_path)
+        else:
+            self.crest_cmd = None
+
+    def run_conformer_search(self, xyz_file: Path, output_dir: Path) -> Path:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        if not self.crest_cmd:
+            raise RuntimeError("未找到 CREST 可执行文件")
+
+        cmd = [self.crest_cmd, "input.xyz", f"-gfn{self.gfn_level}", "-T", str(self.nproc)]
+        if self.solvent:
+            cmd.extend(["-alpb", self.solvent])
+
+        if is_path_toxic(output_dir):
+            sandbox_dir = Path(tempfile.mkdtemp(prefix="rph_crest_"))
+            try:
+                shutil.copy(xyz_file, sandbox_dir / "input.xyz")
+                result = subprocess.run(
+                    cmd,
+                    cwd=sandbox_dir,
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(f"CREST 运行失败: {result.stderr}")
+                for name in ["crest_conformers.xyz", "crest_best.xyz"]:
+                    src = sandbox_dir / name
+                    if src.exists():
+                        shutil.copy(src, output_dir / name)
+                best_path = output_dir / "crest_best.xyz"
+                if best_path.exists():
+                    return best_path
+                ensemble_path = output_dir / "crest_conformers.xyz"
+                if ensemble_path.exists():
+                    return ensemble_path
+                fallback_path = output_dir / xyz_file.name
+                shutil.copy(xyz_file, fallback_path)
+                return fallback_path
+            finally:
+                shutil.rmtree(sandbox_dir, ignore_errors=True)
+
+        shutil.copy(xyz_file, output_dir / "input.xyz")
+        result = subprocess.run(
+            cmd,
+            cwd=output_dir,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"CREST 运行失败: {result.stderr}")
+
+        best_path = output_dir / "crest_best.xyz"
+        if best_path.exists():
+            return best_path
+        ensemble_path = output_dir / "crest_conformers.xyz"
+        if ensemble_path.exists():
+            return ensemble_path
+        fallback_path = output_dir / xyz_file.name
+        shutil.copy(xyz_file, fallback_path)
+        return fallback_path
+
+
+class GaussianInterface:
+    def __init__(
+        self,
+        charge: int = 0,
+        multiplicity: int = 1,
+        nprocshared: int = 16,
+        mem: str = "32GB",
+        config: Optional[dict] = None
+    ):
+        self.charge = charge
+        self.multiplicity = multiplicity
+        self.nprocshared = nprocshared
+        self.mem = mem
+        self.config = config or {}
+
+        exe_config = self.config.get('executables', {}).get('gaussian', {})
+        self.use_wrapper = exe_config.get('use_wrapper', True)
+        if self.use_wrapper:
+            wrapper_path = exe_config.get('wrapper_path', './scripts/run_g16_worker.sh')
+            wrapper_path = Path(wrapper_path)
+            if not wrapper_path.is_absolute():
+                wrapper_path = (Path.cwd() / wrapper_path).resolve()
+            self.gaussian_cmd = str(wrapper_path)
+        else:
+            resolved = resolve_executable_config(
+                self.config,
+                'gaussian',
+                env_vars=['GAUSS_PATH', 'GAUSSIAN_PATH']
+            )
+            self.gaussian_cmd = str(resolved.get('path') or 'g16')
+
+    def write_input_file(
+        self,
+        xyz_file: Path,
+        gjf_file: Path,
+        route: str,
+        title: str,
+        old_checkpoint: Optional[Path] = None
+    ) -> Path:
+        coords, symbols = read_xyz(xyz_file)
+        route_line = route.strip()
+        if route_line.startswith('#'):
+            route_line = route_line.lstrip('#').strip()
+        if route_line.lower().startswith('p '):
+            route_line = route_line[1:].strip()
+        if old_checkpoint and old_checkpoint.exists() and "Guess=Read" not in route_line:
+            route_line = f"{route_line} Guess=Read"
+        if "SCRF=" in route_line:
+            route_line = route_line.replace("SCRF=(Solvent=", "SCRF=(PCM,Solvent=")
+
+        chk_name = f"{gjf_file.stem}.chk"
+        lines = [
+            f"%chk={chk_name}\n",
+            f"%mem={self.mem}\n",
+            f"%nprocshared={self.nprocshared}\n"
+        ]
+        if old_checkpoint and old_checkpoint.exists():
+            lines.append(f"%oldchk={old_checkpoint.name}\n")
+        lines.append(f"#p {route_line}\n\n")
+        lines.append(f"{title}\n\n")
+        lines.append(f"{self.charge} {self.multiplicity}\n")
+        for symbol, coord in zip(symbols, coords):
+            lines.append(f"{symbol:<2} {coord[0]:14.8f} {coord[1]:14.8f} {coord[2]:14.8f}\n")
+        lines.append("\n")
+        gjf_file.write_text("".join(lines))
+        return gjf_file
+
+    def optimize(
+        self,
+        xyz_file: Path,
+        output_dir: Path,
+        route: str,
+        old_checkpoint: Optional[Path] = None,
+        timeout: Optional[int] = None
+    ) -> QCResult:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        gjf_file = output_dir / f"{xyz_file.stem}.gjf"
+        log_file = output_dir / f"{xyz_file.stem}.log"
+
+        # 本地化 oldchk：将外部 checkpoint 复制到当前工作目录
+        # 这解决了路径切换、空格路径等 Gaussian 的典型问题
+        local_old_chk = None
+        if old_checkpoint and Path(old_checkpoint).exists():
+            local_old_chk_path = output_dir / "previous.chk"
+            try:
+                shutil.copy2(old_checkpoint, local_old_chk_path)
+                # 关键：写入 gjf 时只使用文件名，确保 Gaussian 在当前目录下查找
+                local_old_chk = Path("previous.chk")
+            except Exception as e:
+                # 如果复制失败，尝试回退到绝对路径（虽然风险大）
+                import warnings
+                warnings.warn(f"无法本地化 checkpoint 文件 ({old_checkpoint} -> {local_old_chk_path}): {e}，尝试使用绝对路径")
+                local_old_chk = Path(old_checkpoint).absolute()
+
+        self.write_input_file(
+            xyz_file=xyz_file,
+            gjf_file=gjf_file,
+            route=route,
+            title=xyz_file.stem,
+            old_checkpoint=local_old_chk
+        )
+
+        cmd = [self.gaussian_cmd, gjf_file.name, log_file.name] if self.use_wrapper else [self.gaussian_cmd, gjf_file.name]
+        if is_path_toxic(output_dir):
+            result = run_in_sandbox(
+                cmd=cmd,
+                input_files={gjf_file.name: gjf_file},
+                output_files=[log_file.name, f"{gjf_file.stem}.chk"],
+                output_dir=output_dir,
+                timeout=timeout
+            )
+        else:
+            if self.use_wrapper:
+                result = subprocess.run(
+                    cmd,
+                    cwd=output_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout
+                )
+            else:
+                with open(log_file, 'w') as log_handle, open(gjf_file, 'r') as input_handle:
+                    result = subprocess.run(
+                        cmd,
+                        cwd=output_dir,
+                        stdin=input_handle,
+                        stdout=log_handle,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=timeout
+                    )
+        if result.returncode != 0 or not log_file.exists():
+            error_snippet = "Unknown error"
+            if log_file.exists():
+                try:
+                    with open(log_file, 'r', errors='replace') as f:
+                        lines = f.readlines()
+                        # 捕获典型的 Gaussian 错误标志
+                        important_lines = [l.strip() for l in lines[-50:] if "Error" in l or "termination" in l or "Cannot open" in l or "Lnk1e" in l]
+                        if important_lines:
+                            error_snippet = " | ".join(important_lines)
+                        else:
+                            error_snippet = "".join(lines[-10:])  # 兜底取最后 10 行
+                except Exception:
+                    error_snippet = f"无法读取日志文件: {log_file}"
+            elif result.stderr:
+                error_snippet = result.stderr.strip()
+            else:
+                error_snippet = f"Gaussian 退出码 {result.returncode}，未生成日志文件"
+
+            return QCResult(
+                success=False,
+                converged=False,
+                error_message=error_snippet
+            )
+
+        log_content = log_file.read_text()
+        converged = "Normal termination" in log_content
+        energy = None
+        try:
+            energy = read_energy_from_gaussian(log_file)
+        except Exception:
+            energy = None
+
+        atoms = LogParser.extract_final_geometry(log_content)
+        coords = np.array([[atom['x'], atom['y'], atom['z']] for atom in atoms]) if atoms else np.array([])
+        frequencies = self._parse_frequencies(log_content)
+
+        # Extract Gaussian output files for S4
+        chk_file = gjf_file.with_suffix(".chk")
+        fchk_file = try_formchk(chk_file) if chk_file.exists() else None
+
+        error_message = None
+        if not converged:
+            error_lines = [line.strip() for line in log_content.splitlines() if "Error termination" in line]
+            if error_lines:
+                error_message = error_lines[-1]
+            else:
+                opt_required = "Opt=TS requires force constants or ModRedundant"
+                if opt_required in log_content:
+                    error_message = opt_required
+                elif result.stderr:
+                    error_message = result.stderr.strip()
+                else:
+                    # 增强错误信息：捕获日志末尾的关键信息
+                    last_lines = log_content.splitlines()[-30:]
+                    error_lines_enhanced = [l.strip() for l in last_lines if any(kw in l for kw in ["Cannot open", "FileIO", "error", "Error", "fail", "Fail"])]
+                    if error_lines_enhanced:
+                        error_message = " | ".join(error_lines_enhanced[-3:])
+                    else:
+                        error_message = "Gaussian 未正常终止"
+
+        return QCResult(
+            success=converged,
+            energy=energy,
+            coordinates=coords,
+            converged=converged,
+            frequencies=frequencies,
+            output_file=log_file,
+            log_file=log_file,
+            chk_file=chk_file if chk_file.exists() else None,
+            fchk_file=fchk_file,
+            qm_output_file=log_file,
+            error_message=error_message
+        )
+
+    @staticmethod
+    def _parse_frequencies(log_content: str) -> Optional[np.ndarray]:
+        freqs: List[float] = []
+        for line in log_content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Frequencies --"):
+                parts = stripped.split()[2:]
+                for part in parts:
+                    try:
+                        freqs.append(float(part))
+                    except ValueError:
+                        continue
+        if not freqs:
+            return None
+        return np.array(freqs)
+
+
+class QCInterfaceFactory:
+    @staticmethod
+    def create_interface(engine_type: str, **kwargs):
+        engine = engine_type.lower()
+        if engine == 'gaussian':
+            return GaussianInterface(
+                charge=kwargs.get('charge', 0),
+                multiplicity=kwargs.get('multiplicity', 1),
+                nprocshared=kwargs.get('nprocshared', 16),
+                mem=kwargs.get('mem', '32GB'),
+                config=kwargs.get('config')
+            )
+        if engine == 'orca':
+            from rph_core.utils.orca_interface import ORCAInterface
+            return ORCAInterface(
+                method=kwargs.get('method', 'M062X'),
+                basis=kwargs.get('basis', 'def2-TZVPP'),
+                aux_basis=kwargs.get('aux_basis', 'def2/J'),
+                nprocs=kwargs.get('nprocshared', kwargs.get('nprocs', 16)),
+                maxcore=kwargs.get('maxcore'),
+                solvent=kwargs.get('solvent', 'acetone'),
+                config=kwargs.get('config')
+            )
+        if engine == 'xtb':
+            return XTBInterface(
+                gfn_level=kwargs.get('gfn_level', 2),
+                solvent=kwargs.get('solvent'),
+                nproc=kwargs.get('nproc', 1),
+                config=kwargs.get('config')
+            )
+        raise ValueError(f"Unsupported QC engine: {engine_type}")

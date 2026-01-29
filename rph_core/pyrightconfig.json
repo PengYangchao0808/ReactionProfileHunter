@@ -1,0 +1,16 @@
+{
+  "extraPaths": [
+    ".."
+  ],
+  "typeCheckingMode": "basic",
+  "diagnosticSeverityOverrides": {
+    "reportMissingImports": "none",
+    "reportMissingTypeStubs": "none",
+    "reportMissingSuperCall": "none",
+    "reportMissingTypeArgument": "none"
+  },
+  "reportMissingImports": "none",
+  "reportMissingTypeStubs": "none",
+  "reportMissingSuperCall": "none",
+  "reportMissingTypeArgument": "none"
+}

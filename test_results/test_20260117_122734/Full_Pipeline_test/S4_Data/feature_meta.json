@@ -1,0 +1,82 @@
+{
+  "meta": {
+    "schema_version": "4.2-tag",
+    "schema_signature": "fa1a448ee9270146f71eb7718a6bceec05cab794",
+    "feature_status": "ok",
+    "method": "WB97M-V/def2-TZVPP",
+    "solvent": "acetone",
+    "temperature_K": 298.15,
+    "enabled_plugins": [
+      "thermo",
+      "geometry",
+      "qc_checks"
+    ],
+    "policies": {
+      "job_run_policy": "disallow",
+      "nics_trigger_policy": "gen"
+    }
+  },
+  "trace": {
+    "inputs_fingerprint": {
+      "ts_xyz": {
+        "hash": "a50b18b1b5af26e6f09c21da4ea34c29aa746c93",
+        "size": 1346,
+        "mtime": 1768880536.7498448
+      },
+      "reactant_xyz": {
+        "hash": "37d4a31a1efe9783fd4be65726fd3e3a4b6cd32e",
+        "size": 1352,
+        "mtime": 1768880537.2821248
+      },
+      "ts_fchk": {
+        "hash": "da2f0210d12d265fdca63974e4396f90ad4089a6",
+        "size": 710144,
+        "mtime": 1768880599.6277287
+      },
+      "product_fchk": {
+        "hash": "dcfcee448da3f1931723fda25e36452c5f3abe6d",
+        "size": 3223045,
+        "mtime": 1768880536.6346898
+      },
+      "product_xyz": {
+        "hash": "b82a208b5b062d6501aee96d3980ab6b6d008cfe",
+        "size": 1354,
+        "mtime": 1768880536.6770804
+      },
+      "sp_report_summary": "7a4565100eddcaecdd01c606f57abcfb6c99d05e"
+    },
+    "plugins": {
+      "thermo": {
+        "status": "ok",
+        "runtime_ms": 0.026941299438476562,
+        "missing_fields": [],
+        "missing_paths": [],
+        "errors": [],
+        "warnings": [],
+        "cache_hit": false,
+        "job_specs": []
+      },
+      "geometry": {
+        "status": "ok",
+        "runtime_ms": 6.081819534301758,
+        "missing_fields": [],
+        "missing_paths": [],
+        "errors": [],
+        "warnings": [],
+        "cache_hit": false,
+        "job_specs": []
+      },
+      "qc_checks": {
+        "status": "ok",
+        "runtime_ms": 0.011444091796875,
+        "missing_fields": [],
+        "missing_paths": [],
+        "errors": [],
+        "warnings": [],
+        "cache_hit": false,
+        "job_specs": []
+      }
+    }
+  },
+  "warnings": []
+}

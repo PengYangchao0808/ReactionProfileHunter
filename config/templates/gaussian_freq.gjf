@@ -1,0 +1,8 @@
+%mem={{mem}}
+%nprocshared={{nproc}}
+#p {{method}}/{{basis}} {{route}}
+
+Gaussian input file created by ReactionProfileHunter: Frequency calculation
+
+{{charge}} {{mult}}
+{{coords_block}}

@@ -1,0 +1,256 @@
+Metadata-Version: 2.4
+Name: reaction-profile-hunter
+Version: 2.1.0
+Summary: 过渡态搜索与特征提取的串行工作流系统
+Home-page: https://github.com/your-repo/reaction-profile-hunter
+Author: QCcalc Team
+Author-email: your-email@example.com
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Science/Research
+Classifier: Topic :: Scientific/Engineering :: Chemistry
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.20.0
+Requires-Dist: scipy>=1.7.0
+Requires-Dist: pandas>=1.3.0
+Requires-Dist: rdkit>=2022.09.1
+Requires-Dist: pyyaml>=6.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0.0; extra == "dev"
+Requires-Dist: black>=22.0.0; extra == "dev"
+Requires-Dist: mypy>=0.950; extra == "dev"
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+# ReactionProfileHunter v2.1
+
+## 📖 项目简介
+ReactionProfileHunter v2.1 是用于自动化过渡态搜索与反应特征提取的流水线级工具，面向高通量量化化学与机理研究。核心设计原则为“产品优先（Product-First）”与“可复现的工程化流水线”：从产物出发逆向生成过渡态猜想，结合稳健的救援策略与物理严谨的特征模型，提升成功率与可用性。
+
+- 目标用户：计算化学家、反应机理研究员、化学机器学习工程师。
+- 主要能力：产物构象搜索 → 逆向扫描生成 TS_Guess + Reactant_Complex → 精准 TS 优化（Berny + QST2 救援）→ 双片段畸变/相互作用特征提取。
+
+---
+
+## 🏗️ 架构总览（Design Principles）
+
+- One Step, One Folder：每个逻辑步骤独立成模块与子目录，便于断点续传与批量并行。
+- 串行四步走（Serial 4-Step Pipeline）：S1 → S2 → S3 → S4，Orchestrator 负责调度与数据传递。
+
+**目录（物理）结构示例**
+
+- `rph_core/`
+  - `orchestrator.py`  (总指挥)
+  - `utils/` (日志、QC 接口、文件 I/O 等)
+  - `steps/`
+    - `step1_anchor/`  (ProductAnchor)
+    - `step2_retro/`   (RetroScanner)
+    - `step3_opt/`     (TSOptimizer: Berny + QST2 rescue + IRC)
+    - `step4_features/`(FeatureMiner: Dual-Fragment Distortion)
+
+
+```mermaid
+flowchart LR
+  A[S1: Product Anchor\n(构象搜索, 产物最优化)] --> B[S2: Retro Scanner\n(TS_Guess, Reactant_Complex)]
+  B --> C[S3: TS Optimizer\n(Berny -> QST2 Rescue, IRC 验证)]
+  C --> D[S4: Feature Miner\n(Dual-Fragment Distortion & Features)]
+  style A fill:#f9f,stroke:#333,stroke-width:1px
+  style B fill:#ff9,stroke:#333,stroke-width:1px
+  style C fill:#9ff,stroke:#333,stroke-width:1px
+  style D fill:#9f9,stroke:#333,stroke-width:1px
+```
+
+---
+
+## 🚀 快速开始（Quick Start）
+
+前提：Python 3.9+，已安装 xTB/CREST 与 Gaussian/ORCA 等后端程序。请先配置 `config/defaults.yaml` 中的计算资源与方法。
+
+单分子运行示例：
+
+```bash
+# 单分子（产物 SMILES）运行
+python bin/rph_run --smiles "C=C(C)C(=O)O" --output ./rph_output/job001
+
+# 增强日志
+python bin/rph_run --smiles "..." --log-level DEBUG --output ./rph_output/job_debug
+```
+
+批量处理（Batch）示例：
+
+```bash
+# 批量模式：输入 CSV，列名包含 product_smiles
+python bin/rph_run --batch products.csv --column product_smiles --output ./rph_output/batch_001
+```
+
+断点续传（Resume）示例：
+
+```bash
+# 如果上次运行生成了 checkpoint.json，可从中恢复
+python bin/rph_run --batch products.csv --column product_smiles --resume checkpoint.json --output ./rph_output/batch_resume
+```
+
+说明：`--batch` 启用并行/分批逻辑（由 `orchestrator.run_batch()` 或 `parallel_processor.py` 实现），`checkpoint.json` 为 JSON 格式的进度文件，记录每个 SMILES 的状态与已完成步骤。
+
+---
+
+## ✨ 详细流程与关键修正（Step-by-Step Details）
+
+以下是基于 `PROMOTE.md` 的 v2.1 规范，对每一步核心逻辑的详尽说明（必须阅读）。
+
+### S1 — Product Anchor (产物锚定)
+- 位置：`rph_core/steps/step1_anchor/`。
+- 职责：
+  - 将 `SMILES` → RDKit 3D embedding（ETKDGv3），进行初始几何生成。
+  - 调用 CREST 进行全面构象搜索，筛选全局最低构象（energy window 可配置）。
+  - 对最低构象运行 xTB 终端优化（必要时再提交 DFT 优化）。
+- 输出（写入 `S1_Product/`）：
+  - `product_min.xyz`（XTB/DFT 优化后的产物结构，作为后续步骤的“产品端点”）。
+
+
+### S2 — Retro Scanner (逆向扫描)
+- 位置：`rph_core/steps/step2_retro/`。
+- 核心目标：从产物反向生成过渡态猜想与底物复合物（两个必要输出）。
+- 核心逻辑与要求（严格）：
+  1. 使用 SMARTS/拓扑方法识别“形成键”位点（成环键等）。
+  2. 路径 A（TS_Guess）—— 将识别到的形成键逐步拉伸至 $\sim$2.2 Å（可配置），在受限优化下生成 `TS_Guess`（使用 GFN-xTB + 受约束优化）。
+  3. 路径 B（Reactant_Complex）—— 将关键键拉伸至断裂阈值 3.5 Å（`break_distance=3.5Å`），并在**无约束**下松弛优化，得到 `Reactant_Complex`（底物复合物）。
+- 为什么 `Reactant_Complex` 必须输出：
+  - `Reactant_Complex` 是 QST2 救援所需的反应物端点，也是双片段畸变能 (Dual-Fragment Distortion) 计算的参考结构。若缺失该输出，S3/S4 无法执行。
+- 输出（写入 `S2_Retro/`）：
+  - `ts_guess.xyz`（或 `ts_guess.log`）
+  - `reactant_complex.xyz`（用于 QST2 和畸变能计算）
+  - `scan_traj.xyz`（扫描轨迹）
+
+
+### S3 — TS Optimizer (TS 精准优化)
+- 位置：`rph_core/steps/step3_opt/`。
+- 关键策略（必须实现并在文档中声明）：
+  1. 首选策略：Berny TS 优化（Gaussian `Opt=(TS, CalcFC, NoEigenTest)`）。
+  2. 验证策略：对优化结果执行虚频检查，确认恰好一个虚频且振型与反应坐标一致。
+  3. 救援策略（必须）：当 Berny 优化失败（收敛失败、虚频不符合）时，**自动切换 QST2 救援**。
+     - QST2 的输入端点来自：`reactant_complex`（S2 输出）与 `product_min.xyz`（S1 输出）。
+     - 也就是说：QST2 使用 S1 的产物与 S2 的底物作为两端点以生成更鲁棒的 TS 优化路径。
+  4. 可选：在成功优化后可执行 IRC 验证（可配置）。
+- 输出（写入 `S3_TS/`）：
+  - `ts_final.xyz`（经验证的过渡态结构）
+  - Gaussian 日志/输出文件及 checkpoint（`.chk`）（用于后续复用）
+
+
+### S4 — Feature Miner (特征提取)
+- 位置：`rph_core/steps/step4_features/`。
+- 目标：从 S1/S2/S3 的计算结果中提取物理意义明确的描述符，供建模与分析使用。
+- 核心修正（必须体现）：
+  - 使用 **双片段模型（Dual-Fragment Model）** 来计算畸变能与相互作用能；片段划分以“形成键”为界。
+  - 推荐的数学关系（文档规范）：
+
+    - 先定义：
+      - $E_{frag1}^{TS}$：片段 1 在 TS 构型下的单点能。
+      - $E_{frag2}^{TS}$：片段 2 在 TS 构型下的单点能。
+      - $E_{frag1}^{relaxed}$、$E_{frag2}^{relaxed}$：片段在各自放松态下的单点能（通常来自 `reactant_complex` 或单独优化）。
+      - $E_{reactant}^{relaxed}$：底物复合物（A+B）在放松态的总能量。
+
+    - 畸变能（建议使用等价且可追溯的表示）：
+
+      $$E_{dist} = (E_{frag1}^{TS} - E_{frag1}^{relaxed}) + (E_{frag2}^{TS} - E_{frag2}^{relaxed})$$
+
+      或按文档要求的替代表示：
+
+      $$E_{dist} = E_{frag1}^{TS} + E_{frag2}^{TS} - E_{reactant}^{relaxed}$$
+
+    - 相互作用能：
+
+      $$E_{int} = E_{TS} - (E_{frag1}^{TS} + E_{frag2}^{TS})$$
+
+  - 实现要点（工程建议）：
+    1. 提供 `extract_fragments(ts_structure, forming_bonds)` 算法：
+       - 根据 `forming_bonds` 的原子索引，把 TS 切分为两组原子（Fragment A、Fragment B）。
+       - 处理边界情况：环化/桥环反应需按拓扑阈值断开形成键；若片段间存在共享原子，使用SMARTS规则或手动映射替代。
+    2. 对每个片段分别：在 TS 构型下做 Single-Point 计算（使用与 TS 相同的基组/方法），并令其电荷/自旋与原体系一致或按片段实际分配修正。
+    3. 为了避免基组重叠误差（BSSE），建议在必要时执行 counterpoise 校正或使用相同基组与大基组单点做对比。
+    4. 处理多重度（multiplicity）：若片段分割导致不整数电子或变更自旋，请在文档中提示用户如何提供显式的 `fragment_multiplicities`。
+
+- 输出（写入 `S4_Data/`）：
+  - `features.csv`（或 JSON）：包含 `dG_activation`, `dG_reaction`, `E_distortion_sub`（片段 A）、`E_distortion_rea`（片段 B）、`E_interaction`、几何与电子特征等。
+
+---
+
+## ⚙️ 输入 / 输出（I/O）
+
+输入（单次/批量）：
+- 单分子：`--smiles "..."`
+- 批量：CSV（例如 `products.csv`），指定列名称 `--column product_smiles`。
+
+工作区目录结构（输出示例）
+
+```
+rph_output/job_xxx/
+├── S1_Product/
+│   └── product_min.xyz, product_min.log
+├── S2_Retro/
+│   ├── ts_guess.xyz
+│   ├── reactant_complex.xyz
+│   └── scan_traj.xyz
+├── S3_TS/
+│   ├── ts_final.xyz
+│   ├── berny/ (Berny inputs/outputs)
+│   └── qst2/  (QST2 inputs/outputs when救援触发)
+├── S4_Data/
+│   └── features.csv
+├── checkpoint.json
+└── rph.log
+```
+
+- `checkpoint.json`：批量模式下用于记录每条记录的状态（pending/running/completed/failed），并保存关键路径与已完成步骤的信息，以便 `--resume` 恢复。
+
+---
+
+## 🧩 工程细节提示（Implementation Notes）
+
+- Checkpoint / Wavefunction 复用：
+  - 当可能时，应在 S3 中对 Gaussian 提供旧的 `.chk` 文件（`%oldchk` + `Guess=Read`），以加速 SCF 收敛并减少计算资源浪费。
+  - `rph_core/utils/qc_interface.py` 提供生成带 `%oldchk` 的输入模板，Orchestrator/TSOptimizer 需将 S1/S2 的 `.chk` 传递给 S3 优化调用。
+
+- 批量并行：
+  - `orchestrator` 提供 `run_batch()` 接口，或使用 `parallel_processor.py` 将批量任务划分为子任务并发提交（建议使用进程池或作业调度器）。
+
+- 日志与可追溯性：
+  - 每一步（S1~S4）应在其目录中保留原始输入、生成的 Gaussian/xtb 日志、关键输出以及 `step.state` 简单元数据，以便审计和重现。
+
+---
+
+## 🧪 验证与测试
+
+- 建议的测试项：
+  - 单分子端到端（SMILES→features.csv）验收测试。
+  - Berny 失败后触发 QST2 的救援测试（使用已知会让 Berny 失败的猜想结构）。
+  - Dual-Fragment 畸变能与参考手工计算比对（单点/CP 校正）。
+  - 批量运行的 checkpoint 恢复测试。
+
+---
+
+## 📚 参考文档
+- 详细架构规范：`PROMOTE.md`
+- 配置样例：`config/defaults.yaml`
+- 测试计划：`TEST_PLAN.md`
+
+---
+
+如果您希望，我可以：
+- 将 `README.md` 中的 TODO（例如 `extract_fragments()` 的伪代码）直接实现为 `rph_core/steps/step4_features/fragment_utils.py` 的草稿实现；
+- 或者为 `orchestrator` 添加 `run_batch()` 与 `checkpoint.json` 的最小实现并提交 PR。
+
+要我先做哪一项？
