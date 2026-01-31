@@ -60,16 +60,16 @@ class AnchorPhase(LoggerMixin):
         }
     """
 
-    def __init__(self, config: dict, base_work_dir: Path):
+    def __init__(self, config: Dict[str, Any], base_work_dir: Optional[Path] = None):
         """
         初始化 AnchorPhase - v3.0
 
         Args:
             config: 配置字典
-            base_work_dir: 基础工作目录（例如 S1_Product/）
+            base_work_dir: 基础工作目录（例如 S1_ConfGeneration/）
         """
         self.config = config
-        self.base_work_dir = Path(base_work_dir)
+        self.base_work_dir = Path(base_work_dir) if base_work_dir else Path.cwd()
         self.base_work_dir.mkdir(parents=True, exist_ok=True)
 
         # Initialize SmallMoleculeCache
@@ -86,23 +86,29 @@ class AnchorPhase(LoggerMixin):
 
         # 初始化 ConformerEngine（但不在 run 方法中创建实例）
         # ConformerEngine 将在内部创建分子自治目录结构
-        # 例如：S1_Product/[Molecule_Name]/crest 和 .../dft
+        # 例如：S1_ConfGeneration/[Molecule_Name]/crest 和 .../dft
 
         self.logger.info("AnchorPhase v3.0 初始化完成（分子自治架构）")
 
     def run(
         self,
-        molecules: Dict[str, str]
+        molecules: Dict[str, str],
+        base_work_dir: Optional[Path] = None
     ) -> AnchorPhaseResult:
         """
         执行统一锚定流程（新结构）
 
         Args:
             molecules: 分子字典 {名称: SMILES}
+            base_work_dir: 可选，覆盖初始化的基础工作目录
 
         Returns:
             AnchorPhaseResult 对象
         """
+        if base_work_dir:
+            self.base_work_dir = Path(base_work_dir)
+            self.base_work_dir.mkdir(parents=True, exist_ok=True)
+
         self.logger.info("=" * 60)
         self.logger.info("Anchor Phase: 统一锚定底物池和产物（v3.0）")
         self.logger.info("=" * 60)
@@ -114,6 +120,9 @@ class AnchorPhase(LoggerMixin):
         for name, smiles in molecules.items():
             self.logger.info(f"\n>>> 锚定 {name}...")
             self.logger.info(f"    SMILES: {smiles}")
+
+            best_sp_out: Optional[Path] = None
+            sp_energy: Optional[float] = None
 
             try:
                 is_small = is_small_molecule(smiles)
@@ -182,16 +191,16 @@ class AnchorPhase(LoggerMixin):
                 chk_file = None
                 fchk_file = None
 
-                if best_sp_out.suffix == ".log":
+                if best_sp_out and best_sp_out.suffix == ".log":
                     log_file = best_sp_out
-                elif best_sp_out.suffix == ".out":
-                    log_file = None
+                elif best_sp_out and best_sp_out.suffix == ".out":
+                    log_file = best_sp_out
                 else:
                     potential_logs = list(mol_dir.glob("*.log")) + list(mol_dir.glob("*.out"))
                     if potential_logs:
                         log_file = potential_logs[0]
 
-                if best_sp_out.stem:
+                if best_sp_out and best_sp_out.stem:
                     potential_chk = (
                         list(mol_dir.glob(f"{best_sp_out.stem}.chk"))
                         + list(mol_dir.glob("*.chk"))

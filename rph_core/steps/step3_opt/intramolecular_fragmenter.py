@@ -9,7 +9,7 @@ Date: 2026-01-27
 """
 
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 import logging
 
 import numpy as np
@@ -22,6 +22,7 @@ from rph_core.utils.molecular_graph import (
 )
 from rph_core.utils.geometry_tools import GeometryUtils
 from rph_core.utils.fragment_manipulation import h_cap_fragment
+from rph_core.utils.semantic_slicer import semantic_slice, RDKIT_AVAILABLE
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +44,16 @@ class FragmenterResult:
     fragB_symbols_R: List[str]
     fragA_symbols_TS: List[str]
     fragB_symbols_TS: List[str]
-    status: str
+    fragA_coords_capped: Optional[np.ndarray] = None
+    fragB_coords_capped: Optional[np.ndarray] = None
+    fragA_symbols_capped: Optional[List[str]] = None
+    fragB_symbols_capped: Optional[List[str]] = None
+    status: str = "failed"
     reason: str = ""
+    fragA_charge: Optional[int] = None
+    fragA_mult: Optional[int] = None
+    fragB_charge: Optional[int] = None
+    fragB_mult: Optional[int] = None
 
 
 class IntramolecularFragmenter(LoggerMixin):
@@ -69,7 +78,7 @@ class IntramolecularFragmenter(LoggerMixin):
         ts_coords: np.ndarray,
         ts_symbols: List[str],
         forming_bonds: Tuple[Tuple[int, int], Tuple[int, int]],
-        config: dict = None
+        config: Optional[Dict[str, Any]] = None
     ) -> FragmenterResult:
         """
         Execute tether-cut fragmentation algorithm (7 steps).
@@ -87,6 +96,66 @@ class IntramolecularFragmenter(LoggerMixin):
         """
         if config is None:
             config = {}
+
+        charge_mult = config.get("charge_multiplicity", None)
+        if charge_mult is None:
+            return FragmenterResult(
+                fragA_indices=[], fragB_indices=[],
+                cut_bond_indices=(0, 0),
+                dipole_end_indices=(0, 0),
+                alkene_end_indices=(0, 0),
+                dipole_core_indices=[],
+                fragA_coords_R=np.array([]), fragB_coords_R=np.array([]),
+                fragA_coords_TS=np.array([]), fragB_coords_TS=np.array([]),
+                fragA_symbols_R=[], fragB_symbols_R=[],
+                fragA_symbols_TS=[], fragB_symbols_TS=[],
+                status="failed",
+                reason="missing_charge_multiplicity"
+            )
+
+        try:
+            fragA_charge = int(charge_mult["fragA"]["charge"])
+            fragA_mult = int(charge_mult["fragA"]["multiplicity"])
+            fragB_charge = int(charge_mult["fragB"]["charge"])
+            fragB_mult = int(charge_mult["fragB"]["multiplicity"])
+        except Exception:
+            return FragmenterResult(
+                fragA_indices=[], fragB_indices=[],
+                cut_bond_indices=(0, 0),
+                dipole_end_indices=(0, 0),
+                alkene_end_indices=(0, 0),
+                dipole_core_indices=[],
+                fragA_coords_R=np.array([]), fragB_coords_R=np.array([]),
+                fragA_coords_TS=np.array([]), fragB_coords_TS=np.array([]),
+                fragA_symbols_R=[], fragB_symbols_R=[],
+                fragA_symbols_TS=[], fragB_symbols_TS=[],
+                status="failed",
+                reason="invalid_charge_multiplicity"
+            )
+
+        use_semantic_slicer = config.get('use_semantic_slicer', True)
+        semantic_cut_bond = None
+        
+        if use_semantic_slicer and RDKIT_AVAILABLE:
+            self.logger.debug("ASM 2.0: Attempting SemanticSlicer for cut bond detection")
+            slice_result = semantic_slice(
+                atoms=list(reactant_symbols),
+                coords=reactant_coords,
+                forming_bonds=forming_bonds,
+                verbose=config.get('verbose', False)
+            )
+            if slice_result.success and slice_result.cut_bond:
+                semantic_cut_bond = slice_result.cut_bond
+                self.logger.info(
+                    f"ASM 2.0: SemanticSlicer succeeded, cut_bond={semantic_cut_bond}"
+                )
+            else:
+                self.logger.warning(
+                    f"ASM 2.0: SemanticSlicer failed ({slice_result.reason}), "
+                    "falling back to geometric algorithm"
+                )
+        elif use_semantic_slicer and not RDKIT_AVAILABLE:
+            self.logger.warning("ASM 2.0: RDKit not available, using geometric algorithm")
 
         graph = self._build_graph(
             reactant_coords, reactant_symbols,
@@ -108,6 +177,10 @@ class IntramolecularFragmenter(LoggerMixin):
                 fragA_coords_TS=np.array([]), fragB_coords_TS=np.array([]),
                 fragA_symbols_R=[], fragB_symbols_R=[],
                 fragA_symbols_TS=[], fragB_symbols_TS=[],
+                fragA_charge=fragA_charge,
+                fragA_mult=fragA_mult,
+                fragB_charge=fragB_charge,
+                fragB_mult=fragB_mult,
                 status="failed",
                 reason="failed_to_classify_reaction_ends"
             )
@@ -124,13 +197,21 @@ class IntramolecularFragmenter(LoggerMixin):
                 fragA_coords_TS=np.array([]), fragB_coords_TS=np.array([]),
                 fragA_symbols_R=[], fragB_symbols_R=[],
                 fragA_symbols_TS=[], fragB_symbols_TS=[],
+                fragA_charge=fragA_charge,
+                fragA_mult=fragA_mult,
+                fragB_charge=fragB_charge,
+                fragB_mult=fragB_mult,
                 status="failed",
                 reason="dipole_path_not_5_atoms"
             )
 
-        cut_bond = self._find_cut_bond(
-            graph, dipole_core, alkene_pair, reactant_symbols
-        )
+        if semantic_cut_bond is not None:
+            cut_bond = semantic_cut_bond
+            self.logger.debug(f"Using SemanticSlicer cut_bond: {cut_bond}")
+        else:
+            cut_bond = self._find_cut_bond(
+                graph, dipole_core, alkene_pair, reactant_symbols
+            )
         if cut_bond is None:
             return FragmenterResult(
                 fragA_indices=[], fragB_indices=[],
@@ -142,6 +223,10 @@ class IntramolecularFragmenter(LoggerMixin):
                 fragA_coords_TS=np.array([]), fragB_coords_TS=np.array([]),
                 fragA_symbols_R=[], fragB_symbols_R=[],
                 fragA_symbols_TS=[], fragB_symbols_TS=[],
+                fragA_charge=fragA_charge,
+                fragA_mult=fragA_mult,
+                fragB_charge=fragB_charge,
+                fragB_mult=fragB_mult,
                 status="failed",
                 reason="failed_to_find_cut_bond"
             )
@@ -161,6 +246,10 @@ class IntramolecularFragmenter(LoggerMixin):
                 fragA_coords_TS=np.array([]), fragB_coords_TS=np.array([]),
                 fragA_symbols_R=[], fragB_symbols_R=[],
                 fragA_symbols_TS=[], fragB_symbols_TS=[],
+                fragA_charge=fragA_charge,
+                fragA_mult=fragA_mult,
+                fragB_charge=fragB_charge,
+                fragB_mult=fragB_mult,
                 status="failed",
                 reason="component_validation_failed"
             )
@@ -194,6 +283,14 @@ class IntramolecularFragmenter(LoggerMixin):
             fragB_symbols_R=fragB_symbols_R,
             fragA_symbols_TS=fragA_symbols_TS,
             fragB_symbols_TS=fragB_symbols_TS,
+            fragA_coords_capped=fragA_coords_TS,
+            fragB_coords_capped=fragB_coords_TS,
+            fragA_symbols_capped=fragA_symbols_TS,
+            fragB_symbols_capped=fragB_symbols_TS,
+            fragA_charge=fragA_charge,
+            fragA_mult=fragA_mult,
+            fragB_charge=fragB_charge,
+            fragB_mult=fragB_mult,
             status="ok",
             reason=""
         )
@@ -239,16 +336,16 @@ class IntramolecularFragmenter(LoggerMixin):
 
     def _find_dipole_core_path(self, graph, dipole_pair):
         """
-        Step C: Find 5-atom dipole core path.
+        Step C: Find dipole core path.
 
         Returns:
-            List of 5 atom indices (dipole_core_indices)
-            Returns None if path length != 4 edges (5 atoms)
+            List of atom indices (dipole_core_indices)
+            Returns None if path length not in (3, 5)
         """
         d1, d2 = dipole_pair
         path = find_shortest_path(graph, d1, d2)
 
-        if len(path) != 5:
+        if len(path) not in (3, 5):
             return None
 
         return path
@@ -302,39 +399,100 @@ class IntramolecularFragmenter(LoggerMixin):
     def _cut_and_get_components(self, graph, cut_bond, dipole_pair, alkene_pair):
         """
         Step E: Remove cut bond and extract components.
-
-        Returns:
-            (fragA_indices, fragB_indices)
-            fragA must contain dipole_pair, fragB must contain alkene_pair
+        Houk Update: Includes recursive pruning to handle ghost bonds that
+        keep fragments connected after the main tether is cut.
         """
         cut_graph = {k: v.copy() for k, v in graph.items()}
-
         i, j = cut_bond
-        cut_graph[i].remove(j)
-        cut_graph[j].remove(i)
 
-        components = get_connected_components(cut_graph)
+        if j in cut_graph[i]:
+            cut_graph[i].remove(j)
+        if i in cut_graph[j]:
+            cut_graph[j].remove(i)
 
-        if len(components) != 2:
-            return [], []
+        anchor_a = dipole_pair[0]
+        anchor_b = alkene_pair[0]
 
-        comp0_set = set(components[0])
-        comp1_set = set(components[1])
+        max_attempts = 5
+        attempt = 0
 
+        while attempt < max_attempts:
+            components = get_connected_components(cut_graph)
+
+            if len(components) == 2:
+                return self._assign_fragments(components, dipole_pair, alkene_pair)
+
+            if len(components) == 1:
+                leak_path = find_shortest_path(cut_graph, anchor_a, anchor_b)
+                if not leak_path or len(leak_path) < 2:
+                    break
+
+                mid_index = (len(leak_path) - 2) // 2
+                u = leak_path[mid_index]
+                v = leak_path[mid_index + 1]
+
+                if v in cut_graph[u]:
+                    cut_graph[u].remove(v)
+                if u in cut_graph[v]:
+                    cut_graph[v].remove(u)
+
+                attempt += 1
+                continue
+
+            return self._merge_shattered_components(components, dipole_pair, alkene_pair)
+
+        return [], []
+
+    def _assign_fragments(self, components, dipole_pair, alkene_pair):
+        """Assign Fragment A/B based on dipole/alkene endpoints."""
         dipole_set = set(dipole_pair)
         alkene_set = set(alkene_pair)
 
-        if dipole_set.issubset(comp0_set):
-            fragA_indices, fragB_indices = components[0], components[1]
-        else:
-            fragA_indices, fragB_indices = components[1], components[0]
+        comp0_set = set(components[0])
 
-        if not dipole_set.issubset(set(fragA_indices)):
-            return [], []
+        if not dipole_set.isdisjoint(comp0_set):
+            fragA_indices = components[0]
+            fragB_indices = components[1]
+        else:
+            fragA_indices = components[1]
+            fragB_indices = components[0]
+
         if not alkene_set.issubset(set(fragB_indices)):
             return [], []
 
         return fragA_indices, fragB_indices
+
+    def _merge_shattered_components(self, components, dipole_pair, alkene_pair):
+        """
+        Handle cases where system breaks into >2 pieces.
+        Orphans are merged into the dipole-side fragment.
+        """
+        dipole_set = set(dipole_pair)
+        alkene_set = set(alkene_pair)
+
+        main_a = None
+        main_b = None
+        orphans = []
+
+        for comp in components:
+            comp_set = set(comp)
+            if not dipole_set.isdisjoint(comp_set):
+                main_a = comp
+            elif not alkene_set.isdisjoint(comp_set):
+                main_b = comp
+            else:
+                orphans.append(comp)
+
+        if main_a is None or main_b is None:
+            return [], []
+
+        final_a = set(main_a)
+        final_b = set(main_b)
+
+        for orphan in orphans:
+            final_a.update(orphan)
+
+        return sorted(final_a), sorted(final_b)
 
     def _h_cap_geometry(self, full_coords, full_symbols, frag_indices, cut_bond, cap_rules=None):
         """
@@ -361,17 +519,47 @@ class IntramolecularFragmenter(LoggerMixin):
         i_global, j_global = cut_bond
 
         cap_positions = []
+
+        def _cap_direction(atom_global: int, partner_global: int) -> np.ndarray:
+            """
+            Houk 修正: H 放置方向沿切断键向量的**反方向**延伸
+            原公式: H_pos = r_atom + k * (r_partner - r_atom) → 撞车
+            正确:   H_pos = r_atom + k * (r_atom - r_partner) → 反向
+            """
+            bond_vec = full_coords[partner_global] - full_coords[atom_global]
+            norm = np.linalg.norm(bond_vec)
+            if norm < 1e-8:
+                raise ValueError("Cut bond atoms are coincident")
+            return -bond_vec / norm
+
         if i_global in global_to_local:
             i_local = global_to_local[i_global]
-            cap_dir = full_coords[j_global] - full_coords[i_global]
+            cap_dir = _cap_direction(i_global, j_global)
             cap_positions.append((i_local, cap_dir))
         if j_global in global_to_local:
             j_local = global_to_local[j_global]
-            cap_dir = full_coords[i_global] - full_coords[j_global]
+            cap_dir = _cap_direction(j_global, i_global)
             cap_positions.append((j_local, cap_dir))
 
         capped_coords, capped_symbols = h_cap_fragment(
             frag_coords, frag_symbols, cap_positions, cap_bond_lengths=cap_rules
         )
 
+        self._validate_hcap_geometry(capped_coords, capped_symbols)
+
         return capped_coords, capped_symbols
+
+    def _validate_hcap_geometry(
+        self,
+        coords: np.ndarray,
+        symbols: List[str],
+        min_distance: float = 0.7
+    ) -> None:
+        n_atoms = len(coords)
+        for i in range(n_atoms):
+            for j in range(i + 1, n_atoms):
+                dist = np.linalg.norm(coords[i] - coords[j])
+                if dist < min_distance:
+                    raise RuntimeError(
+                        f"H-cap collision: {symbols[i]}({i})-{symbols[j]}({j}) = {dist:.2f} Å < {min_distance} Å"
+                    )

@@ -12,7 +12,7 @@ This version implements:
 4. Naming-driven rescue and version control
 
 Directory Structure:
-    S1_Product/[Molecule_Name]/
+    S1_ConfGeneration/[Molecule_Name]/
         ├── xtb2/
         ├── cluster/
         ├── dft/
@@ -763,11 +763,14 @@ class ConformerEngine(LoggerMixin):
             self.logger.error(f"      ❌ ORCA input not created: {local_inp}")
             return None
 
+        if self.orca_sp.orca_binary is None:
+            self.logger.error("      ❌ ORCA binary not found")
+            return None
+
         self.logger.info(f"      🔄 Running ORCA SP: {local_inp.name}")
 
-        # Run ORCA in dft directory
         try:
-            cmd = [self.orca_sp.orca_binary, local_inp.name]
+            cmd = [str(self.orca_sp.orca_binary), local_inp.name]
             result = subprocess.run(
                 cmd,
                 capture_output=True,

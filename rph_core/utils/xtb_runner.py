@@ -18,7 +18,7 @@ Date: 2026-01-15
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from rph_core.utils.log_manager import LoggerMixin
 from rph_core.utils.data_types import QCResult
@@ -163,10 +163,21 @@ class XTBRunner(LoggerMixin):
         self.logger.debug(f"Wrote constraint file: {constraint_file}")
         return constraint_file
 
+    def _write_fix_input(self, frozen_indices: List[int]) -> Path:
+        fix_file = self.work_dir / "xcontrol.inp"
+        with fix_file.open('w') as f:
+            f.write("$fix\n")
+            atoms_str = ",".join(str(idx + 1) for idx in frozen_indices)
+            f.write(f"   atoms: {atoms_str}\n")
+            f.write("$end\n")
+        self.logger.debug(f"Wrote $fix file: {fix_file} (atoms: {len(frozen_indices)})")
+        return fix_file
+
     def optimize(
         self,
         structure: Path,
         constraints: Optional[Dict[str, float]] = None,
+        frozen_indices: Optional[List[int]] = None,
         solvent: Optional[str] = None,
         charge: int = 0,
         uhf: int = 0
@@ -178,6 +189,7 @@ class XTBRunner(LoggerMixin):
             structure: Input XYZ file path
             constraints: Optional bond length constraints
                          Format: {"atom1_idx atom2_idx": distance}
+            frozen_indices: Optional list of atom indices (0-based) to freeze
             solvent: Solvent name for ALPB model (e.g., "acetone")
             charge: Molecular charge (default: 0)
             uhf: Number of unpaired electrons (default: 0)
@@ -222,6 +234,11 @@ class XTBRunner(LoggerMixin):
             constraint_file = self._write_constraint_input(constraints)
             cmd.extend(["--input", constraint_file.name])
             self.logger.debug(f"Applying constraints: {constraints}")
+
+        if frozen_indices:
+            fix_file = self._write_fix_input(frozen_indices)
+            cmd.extend(["--input", fix_file.name])
+            self.logger.debug(f"Freezing {len(frozen_indices)} atoms")
 
         self.logger.info(f"Running XTB optimization: {' '.join(cmd)}")
 

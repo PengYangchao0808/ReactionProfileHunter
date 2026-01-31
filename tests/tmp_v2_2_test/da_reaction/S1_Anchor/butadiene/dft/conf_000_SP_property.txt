@@ -1,0 +1,87 @@
+-------------------------------------------------------------
+----------------------- !PROPERTIES! ------------------------
+-------------------------------------------------------------
+# -----------------------------------------------------------
+$ PAL_Flags
+   description: The PAL Flags
+   geom. index: 1
+   prop. index: 1
+        Diskflag:     2
+# -----------------------------------------------------------
+$ SCF_Energy
+   description: The SCF energy
+   geom. index: 1
+   prop. index: 1
+        SCF Energy:     -153.0236792392
+# -----------------------------------------------------------
+$ Solvation_Details
+   description: Details concerning solvation
+   geom. index: 1
+   prop. index: 1
+     Epsilon:               20.4930000000
+     Refrac:                 1.3588000000
+     RSolv:                  1.3000000000
+     Surface Type:                      2
+     Number of Points:                648
+     Surface Area:         355.9215612635
+     Dielectric Energy:     -0.0017935968
+# -----------------------------------------------------------
+$ Calculation_Info
+   description: Details of the calculation
+   geom. index: 1
+   prop. index: 1
+     Multiplicity:                          1
+     Charge:                                0
+     number of atoms:                       10
+     number of electrons:                   0
+     number of frozen core electrons:       1
+     number of correlated electrons:        0
+     number of basis functions:             26
+     number of aux C basis functions:       0
+     number of aux J basis functions:       262
+     number of aux JK basis functions:      0
+     number of aux CABS basis functions:    0
+     Total Energy                           -153.023679
+# -----------------------------------------------------------
+$ SCF_Electric_Properties
+   description: The SCF Calculated Electric Properties
+   geom. index: 1
+   prop. index: 1
+       Filename                          : conf_000_SP.scfp 
+       Do Dipole Moment Calculation      : true 
+       Do Quadrupole Moment Calculation  : false 
+       Do Polarizability Calculation     : false 
+** Dipole moment part of electric properties **
+        Magnitude of dipole moment (Debye) :        0.0000012982
+        Electronic Contribution:
+                  0    
+      0       0.000000
+      1      -0.000002
+      2      -0.000005
+        Nuclear Contribution:
+                  0    
+      0      -0.000000
+      1       0.000002
+      2       0.000005
+        Total Dipole moment:
+                  0    
+      0      -0.000000
+      1       0.000000
+      2      -0.000000
+# -------------------------------------------------------------
+----------------------- !GEOMETRIES! ------------------------
+# -------------------------------------------------------------
+------------------------ !GEOMETRY! -------------------------
+    Number of atoms:    10 
+    Geometry Index:     1 
+    Coordinates:
+               0 C      1.833184000000    0.113541000000    0.000095000000
+               1 C      0.625773000000   -0.403500000000   -0.000035000000
+               2 C     -0.625772000000    0.403500000000    0.000029000000
+               3 C     -1.833184000000   -0.113542000000   -0.000089000000
+               4 H      2.721253000000   -0.503560000000    0.000067000000
+               5 H      1.998771000000    1.182695000000    0.000225000000
+               6 H      0.491630000000   -1.479734000000   -0.000196000000
+               7 H     -0.491629000000    1.479734000000    0.000183000000
+               8 H     -2.721253000000    0.503561000000   -0.000028000000
+               9 H     -1.998771000000   -1.182695000000   -0.000245000000

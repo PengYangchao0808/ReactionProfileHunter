@@ -17,7 +17,7 @@
 
 ## CONVENTIONS
 - 内部原子索引多为 0-index；给外部约束文件时转 1-index。
-- product input 兼容 v2.1(文件) 与 v3.0(目录) 两种形态（retro_scanner 内有分支）。
+- product input 兼容 v2.1(文件) 与 v3.0/v6.1(S1_ConfGeneration 目录) 两种形态（retro_scanner 内有分支）。
 
 ## ANTI-PATTERNS
 - 只产出 TS guess 不产出 reactant_complex

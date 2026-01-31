@@ -1,3 +1,6 @@
+import logging
+import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +12,9 @@ class IsostatResult:
     cluster_xyz: Path
     log_file: Path
     n_within_window: Optional[int]
+
+
+logger = logging.getLogger(__name__)
 
 
 def _count_within_window(log_file: Path, energy_window: float) -> Optional[int]:
@@ -32,6 +38,15 @@ def _count_within_window(log_file: Path, energy_window: float) -> Optional[int]:
     return count if count > 0 else None
 
 
+def _resolve_isostat_path(isostat_bin: Path) -> Optional[Path]:
+    if isostat_bin.exists() and isostat_bin.is_file() and os.access(str(isostat_bin), os.X_OK):
+        return isostat_bin
+    which_path = shutil.which(str(isostat_bin))
+    if which_path:
+        return Path(which_path)
+    return None
+
+
 def run_isostat(
     isostat_bin: Path,
     input_xyz: Path,
@@ -44,8 +59,21 @@ def run_isostat(
 ) -> IsostatResult:
     output_dir.mkdir(parents=True, exist_ok=True)
     log_file = output_dir / "isostat.log"
+    resolved_bin = _resolve_isostat_path(isostat_bin)
+    if resolved_bin is None:
+        message = (
+            "isostat executable not found; skipping clustering. "
+            "Set config.executables.isostat.path or ensure isostat on PATH."
+        )
+        logger.warning(message)
+        log_file.write_text(message)
+        return IsostatResult(
+            cluster_xyz=input_xyz,
+            log_file=log_file,
+            n_within_window=None
+        )
     cmd = [
-        str(isostat_bin),
+        str(resolved_bin),
         str(input_xyz),
         "-Gdis",
         f"{gdis}",

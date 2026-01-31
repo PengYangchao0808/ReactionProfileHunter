@@ -52,7 +52,7 @@ def sample_symbols():
 @pytest.fixture
 def step_dirs_with_all_sources(tmp_path, sample_coords, sample_symbols):
     """Fixture providing complete S1/S2/S3 directory structure."""
-    s1 = tmp_path / "S1_Product"
+    s1 = tmp_path / "S1_ConfGeneration"
     s2 = tmp_path / "S2_Retro"
     s3 = tmp_path / "S3_TS"
 
@@ -102,7 +102,7 @@ def step_dirs_with_all_sources(tmp_path, sample_coords, sample_symbols):
 @pytest.fixture
 def step_dirs_s3_only(tmp_path, sample_coords, sample_symbols):
     """Fixture with only S3 reactant available."""
-    s1 = tmp_path / "S1_Product"
+    s1 = tmp_path / "S1_ConfGeneration"
     s2 = tmp_path / "S2_Retro"
     s3 = tmp_path / "S3_TS"
 
@@ -122,7 +122,7 @@ def step_dirs_s3_only(tmp_path, sample_coords, sample_symbols):
 @pytest.fixture
 def step_dirs_s2_only(tmp_path, sample_coords, sample_symbols):
     """Fixture with only S2 reactant_complex available."""
-    s1 = tmp_path / "S1_Product"
+    s1 = tmp_path / "S1_ConfGeneration"
     s2 = tmp_path / "S2_Retro"
     s3 = tmp_path / "S3_TS"
 
@@ -450,7 +450,7 @@ class TestToxicPathSafety:
         s4_toxic.mkdir(parents=True)
 
         # Create S1 with a test file
-        s1 = tmp_path / "S1_Product"
+        s1 = tmp_path / "S1_ConfGeneration"
         s1.mkdir(parents=True)
         test_file = s1 / "product_min.xyz"
         write_xyz(test_file, sample_coords, sample_symbols, title="Product")
@@ -477,7 +477,7 @@ class TestToxicPathSafety:
         s4_toxic = tmp_path / "[5+2] test space ()"
         s4_toxic.mkdir(parents=True)
 
-        s1 = tmp_path / "S1_Product"
+        s1 = tmp_path / "S1_ConfGeneration"
         s1.mkdir(parents=True)
         test_file = s1 / "product_min.xyz"
         write_xyz(test_file, sample_coords, sample_symbols, title="Product")
@@ -794,12 +794,12 @@ class TestM4P0QCArtifactCollection:
 
         s3_dir = tmp_path / "S3_TS"
         s3_dir.mkdir(parents=True)
-        nmr_dir = s3_dir / "nmr"
-        nmr_dir.mkdir(exist_ok=True)
+        nbo_dir = s3_dir / "nbo"
+        nbo_dir.mkdir(exist_ok=True)
 
-        # Create two NMR files with different mtimes
-        old_file = nmr_dir / "job_old.nmrdat"
-        new_file = nmr_dir / "job_new.nmrdat"
+        # Create two NBO files with different mtimes
+        old_file = nbo_dir / "job_old.37"
+        new_file = nbo_dir / "job_new.37"
 
         old_file.write_text("old data")
         new_file.write_text("new data")
@@ -817,11 +817,11 @@ class TestM4P0QCArtifactCollection:
         )
 
         # Should pick the newer file
-        assert "nmr_outputs" in result
-        assert result["nmr_outputs"]["meta"]["reason"] == "picked_by_mtime"
+        assert "nbo_outputs" in result
+        assert result["nbo_outputs"]["meta"]["reason"] == "picked_by_mtime"
         # Meta should have candidates list
-        assert "candidates" in result["nmr_outputs"]["meta"]
-        assert len(result["nmr_outputs"]["meta"]["candidates"]) >= 1
+        assert "candidates" in result["nbo_outputs"]["meta"]
+        assert len(result["nbo_outputs"]["meta"]["candidates"]) >= 1
 
     def test_collect_qc_artifacts_meta_has_candidates(self, tmp_path):
         """M4-P0: Meta should record candidates with mtime, size, sha256."""

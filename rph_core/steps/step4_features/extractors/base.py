@@ -240,10 +240,10 @@ def get_extractor(name: str) -> Optional[BaseExtractor]:
     return EXTRACTORS.get(name, None)
 
 
-def list_extractors() -> List[str]:
-    """List all registered extractor names.
+def list_extractors() -> List[BaseExtractor]:
+    """List all registered extractor instances.
 
     Returns:
-        List of plugin names
+        List of plugin instances
     """
-    return list(EXTRACTORS.keys())
+    return list(EXTRACTORS.values())

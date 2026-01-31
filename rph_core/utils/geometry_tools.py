@@ -51,6 +51,11 @@ class GeometryUtils:
         return float(np.linalg.norm(vec))
 
     @staticmethod
+    def compute_distance_matrix(coords: np.ndarray) -> np.ndarray:
+        diff = coords[:, None, :] - coords[None, :, :]
+        return np.linalg.norm(diff, axis=2)
+
+    @staticmethod
     def calculate_angle(
         coords: np.ndarray,
         atom_i: int,
@@ -828,6 +833,5 @@ class LogParser:
         if coords:
             return np.array(coords), symbols, None
         return None, None, "无法从 ORCA .inp 提取坐标"
-
 
 

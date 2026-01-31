@@ -1,0 +1,5 @@
+name,weight,g_used,g_sum,g_conc,h_sum,u_sum,s_total,sp_energy,log_file
+conf_000,0.251134,-651.92230850,-651.92230850,,-651.87513600,-29.601000,-652.09888334,/mnt/e/Calculations/[5+2] Mechain learning/Scripts/ReactionProfileHunter/ReactionProfileHunter_20260121/rph_output/rx_39717847/S1_Product/product/dft/conf_000.log
+conf_001,0.249873,-651.91932430,-651.91932430,,-651.87220410,-29.568000,-652.09544422,/mnt/e/Calculations/[5+2] Mechain learning/Scripts/ReactionProfileHunter/ReactionProfileHunter_20260121/rph_output/rx_39717847/S1_Product/product/dft/conf_001.log
+conf_002,0.249497,-651.91843330,-651.91843330,,-651.87077580,-29.906000,-652.09435046,/mnt/e/Calculations/[5+2] Mechain learning/Scripts/ReactionProfileHunter/ReactionProfileHunter_20260121/rph_output/rx_39717847/S1_Product/product/dft/conf_002.log
+conf_003,0.249496,-651.91843150,-651.91843150,,-651.87077560,-29.905000,-652.09435005,/mnt/e/Calculations/[5+2] Mechain learning/Scripts/ReactionProfileHunter/ReactionProfileHunter_20260121/rph_output/rx_39717847/S1_Product/product/dft/conf_003.log

@@ -18,11 +18,13 @@ executables:
     path: "/root/XTB/bin/xtb"
   crest:
     path: "/root/crest/crest"
+  isostat:
+    path: "/root/molclus/isostat"
 
 # ==================== 资源配置 (Resources) ====================
 # 内存配置格式："32GB", "16GB", "4096MB" 等
 resources:
-  mem: "32GB"  # 总内存
+  mem: "64GB"  # 总内存
   nproc: 16     # 并行核数
   # 派生值（maxcore 等）由代码根据 mem/nproc 自动计算
   orca_maxcore_safety: 0.8  # ORCA maxcore 安全系数（避免内存溢出）
@@ -31,27 +33,39 @@ resources:
 # ================================
 # 统一管理几何优化和高精度单点能的参数
 theory:
-  # 几何优化级别 (用于 S1 产物优化, S3 TS 优化)
+  # xTB 预优化级别 (用于避免原子重叠导致 Gaussian/ORCA 崩溃)
+  # 策略: xTB 粗修 → B3LYP 精修 → 高精度 SP (Houk 建议)
+  preoptimization:
+    enabled: true  # 是否启用 xTB 预优化（建议开启）
+    gfn_level: 2  # GFN-xTB 方法级别 (1 或 2, 推荐 2)
+    solvent: acetone  # 与主计算保持一致
+    nproc: 8  # xTB 通常 4-8 核即可
+    # 原子重叠检测阈值（Å）
+    overlap_threshold: 1.0  # 若任意两原子距离 < 此值，触发预优化
+    # 优化收敛标准
+    opt_level: crude  # crude (快速) / normal (标准) / tight (严格)
+
+  # 几何优化级别 (用于 S1 产物优化, S3 TS 优化, 受限优化)
   optimization:
     method: B3LYP
     basis: def2-SVP
     dispersion: GD3BJ
     engine: gaussian  # 可选: gaussian, orca
     nproc: 16
-    mem: 32GB
+    mem: 64GB
     solvent: acetone
 
   # 高精度单点能级别 (L2)
   # 用于 S1 产物精修, S3 TS/Reactant/Fragments 精修
   single_point:
-    method: WB97M-V
+    method: wB97X-D3BJ  # 改用 wB97X-D3BJ (比 WB97M-V 更稳定)
     basis: def2-TZVPP
     aux_basis: def2/J
     engine: orca  # 可选: orca, gaussian
     nproc: 16
-    maxcore: 4000
+    maxcore: 1000
     solvent: acetone
-    fallback_to_gaussian: true  # ORCA 失败时是否降级到 Gaussian
+    fallback_to_gaussian: false  # ORCA 失败时是否降级到 Gaussian
     fallback_method: B3LYP
     fallback_basis: def2-TZVP
 
@@ -126,6 +140,14 @@ step3:
   irc_max_points: 50
   irc_step_size: 10  # IRC 步长 (0.001 amu^1/2 bohr)
 
+  # Reactant 优化配置 (新增 v6.1+)
+  # Reactant 现在执行完整的 OPT + Freq + L2 SP 流程（而非仅 SP）
+  reactant_opt:
+    enabled: true              # 启用 Reactant 优化（推荐保持 true）
+    charge: 0                  # Reactant 电荷（通常为 0）
+    multiplicity: 1            # 自旋多重度（通常为 1，单重态）
+    enable_nbo: false          # 是否在 Freq 中集成 NBO 分析（默认关闭以节省时间）
+
   # Gaussian 关键词模板
   gaussian_keywords:
     berny: "Opt=(TS, CalcFC, NoEigenTest) Freq"
@@ -136,11 +158,21 @@ step3:
   fragments:
     calculate_relaxed: true  # 是否计算松弛后的片段能量
     opt_level: xtb          # 片段几何优化级别: xtb (快) 或 dft (准)
+    # VRM 相关 SP 固定资源设置
+    # NOTE: ORCA MPI (orca_scf_mpi/mpirun) 在部分环境/体系上可能在 SCF 收敛后异常 abort。
+    # VRM 默认强制单核运行以禁用 MPI，提升稳定性（可按需调大）。
+    vrm_sp_nproc: 1
 
 # Step 4: Feature Miner (特征提取)
 step4:
-  enable_nbo: false
   enable_buried_volume: false
+  enabled_plugins:
+    - thermo
+    - geometry
+    - qc_checks
+    - ts_quality
+    - asm_enrichment
+    - fmo_cdft_dipolar
   features:
     - dG_activation
     - dG_reaction
@@ -174,28 +206,34 @@ step4:
 # ========================
 # 控制程序运行模式：single (单分子) / batch (批量) / dataset (数据集)
 run:
-  source: batch  # single: 单分子模式; batch: 批量CSV模式; dataset: 数据集模式
+  source: dataset  # single: 单分子模式; batch: 批量CSV模式; dataset: 数据集模式
   # single 模式配置 (当 source=single 时使用)
   single:
     product_smiles: ""  # 产物SMILES字符串，空字符串表示需要通过命令行--smiles传入
     rx_id: "manual"     # 反应ID标识
   # batch 模式配置 (当 source=batch 时使用)
   batch:
-    input_file: "E:\Calculations\[5+2] Mechain learning\Scripts\ReactionProfileHunter\ReactionProfileHunter_20260121\reaxys_cleaned.csv"      # 输入CSV文件路径
+    input_file: ""      # 输入CSV文件路径
     smiles_column: "product_smiles"  # SMILES列名
   # dataset 模式配置 (当 source=dataset 时使用)
   dataset:
     format: "csv"       # 数据集格式: csv, tsv
-    path: ""            # 数据集文件路径
+    path: "E:/Calculations/[5+2] Mechain learning/Scripts/ReactionProfileHunter/ReactionProfileHunter_20260121/reaxys_cleaned.csv"  # 数据集文件路径
     product_smiles_col: "product_smiles_main"  # 产物SMILES列名
+    delimiter: ","      # CSV分隔符
+    id_col: "rx_id"     # 反应ID列名
+    precursor_smiles_col: "precursor_smiles"  # 前体SMILES列名
   # 通用运行选项
   output_root: ./rph_output  # 输出根目录 (会被global.work_dir_base覆盖)
   workdir_naming: "rx_{rx_id}"  # 工作目录命名模板
   resume: true        # 是否启用断点续算
   dry_run: false      # 干运行模式（仅显示任务，不执行）
-  max_tasks: 0        # 最大任务数 (0=无限制)
+  max_tasks: 1        # 最大任务数 (0=无限制, 1=只读取第一行)
   filter_ids: []      # 过滤特定ID列表
   max_workers: 1      # 并行工作进程数
+  notify:
+    enabled: true
+    backend: auto
 
 # 全局设置
 global:

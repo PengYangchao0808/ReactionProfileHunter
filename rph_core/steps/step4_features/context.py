@@ -97,6 +97,7 @@ class FeatureContext:
     # V6.2: S3 directory for accessing enrichment contract and dipolar artifacts
     # Resolved in feature_miner before plugin execution
     s3_dir: Optional[Path] = None
+    artifacts_index: Optional[Dict[str, Any]] = None
 
     close_contacts_cutoff: float = 2.2
     temperature_K: float = 298.15

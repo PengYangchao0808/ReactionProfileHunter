@@ -1,0 +1,2207 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE CDXML SYSTEM "http://www.cambridgesoft.com/xml/cdxml.dtd" >
+<CDXML
+ CreationProgram="ChemDraw 20.0.0.41"
+ Name="Scheme.cdxml"
+ BoundingBox="114.38 988.30 1231.25 1275.51"
+ WindowPosition="0 0"
+ WindowSize="1073741824 -2147483648"
+ WindowIsZoomed="yes"
+ FractionalWidths="yes"
+ InterpretChemically="yes"
+ ShowAtomQuery="yes"
+ ShowAtomStereo="no"
+ ShowAtomEnhancedStereo="yes"
+ ShowAtomNumber="no"
+ ShowResidueID="no"
+ ShowBondQuery="yes"
+ ShowBondRxn="yes"
+ ShowBondStereo="no"
+ ShowTerminalCarbonLabels="no"
+ ShowNonTerminalCarbonLabels="no"
+ HideImplicitHydrogens="no"
+ Magnification="666"
+ LabelFont="3"
+ LabelSize="12"
+ LabelFace="97"
+ CaptionFont="3"
+ CaptionSize="12"
+ CaptionFace="1"
+ HashSpacing="3.17"
+ MarginWidth="1.98"
+ LineWidth="1.42"
+ BoldWidth="2.01"
+ BondLength="20.07"
+ BondSpacing="18"
+ ChainAngle="120"
+ LabelJustification="Auto"
+ CaptionJustification="Left"
+ AminoAcidTermini="HOH"
+ ShowSequenceTermini="yes"
+ ShowSequenceBonds="yes"
+ ShowSequenceUnlinkedBranches="no"
+ ResidueWrapCount="40"
+ ResidueBlockCount="10"
+ ResidueZigZag="yes"
+ NumberResidueBlocks="no"
+ PrintMargins="119.03 226.80 119.03 226.80"
+ MacPrintInfo="00030000025802580000000017361032FF9CFF9C179A1096036704CC036500020000025802580000000017361032000100000064000000010001010100030001270F000100010000000000000000000000000002001901900000000000600000000000000000000100000000000000000000000000000000"
+ ChemPropName=""
+ ChemPropFormula="Chemical Formula: "
+ ChemPropExactMass="Exact Mass: "
+ ChemPropMolWt="Molecular Weight: "
+ ChemPropMOverZ="m/z: "
+ ChemPropAnalysis="Elemental Analysis: "
+ ChemPropBoilingPt="Boiling Point: "
+ ChemPropMeltingPt="Melting Point: "
+ ChemPropCritTemp="Critical Temp: "
+ ChemPropCritPres="Critical Pres: "
+ ChemPropCritVol="Critical Vol: "
+ ChemPropGibbs="Gibbs Energy: "
+ ChemPropLogP="Log P: "
+ ChemPropMR="MR: "
+ ChemPropHenry="Henry&apos;s Law: "
+ ChemPropEForm="Heat of Form: "
+ ChemProptPSA="tPSA: "
+ ChemPropCLogP="CLogP: "
+ ChemPropCMR="CMR: "
+ ChemPropLogS="LogS: "
+ ChemPropPKa="pKa: "
+ ChemPropID=""
+ ChemPropFragmentLabel=""
+ color="0"
+ bgcolor="1"
+ RxnAutonumberStart="1"
+ RxnAutonumberConditions="no"
+ RxnAutonumberStyle="Roman"
+ RxnAutonumberFormat="(#)"
+><colortable>
+<color r="1" g="1" b="1"/>
+<color r="0" g="0" b="0"/>
+<color r="1" g="0" b="0"/>
+<color r="1" g="1" b="0"/>
+<color r="0" g="1" b="0"/>
+<color r="0" g="1" b="1"/>
+<color r="0" g="0" b="1"/>
+<color r="1" g="0" b="1"/>
+<color r="0" g="0" b="0.5020"/>
+<color r="0.9255" g="0.9255" b="1"/>
+<color r="1" g="0" b="0.5020"/>
+<color r="0.5020" g="0" b="0.2510"/>
+<color r="0.7451" g="0.7451" b="0.7451"/>
+<color r="0" g="0.5020" b="1"/>
+<color r="0.5020" g="1" b="1"/>
+</colortable><fonttable>
+<font id="3" charset="iso-8859-1" name="Arial"/>
+</fonttable><page
+ id="2095188071"
+ BoundingBox="0 0 2834.65 2834.65"
+ Width="2834.65"
+ Height="2834.65"
+ HeaderPosition="36"
+ FooterPosition="36"
+ PageOverlap="0"
+ PrintTrimMarks="yes"
+ HeightPages="1"
+ WidthPages="1"
+ DrawingSpace="poster"
+><fragment
+ id="2095187698"
+ BoundingBox="497.44 988.30 558.94 1119.01"
+ Z="1644"
+><n
+ id="2095187695"
+ p="502.12 1063.96"
+ Z="1641"
+ Element="8"
+ NumHydrogens="0"
+ NeedsClean="yes"
+><t
+ p="497.44 1068.69"
+ BoundingBox="497.44 1058.54 506.79 1068.84"
+ LabelJustification="Left"
+><s font="3" size="12" color="0" face="97">O</s></t></n><n
+ id="2095187697"
+ p="502.12 1084.03"
+ Z="1643"
+/><n
+ id="2095187699"
+ p="519.50 1094.07"
+ Z="1645"
+/><n
+ id="2095187701"
+ p="536.88 1084.03"
+ Z="1647"
+/><n
+ id="2095187703"
+ p="536.88 1063.96"
+ Z="1649"
+/><n
+ id="2095187705"
+ p="519.50 1053.93"
+ Z="1651"
+/><n
+ id="2095187713"
+ p="554.26 1053.93"
+ Z="1659"
+/><n
+ id="2095187717"
+ p="554.26 1033.86"
+ Z="1663"
+/><n
+ id="2095187721"
+ p="536.88 1023.83"
+ Z="1667"
+/><n
+ id="2095187723"
+ p="536.88 1003.76"
+ Z="1669"
+/><n
+ id="2095187725"
+ p="519.50 993.72"
+ Z="1671"
+/><n
+ id="2095187727"
+ p="554.26 993.72"
+ Z="1673"
+ Element="8"
+ NumHydrogens="0"
+ NeedsClean="yes"
+><t
+ p="549.59 998.45"
+ BoundingBox="549.59 988.30 558.94 998.60"
+ LabelJustification="Left"
+><s font="3" size="12" color="0" face="97">O</s></t></n><n
+ id="2095187729"
+ p="502.12 1003.76"
+ Z="1675"
+/><n
+ id="2095187731"
+ p="519.50 1033.86"
+ Z="1677"
+ NodeType="Fragment"
+ NeedsClean="yes"
+><fragment
+ id="2095188072"
+><n
+ id="2095188073"
+ p="519.50 1033.86"
+ Element="8"
+ NumHydrogens="0"
+/><n
+ id="2095188074"
+ p="554.23 1033.86"
+ Element="8"
+ NumHydrogens="0"
+/><n
+ id="2095188075"
+ p="536.86 1023.84"
+/><n
+ id="2095188076"
+ p="536.86 1003.79"
+/><n
+ id="2095188077"
+ p="519.50 1053.91"
+ NodeType="ExternalConnectionPoint"
+/><b
+ id="2095188078"
+ B="2095188075"
+ E="2095188076"
+/><b
+ id="2095188079"
+ B="2095188074"
+ E="2095188075"
+ Order="2"
+/><b
+ id="2095188080"
+ B="2095188073"
+ E="2095188075"
+/><b
+ id="2095188081"
+ B="2095188077"
+ E="2095188073"
+/></fragment><t
+ p="514.82 1038.59"
+ BoundingBox="514.82 1028.44 539.51 1038.74"
+ LabelJustification="Left"
+ LabelAlignment="Left"
+><s font="3" size="12" color="0" face="97">OAc</s></t></n><n
+ id="2095187733"
+ p="519.50 1114.14"
+ Z="1679"
+ Element="8"
+ NumHydrogens="0"
+ NeedsClean="yes"
+><t
+ p="514.82 1118.86"
+ BoundingBox="514.82 1108.71 524.17 1119.01"
+ LabelJustification="Left"
+><s font="3" size="12" color="0" face="97">O</s></t></n><b
+ id="2095187707"
+ Z="1653"
+ B="2095187695"
+ E="2095187697"
+/><b
+ id="2095187708"
+ Z="1654"
+ B="2095187697"
+ E="2095187699"
+/><b
+ id="2095187709"
+ Z="1655"
+ B="2095187699"
+ E="2095187701"
+/><b
+ id="2095187710"
+ Z="1656"
+ B="2095187701"
+ E="2095187703"
+ Order="2"
+ BondCircularOrdering="2095187709 0 2095187714 2095187711"
+/><b
+ id="2095187711"
+ Z="1657"
+ B="2095187703"
+ E="2095187705"
+/><b
+ id="2095187712"
+ Z="1658"
+ B="2095187705"
+ E="2095187695"
+/><b
+ id="2095187714"
+ Z="1660"
+ B="2095187703"
+ E="2095187713"
+/><b
+ id="2095187718"
+ Z="1664"
+ B="2095187713"
+ E="2095187717"
+/><b
+ id="2095187722"
+ Z="1668"
+ B="2095187717"
+ E="2095187721"
+/><b
+ id="2095187724"
+ Z="1670"
+ B="2095187721"
+ E="2095187723"
+/><b
+ id="2095187726"
+ Z="1672"
+ B="2095187723"
+ E="2095187725"
+/><b
+ id="2095187728"
+ Z="1674"
+ B="2095187723"
+ E="2095187727"
+ Order="2"
+/><b
+ id="2095187730"
+ Z="1676"
+ B="2095187725"
+ E="2095187729"
+ Order="2"
+/><b
+ id="2095187732"
+ Z="1678"
+ B="2095187705"
+ E="2095187731"
+/><b
+ id="2095187734"
+ Z="1680"
+ B="2095187699"
+ E="2095187733"
+ Order="2"
+/></fragment><fragment
+ id="2095187740"
+ BoundingBox="640.52 988.30 714.56 1119.01"
+ Z="1729"
+><n
+ id="2095187741"
+ p="657.74 1063.96"
+ Z="1727"
+ Element="8"
+ NumHydrogens="0"
+ Charge="1"
+ NeedsClean="yes"
+><t
+ p="653.07 1068.69"
+ BoundingBox="653.07 1058.54 662.42 1068.84"
+ LabelJustification="Left"
+><s font="3" size="12" color="0" face="97">O</s></t></n><n
+ id="2095187742"
+ p="657.74 1084.03"
+ Z="1728"
+/><n
+ id="2095187743"
+ p="675.12 1094.07"
+ Z="1730"
+/><n
+ id="2095187744"
+ p="692.51 1084.03"
+ Z="1731"
+/><n
+ id="2095187745"
+ p="692.51 1063.96"
+ Z="1732"
+/><n
+ id="2095187746"
+ p="675.12 1053.93"
+ Z="1733"
+/><n
+ id="2095187747"
+ p="709.89 1053.93"
+ Z="1740"
+/><n
+ id="2095187748"
+ p="709.89 1033.86"
+ Z="1742"
+/><n
+ id="2095187749"
+ p="692.51 1023.83"
+ Z="1744"
+/><n
+ id="2095187750"
+ p="692.51 1003.76"
+ Z="1746"
+/><n
+ id="2095187751"
+ p="675.12 993.72"
+ Z="1748"
+/><n
+ id="2095187752"
+ p="709.89 993.72"
+ Z="1750"
+ Element="8"
+ NumHydrogens="0"
+ NeedsClean="yes"
+><t
+ p="705.21 998.45"
+ BoundingBox="705.21 988.30 714.56 998.60"
+ LabelJustification="Left"
+><s font="3" size="12" color="0" face="97">O</s></t></n><n
+ id="2095187753"
+ p="657.74 1003.76"
+ Z="1752"
+/><n
+ id="2095187765"
+ p="675.12 1114.14"
+ Z="1756"
+ Element="8"
+ NumHydrogens="0"
+ Charge="-1"
+ NeedsClean="yes"
+><t
+ p="670.45 1118.86"
+ BoundingBox="670.45 1108.71 679.80 1119.01"
+ LabelJustification="Left"
+ LabelAlignment="Left"
+><s font="3" size="12" color="0" face="97">O</s></t></n><b
+ id="2095187766"
+ Z="1734"
+ B="2095187741"
+ E="2095187742"
+/><b
+ id="2095187767"
+ Z="1735"
+ B="2095187742"
+ E="2095187743"
+ Order="2"
+ BondCircularOrdering="2095187766 0 2095187780 2095187768"
+/><b
+ id="2095187768"
+ Z="1736"
+ B="2095187743"
+ E="2095187744"
+/><b
+ id="2095187769"
+ Z="1737"
+ B="2095187744"
+ E="2095187745"
+ Order="2"
+ BondCircularOrdering="2095187768 0 2095187772 2095187770"
+/><b
+ id="2095187770"
+ Z="1738"
+ B="2095187745"
+ E="2095187746"
+/><b
+ id="2095187771"
+ Z="1739"
+ B="2095187746"
+ E="2095187741"
+ Order="2"
+ BondCircularOrdering="2095187770 0 0 2095187766"
+/><b
+ id="2095187772"
+ Z="1741"
+ color="4"
+ B="2095187745"
+ E="2095187747"
+ Display="Bold"
+ CrossingBonds="2095188052"
+/><b
+ id="2095187773"
+ Z="1743"
+ B="2095187747"
+ E="2095187748"
+/><b
+ id="2095187774"
+ Z="1745"
+ B="2095187748"
+ E="2095187749"
+/><b
+ id="2095187775"
+ Z="1747"
+ B="2095187749"
+ E="2095187750"
+/><b
+ id="2095187776"
+ Z="1749"
+ B="2095187750"
+ E="2095187751"
+/><b
+ id="2095187777"
+ Z="1751"
+ B="2095187750"
+ E="2095187752"
+ Order="2"
+/><b
+ id="2095187778"
+ Z="1753"
+ B="2095187751"
+ E="2095187753"
+ Order="2"
+/><b
+ id="2095187780"
+ Z="1757"
+ B="2095187743"
+ E="2095187765"
+/><graphic
+ id="2095187782"
+ BoundingBox="687.57 1113.52 678.57 1113.52"
+ Z="1759"
+ GraphicType="Symbol"
+ SymbolType="CircleMinus"
+><represent attribute="Charge" object="2095187765"/></graphic><graphic
+ id="2095187783"
+ BoundingBox="645.94 1056.75 645.94 1065.75"
+ Z="1760"
+ GraphicType="Symbol"
+ SymbolType="CirclePlus"
+><represent attribute="Charge" object="2095187741"/></graphic></fragment><fragment
+ id="2095187855"
+ BoundingBox="949.31 1015.91 1019.40 1111.81"
+ Z="1862"
+><n
+ id="2095187852"
+ p="978 1052.25"
+ Z="1859"
+ Geometry="Tetrahedral"
+ BondOrdering="2095187866 2095187872 0 2095187895"
+/><n
+ id="2095187854"
+ p="972.81 1071.64"
+ Z="1861"
+/><n
+ id="2095187856"
+ p="984.72 1087.78"
+ Z="1863"
+ Geometry="Tetrahedral"
+ BondOrdering="2095187867 2095187868 0 2095187900"
+/><n
+ id="2095187858"
+ p="1004.78 1088.53"
+ Z="1865"
+/><n
+ id="2095187860"
+ p="1017.87 1073.32"
+ Z="1867"
+/><n
+ id="2095187862"
+ p="1014.14 1053.60"
+ Z="1869"
+/><n
+ id="2095187864"
+ p="996.40 1044.22"
+ Z="1871"
+ Geometry="Tetrahedral"
+ BondOrdering="2095187872 2095187871 2095187897 0"
+/><n
+ id="2095187873"
+ p="1006.12 1016.62"
+ Z="1880"
+/><n
+ id="2095187875"
+ p="986.06 1016.62"
+ Z="1882"
+/><n
+ id="2095187877"
+ p="973.54 1032.32"
+ Z="1884"
+/><n
+ id="2095187885"
+ p="1018.64 1032.32"
+ Z="1892"
+/><n
+ id="2095187896"
+ p="999.75 1068.75"
+ Z="1903"
+ Element="8"
+ NumHydrogens="0"
+ NeedsClean="yes"
+><t
+ p="995.07 1073.47"
+ BoundingBox="995.07 1063.32 1004.42 1073.62"
+ LabelJustification="Left"
+><s font="3" size="12" color="0" face="97">O</s></t></n><n
+ id="2095187901"
+ p="953.98 1027.81"
+ Z="1908"
+ Element="8"
+ NumHydrogens="0"
+ NeedsClean="yes"
+><t
+ p="949.31 1032.53"
+ BoundingBox="949.31 1022.38 958.66 1032.68"
+ LabelJustification="Left"
+><s font="3" size="12" color="0" face="97">O</s></t></n><n
+ id="2095187903"
+ p="1012.81 1106.93"
+ Z="1910"
+ Element="8"
+ NumHydrogens="0"
+ NeedsClean="yes"
+><t
+ p="1008.13 1111.66"
+ BoundingBox="1008.13 1101.51 1017.48 1111.81"
+ LabelJustification="Left"
+><s font="3" size="12" color="0" face="97">O</s></t></n><b
+ id="2095187866"
+ Z="1873"
+ B="2095187852"
+ E="2095187854"
+/><b
+ id="2095187867"
+ Z="1874"
+ color="8"
+ B="2095187854"
+ E="2095187856"
+ Display="Bold"
+/><b
+ id="2095187868"
+ Z="1875"
+ B="2095187856"
+ E="2095187858"
+/><b
+ id="2095187869"
+ Z="1876"
+ B="2095187858"
+ E="2095187860"
+/><b
+ id="2095187870"
+ Z="1877"
+ B="2095187860"
+ E="2095187862"
+ Order="2"
+ BondCircularOrdering="2095187869 0 2095187894 2095187871"
+/><b
+ id="2095187871"
+ Z="1878"
+ B="2095187862"
+ E="2095187864"
+/><b
+ id="2095187872"
+ Z="1879"
+ color="8"
+ B="2095187864"
+ E="2095187852"
+ Display="Bold"
+/><b
+ id="2095187887"
+ Z="1894"
+ B="2095187873"
+ E="2095187875"
+/><b
+ id="2095187888"
+ Z="1895"
+ B="2095187875"
+ E="2095187877"
+/><b
+ id="2095187893"
+ Z="1900"
+ B="2095187885"
+ E="2095187873"
+/><b
+ id="2095187894"
+ Z="1901"
+ B="2095187862"
+ E="2095187885"
+/><b
+ id="2095187895"
+ Z="1902"
+ B="2095187852"
+ E="2095187877"
+/><b
+ id="2095187897"
+ Z="1904"
+ B="2095187864"
+ E="2095187896"
+/><b
+ id="2095187900"
+ Z="1907"
+ B="2095187856"
+ E="2095187896"
+/><b
+ id="2095187902"
+ Z="1909"
+ B="2095187877"
+ E="2095187901"
+ Order="2"
+/><b
+ id="2095187904"
+ Z="1911"
+ B="2095187858"
+ E="2095187903"
+ Order="2"
+/></fragment><fragment
+ id="2095187908"
+ BoundingBox="803.06 1015.91 873.15 1111.81"
+ Z="1947"
+><n
+ id="2095187909"
+ p="831.75 1052.25"
+ Z="1945"
+/><n
+ id="2095187910"
+ p="826.56 1071.64"
+ Z="1946"
+/><n
+ id="2095187911"
+ p="838.47 1087.78"
+ Z="1948"
+/><n
+ id="2095187912"
+ p="858.53 1088.53"
+ Z="1949"
+/><n
+ id="2095187913"
+ p="871.62 1073.32"
+ Z="1950"
+/><n
+ id="2095187914"
+ p="867.89 1053.60"
+ Z="1951"
+/><n
+ id="2095187915"
+ p="850.15 1044.22"
+ Z="1952"
+/><n
+ id="2095187916"
+ p="859.88 1016.62"
+ Z="1960"
+/><n
+ id="2095187917"
+ p="839.81 1016.62"
+ Z="1961"
+/><n
+ id="2095187918"
+ p="827.29 1032.32"
+ Z="1962"
+/><n
+ id="2095187919"
+ p="872.39 1032.32"
+ Z="1963"
+/><n
+ id="2095187920"
+ p="853.50 1068.75"
+ Z="1969"
+ Element="8"
+ NumHydrogens="0"
+ Charge="1"
+ NeedsClean="yes"
+><t
+ p="848.82 1073.47"
+ BoundingBox="848.82 1063.32 858.17 1073.62"
+ LabelJustification="Left"
+><s font="3" size="12" color="0" face="97">O</s></t></n><n
+ id="2095187921"
+ p="807.73 1027.81"
+ Z="1972"
+ Element="8"
+ NumHydrogens="0"
+ NeedsClean="yes"
+><t
+ p="803.06 1032.53"
+ BoundingBox="803.06 1022.38 812.41 1032.68"
+ LabelJustification="Left"
+><s font="3" size="12" color="0" face="97">O</s></t></n><n
+ id="2095187922"
+ p="866.56 1106.93"
+ Z="1974"
+ Element="8"
+ NumHydrogens="0"
+ Charge="-1"
+ NeedsClean="yes"
+><t
+ p="861.88 1111.66"
+ BoundingBox="861.88 1101.51 871.23 1111.81"
+ LabelJustification="Left"
+ LabelAlignment="Left"
+><s font="3" size="12" color="0" face="97">O</s></t></n><b
+ id="2095187923"
+ Z="1953"
+ B="2095187909"
+ E="2095187910"
+ Order="2"
+ BondCircularOrdering="2095187945 2095187934 0 2095187948"
+/><b
+ id="2095187925"
+ Z="1955"
+ B="2095187911"
+ E="2095187912"
+ Order="2"
+ BondCircularOrdering="2095187936 2095187948 2095187938 2095187926"
+/><b
+ id="2095187926"
+ Z="1956"
+ B="2095187912"
+ E="2095187913"
+/><b
+ id="2095187927"
+ Z="1957"
+ B="2095187913"
+ E="2095187914"
+ Order="2"
+ BondCircularOrdering="2095187926 0 2095187933 2095187928"
+/><b
+ id="2095187928"
+ Z="1958"
+ B="2095187914"
+ E="2095187915"
+/><b
+ id="2095187930"
+ Z="1964"
+ B="2095187916"
+ E="2095187917"
+/><b
+ id="2095187931"
+ Z="1965"
+ B="2095187917"
+ E="2095187918"
+/><b
+ id="2095187932"
+ Z="1966"
+ B="2095187919"
+ E="2095187916"
+/><b
+ id="2095187933"
+ Z="1967"
+ B="2095187914"
+ E="2095187919"
+/><b
+ id="2095187934"
+ Z="1968"
+ B="2095187909"
+ E="2095187918"
+/><b
+ id="2095187935"
+ Z="1970"
+ B="2095187915"
+ E="2095187920"
+ Order="2"
+ BondCircularOrdering="2095187928 2095187945 2095187936 0"
+/><b
+ id="2095187936"
+ Z="1971"
+ B="2095187911"
+ E="2095187920"
+/><b
+ id="2095187937"
+ Z="1973"
+ B="2095187918"
+ E="2095187921"
+ Order="2"
+/><b
+ id="2095187938"
+ Z="1975"
+ B="2095187912"
+ E="2095187922"
+/><b
+ id="2095187945"
+ Z="1982"
+ B="2095187909"
+ E="2095187915"
+ Display="Dash"
+/><b
+ id="2095187948"
+ Z="1985"
+ B="2095187910"
+ E="2095187911"
+ Display="Dash"
+/><graphic
+ id="2095187940"
+ BoundingBox="854.07 1106.02 845.07 1106.02"
+ Z="1977"
+ GraphicType="Symbol"
+ SymbolType="CircleMinus"
+><represent attribute="Charge" object="2095187922"/></graphic><graphic
+ id="2095187942"
+ BoundingBox="840.94 1065.75 840.94 1074.75"
+ Z="1979"
+ GraphicType="Symbol"
+ SymbolType="CirclePlus"
+><represent attribute="Charge" object="2095187920"/></graphic></fragment><fragment
+ id="2095187952"
+ BoundingBox="840.94 1123.41 856.29 1137.51"
+ Z="1989"
+><n
+ id="2095187951"
+ p="844.61 1129.84"
+ Z="1988"
+ Warning="An atom in this label has an invalid valence."
+ NodeType="Unspecified"
+ NeedsClean="yes"
+><fragment
+ id="2095188083"
+><n
+ id="2095188084"
+ p="834.84 1129.84"
+ Element="1"
+ NumHydrogens="0"
+ Isotope="3"
+/><n
+ id="2095188085"
+ p="854.89 1129.84"
+ Element="16"
+ NumHydrogens="0"
+/><b
+ id="2095188086"
+ B="2095188084"
+ E="2095188085"
+/></fragment><t
+ id="2095187950"
+ p="840.94 1134.56"
+ BoundingBox="840.94 1123.41 856.29 1137.51"
+ Z="1987"
+ LabelJustification="Left"
+ LabelLineHeight="auto"
+ LineHeight="auto"
+ LabelAlignment="Left"
+><s font="3" size="12" color="0" face="1">TS</s></t></n></fragment><fragment
+ id="2095187953"
+ BoundingBox="980.11 1123.41 1025.51 1137.51"
+ Z="1997"
+><n
+ id="2095187954"
+ p="984.11 1129.84"
+ Z="1996"
+ Warning="ChemDraw can&apos;t interpret this label."
+ NodeType="Unspecified"
+ NeedsClean="yes"
+><t
+ p="980.11 1134.56"
+ BoundingBox="980.11 1123.41 1025.51 1137.51"
+ LabelJustification="Left"
+ LabelLineHeight="auto"
+ LineHeight="auto"
+ LabelAlignment="Left"
+><s font="3" size="12" color="0" face="1">Product</s></t></n></fragment><fragment
+ id="2095187963"
+ BoundingBox="858.44 1196.54 885.11 1210.64"
+ Z="2002"
+><n
+ id="2095187962"
+ p="862.76 1202.96"
+ Z="2001"
+ Warning="Formula cannot be computed for queries."
+ NodeType="Fragment"
+ NeedsClean="yes"
+><fragment
+ id="2095188088"
+><n
+ id="2095188089"
+ p="845.90 1207.97"
+ NodeType="GenericNickname"
+ GenericNickname="A"
+/><n
+ id="2095188090"
+ p="863.26 1197.95"
+ Element="16"
+ NumHydrogens="0"
+/><n
+ id="2095188091"
+ p="880.63 1207.97"
+ NodeType="GenericNickname"
+ GenericNickname="M"
+/><b
+ id="2095188092"
+ B="2095188090"
+ E="2095188091"
+/><b
+ id="2095188093"
+ B="2095188089"
+ E="2095188090"
+/></fragment><t
+ id="2095187738"
+ p="858.44 1207.69"
+ BoundingBox="858.44 1196.54 885.11 1210.64"
+ Z="1684"
+ LabelJustification="Left"
+ LabelLineHeight="auto"
+ LineHeight="auto"
+ LabelAlignment="Left"
+><s font="3" size="12" color="0" face="1">ASM</s></t></n></fragment><fragment
+ id="2095187965"
+ BoundingBox="900.06 1153.91 993.58 1249.81"
+ Z="2045"
+><n
+ id="2095187966"
+ p="928.75 1190.25"
+ Z="2043"
+/><n
+ id="2095187967"
+ p="923.56 1209.64"
+ Z="2044"
+/><n
+ id="2095187968"
+ p="935.47 1225.78"
+ Z="2046"
+/><n
+ id="2095187969"
+ p="955.53 1226.53"
+ Z="2047"
+/><n
+ id="2095187970"
+ p="968.62 1211.32"
+ Z="2048"
+/><n
+ id="2095187971"
+ p="964.89 1191.60"
+ Z="2049"
+ color="4"
+/><n
+ id="2095187972"
+ p="947.15 1182.22"
+ Z="2050"
+/><n
+ id="2095187973"
+ p="956.88 1154.62"
+ Z="2056"
+/><n
+ id="2095187974"
+ p="936.81 1154.62"
+ Z="2057"
+/><n
+ id="2095187975"
+ p="924.29 1170.32"
+ Z="2058"
+/><n
+ id="2095187976"
+ p="969.39 1170.32"
+ Z="2059"
+ color="4"
+/><n
+ id="2095187977"
+ p="950.50 1206.75"
+ Z="2065"
+ Element="8"
+ NumHydrogens="0"
+ Charge="1"
+ NeedsClean="yes"
+ LabelDisplay="Center"
+><t
+ p="945.82 1211.47"
+ BoundingBox="945.82 1201.32 955.17 1211.62"
+ LabelJustification="Left"
+><s font="3" size="12" color="0" face="97">O</s></t></n><n
+ id="2095187978"
+ p="904.73 1165.81"
+ Z="2068"
+ Element="8"
+ NumHydrogens="0"
+ NeedsClean="yes"
+><t
+ p="900.06 1170.53"
+ BoundingBox="900.06 1160.38 909.41 1170.68"
+ LabelJustification="Left"
+><s font="3" size="12" color="0" face="97">O</s></t></n><n
+ id="2095187979"
+ p="963.56 1244.93"
+ Z="2070"
+ Element="8"
+ NumHydrogens="0"
+ Charge="-1"
+ NeedsClean="yes"
+ LabelDisplay="Center"
+><t
+ p="958.88 1249.66"
+ BoundingBox="958.88 1239.51 968.23 1249.81"
+ LabelJustification="Left"
+ LabelAlignment="Left"
+><s font="3" size="12" color="0" face="97">O</s></t></n><n
+ id="2095188004"
+ p="989.23 1167.33"
+ Z="2078"
+ color="4"
+ Element="1"
+ NumHydrogens="0"
+ NeedsClean="yes"
+><t
+ p="984.91 1172.05"
+ BoundingBox="984.91 1162.08 993.58 1172.05"
+ color="4"
+ LabelJustification="Left"
+><s font="3" size="12" color="4" face="97">H</s></t></n><n
+ id="2095188006"
+ p="984.28 1186.41"
+ Z="2080"
+ color="4"
+ Element="1"
+ NumHydrogens="0"
+ NeedsClean="yes"
+ LabelDisplay="Center"
+><t
+ p="979.95 1191.13"
+ BoundingBox="979.95 1181.16 988.62 1191.13"
+ color="4"
+ LabelJustification="Left"
+><s font="3" size="12" color="4" face="97">H</s></t></n><b
+ id="2095187980"
+ Z="2051"
+ B="2095187966"
+ E="2095187967"
+ Order="2"
+ BondCircularOrdering="2095187994 2095187989 0 2095187995"
+/><b
+ id="2095187981"
+ Z="2052"
+ B="2095187968"
+ E="2095187969"
+ Order="2"
+ BondCircularOrdering="2095187991 2095187995 2095187993 2095187982"
+/><b
+ id="2095187982"
+ Z="2053"
+ B="2095187969"
+ E="2095187970"
+/><b
+ id="2095187983"
+ Z="2054"
+ B="2095187970"
+ E="2095187971"
+ Order="2"
+ BondCircularOrdering="2095187982 0 2095188007 2095187984"
+/><b
+ id="2095187984"
+ Z="2055"
+ B="2095187971"
+ E="2095187972"
+/><b
+ id="2095187985"
+ Z="2060"
+ B="2095187973"
+ E="2095187974"
+/><b
+ id="2095187986"
+ Z="2061"
+ B="2095187974"
+ E="2095187975"
+/><b
+ id="2095187987"
+ Z="2062"
+ B="2095187976"
+ E="2095187973"
+/><b
+ id="2095187989"
+ Z="2064"
+ B="2095187966"
+ E="2095187975"
+/><b
+ id="2095187990"
+ Z="2066"
+ B="2095187972"
+ E="2095187977"
+ Order="2"
+ BondCircularOrdering="2095187984 2095187994 2095187991 0"
+/><b
+ id="2095187991"
+ Z="2067"
+ B="2095187968"
+ E="2095187977"
+/><b
+ id="2095187992"
+ Z="2069"
+ B="2095187975"
+ E="2095187978"
+ Order="2"
+/><b
+ id="2095187993"
+ Z="2071"
+ B="2095187969"
+ E="2095187979"
+/><b
+ id="2095187994"
+ Z="2074"
+ B="2095187966"
+ E="2095187972"
+ Display="Dash"
+/><b
+ id="2095187995"
+ Z="2075"
+ B="2095187967"
+ E="2095187968"
+ Display="Dash"
+/><b
+ id="2095188005"
+ Z="2079"
+ color="4"
+ B="2095187976"
+ E="2095188004"
+ Display="Bold"
+/><b
+ id="2095188007"
+ Z="2081"
+ color="4"
+ B="2095187971"
+ E="2095188006"
+ Display="Bold"
+/><graphic
+ id="2095187996"
+ BoundingBox="951.07 1244.02 942.07 1244.02"
+ Z="2072"
+ GraphicType="Symbol"
+ SymbolType="CircleMinus"
+><represent attribute="Charge" object="2095187979"/></graphic><graphic
+ id="2095187997"
+ BoundingBox="937.94 1203.75 937.94 1212.75"
+ Z="2073"
+ GraphicType="Symbol"
+ SymbolType="CirclePlus"
+><represent attribute="Charge" object="2095187977"/></graphic></fragment><fragment
+ id="2095187998"
+ BoundingBox="930.24 1261.41 984.32 1275.51"
+ Z="2077"
+><n
+ id="2095187999"
+ p="935.24 1267.84"
+ Z="2076"
+ Warning="ChemDraw can&apos;t interpret this label."
+ NodeType="Unspecified"
+ NeedsClean="yes"
+><t
+ p="930.24 1272.56"
+ BoundingBox="930.24 1261.41 984.32 1275.51"
+ LabelJustification="Left"
+ LabelLineHeight="auto"
+ LineHeight="auto"
+ LabelAlignment="Left"
+><s font="3" size="12" color="0" face="1">Model-TS</s></t></n></fragment><fragment
+ id="2095188012"
+ BoundingBox="1169.52 1180.95 1225.62 1249.81"
+ Z="2104"
+><n
+ id="2095188013"
+ p="1172.47 1225.78"
+ Z="2105"
+/><n
+ id="2095188014"
+ p="1192.53 1226.53"
+ Z="2106"
+/><n
+ id="2095188015"
+ p="1205.62 1211.32"
+ Z="2107"
+/><n
+ id="2095188016"
+ p="1201.89 1191.60"
+ Z="2108"
+ color="4"
+/><n
+ id="2095188017"
+ p="1184.15 1182.22"
+ Z="2109"
+/><n
+ id="2095188018"
+ p="1187.50 1206.75"
+ Z="2114"
+ Element="8"
+ NumHydrogens="0"
+ Charge="1"
+ NeedsClean="yes"
+ LabelDisplay="Center"
+><t
+ p="1182.82 1211.47"
+ BoundingBox="1182.82 1201.32 1192.17 1211.62"
+ LabelJustification="Left"
+><s font="3" size="12" color="0" face="97">O</s></t></n><n
+ id="2095188019"
+ p="1200.56 1244.93"
+ Z="2117"
+ Element="8"
+ NumHydrogens="0"
+ Charge="-1"
+ NeedsClean="yes"
+ LabelDisplay="Center"
+><t
+ p="1195.88 1249.66"
+ BoundingBox="1195.88 1239.51 1205.23 1249.81"
+ LabelJustification="Left"
+ LabelAlignment="Left"
+><s font="3" size="12" color="0" face="97">O</s></t></n><n
+ id="2095188020"
+ p="1221.28 1186.41"
+ Z="2121"
+ color="4"
+ Element="1"
+ NumHydrogens="0"
+ NeedsClean="yes"
+ LabelDisplay="Center"
+><t
+ p="1216.95 1191.13"
+ BoundingBox="1216.95 1181.16 1225.62 1191.13"
+ color="4"
+ LabelJustification="Left"
+><s font="3" size="12" color="4" face="97">H</s></t></n><b
+ id="2095188021"
+ Z="2110"
+ B="2095188013"
+ E="2095188014"
+ Order="2"
+ BondCircularOrdering="2095188026 0 2095188027 2095188022"
+/><b
+ id="2095188022"
+ Z="2111"
+ B="2095188014"
+ E="2095188015"
+/><b
+ id="2095188023"
+ Z="2112"
+ B="2095188015"
+ E="2095188016"
+ Order="2"
+ BondCircularOrdering="2095188022 0 2095188028 2095188024"
+/><b
+ id="2095188024"
+ Z="2113"
+ B="2095188016"
+ E="2095188017"
+/><b
+ id="2095188025"
+ Z="2115"
+ B="2095188017"
+ E="2095188018"
+ Order="2"
+ DoublePosition="Left"
+ BondCircularOrdering="2095188024 0 2095188026 0"
+/><b
+ id="2095188026"
+ Z="2116"
+ B="2095188013"
+ E="2095188018"
+/><b
+ id="2095188027"
+ Z="2118"
+ B="2095188014"
+ E="2095188019"
+/><b
+ id="2095188028"
+ Z="2122"
+ color="4"
+ B="2095188016"
+ E="2095188020"
+ Display="Bold"
+/><graphic
+ id="2095188029"
+ BoundingBox="1188.07 1244.02 1179.07 1244.02"
+ Z="2119"
+ GraphicType="Symbol"
+ SymbolType="CircleMinus"
+><represent attribute="Charge" object="2095188019"/></graphic><graphic
+ id="2095188030"
+ BoundingBox="1174.94 1203.75 1174.94 1212.75"
+ Z="2120"
+ GraphicType="Symbol"
+ SymbolType="CirclePlus"
+><represent attribute="Charge" object="2095188018"/></graphic></fragment><fragment
+ id="2095188032"
+ BoundingBox="1054 1175.10 1147.05 1231.94"
+ Z="2142"
+><n
+ id="2095188033"
+ p="1082.69 1211.44"
+ Z="2140"
+/><n
+ id="2095188034"
+ p="1077.49 1230.82"
+ Z="2141"
+/><n
+ id="2095188035"
+ p="1110.81 1175.81"
+ Z="2144"
+/><n
+ id="2095188036"
+ p="1090.74 1175.81"
+ Z="2145"
+/><n
+ id="2095188037"
+ p="1078.23 1191.50"
+ Z="2146"
+/><n
+ id="2095188038"
+ p="1123.33 1191.50"
+ Z="2147"
+ color="4"
+/><n
+ id="2095188039"
+ p="1058.67 1187"
+ Z="2152"
+ Element="8"
+ NumHydrogens="0"
+ NeedsClean="yes"
+><t
+ p="1054 1191.72"
+ BoundingBox="1054 1181.57 1063.35 1191.87"
+ LabelJustification="Left"
+><s font="3" size="12" color="0" face="97">O</s></t></n><n
+ id="2095188040"
+ p="1142.71 1186.31"
+ Z="2154"
+ color="4"
+ Element="1"
+ NumHydrogens="0"
+ NeedsClean="yes"
+><t
+ p="1138.39 1191.03"
+ BoundingBox="1138.39 1181.06 1147.05 1191.03"
+ color="4"
+ LabelJustification="Left"
+><s font="3" size="12" color="4" face="97">H</s></t></n><b
+ id="2095188041"
+ Z="2143"
+ B="2095188033"
+ E="2095188034"
+ Order="2"
+ DoublePosition="Right"
+/><b
+ id="2095188042"
+ Z="2148"
+ B="2095188035"
+ E="2095188036"
+/><b
+ id="2095188043"
+ Z="2149"
+ B="2095188036"
+ E="2095188037"
+/><b
+ id="2095188044"
+ Z="2150"
+ B="2095188038"
+ E="2095188035"
+/><b
+ id="2095188045"
+ Z="2151"
+ B="2095188033"
+ E="2095188037"
+/><b
+ id="2095188046"
+ Z="2153"
+ B="2095188037"
+ E="2095188039"
+ Order="2"
+/><b
+ id="2095188047"
+ Z="2155"
+ color="4"
+ B="2095188038"
+ E="2095188040"
+ Display="Bold"
+/></fragment><fragment
+ id="2095188050"
+ BoundingBox="693.50 1054.50 708.69 1069.69"
+ Z="2158"
+><n
+ id="2095188049"
+ p="694 1055"
+ Z="2157"
+/><n
+ id="2095188051"
+ p="708.19 1069.19"
+ Z="2159"
+/><b
+ id="2095188052"
+ Z="2160"
+ Warning="This isolated bond is probably not intended to have chemical significance."
+ B="2095188049"
+ E="2095188051"
+ CrossingBonds="2095187772"
+/></fragment><fragment
+ id="2095188053"
+ BoundingBox="706.44 1071.54 733.11 1085.64"
+ Z="2170"
+><n
+ id="2095188054"
+ p="710.76 1077.96"
+ Z="2169"
+ color="4"
+ NodeType="Fragment"
+ NeedsClean="yes"
+><fragment
+ id="2095188095"
+><n
+ id="2095188056"
+ p="693.90 1082.97"
+ Z="2164"
+ NodeType="GenericNickname"
+ NumHydrogens="0"
+ NeedsClean="yes"
+ GenericNickname="A"
+><t
+ p="689.57 1087.70"
+ BoundingBox="689.57 1077.72 698.24 1087.70"
+ LabelJustification="Left"
+><s font="3" size="12" color="0" face="97">A</s></t></n><n
+ id="2095188057"
+ p="711.26 1072.95"
+ Z="2165"
+ Element="16"
+ NumHydrogens="0"
+ NeedsClean="yes"
+><t
+ p="707.26 1077.67"
+ BoundingBox="707.26 1067.52 715.27 1077.82"
+ LabelJustification="Left"
+><s font="3" size="12" color="0" face="97">S</s></t></n><n
+ id="2095188058"
+ p="728.63 1082.97"
+ Z="2166"
+ NodeType="GenericNickname"
+ NumHydrogens="0"
+ NeedsClean="yes"
+ GenericNickname="M"
+><t
+ p="723.63 1087.70"
+ BoundingBox="723.63 1077.72 733.63 1087.70"
+ LabelJustification="Left"
+><s font="3" size="12" color="0" face="97">M</s></t></n><b
+ id="2095188059"
+ Z="2167"
+ B="2095188057"
+ E="2095188058"
+/><b
+ id="2095188060"
+ Z="2168"
+ B="2095188056"
+ E="2095188057"
+/></fragment><t
+ p="706.44 1082.69"
+ BoundingBox="706.44 1071.54 733.11 1085.64"
+ color="4"
+ LabelJustification="Left"
+ LabelLineHeight="auto"
+ LineHeight="auto"
+ LabelAlignment="Left"
+><s font="3" size="12" color="4" face="1">ASM</s></t></n></fragment><fragment
+ id="2095188068"
+ BoundingBox="655.29 1123.41 706 1137.51"
+ Z="2181"
+><n
+ id="2095188069"
+ p="659.61 1129.84"
+ Z="2180"
+ Warning="ChemDraw can&apos;t interpret this label."
+ NodeType="Unspecified"
+ NeedsClean="yes"
+><t
+ p="655.29 1134.56"
+ BoundingBox="655.29 1123.41 706 1137.51"
+ LabelJustification="Left"
+ LabelLineHeight="auto"
+ LineHeight="auto"
+ LabelAlignment="Left"
+><s font="3" size="12" color="0" face="1">Reactant</s></t></n></fragment><t
+ id="2095187736"
+ p="580 1052.56"
+ BoundingBox="580 1041.41 605.35 1055.51"
+ Z="1682"
+ Warning="Chemical Interpretation is not possible for this label"
+ LineHeight="auto"
+><s font="3" size="12" color="0" face="1">TMP</s></t><t
+ id="2095187737"
+ p="591 1073.06"
+ BoundingBox="572.32 1061.91 609.68 1090.11"
+ Z="1683"
+ Warning="Chemical Interpretation is not possible for this label"
+ CaptionJustification="Center"
+ Justification="Center"
+ LineHeight="auto"
+ LineStarts="6 12"
+><s font="3" size="12" color="0" face="1">-HOAc
+Step I</s></t><t
+ id="2095187739"
+ p="503.81 1134.56"
+ BoundingBox="503.81 1123.41 559.89 1137.51"
+ Z="1685"
+ Warning="Chemical Interpretation is not possible for this label"
+ LineHeight="auto"
+><s font="3" size="12" color="0" face="1">precursor</s></t><t
+ id="2095187964"
+ p="853.38 1229.62"
+ BoundingBox="853.38 1218.47 891.38 1232.57"
+ Z="2003"
+ color="4"
+ Warning="Chemical Interpretation is not possible for this label"
+ LineHeight="auto"
+><s font="3" size="12" color="4" face="1">H-CAP</s></t><t
+ id="2095188031"
+ p="989.69 1206.75"
+ BoundingBox="989.69 1195.60 1073.15 1209.70"
+ Z="2123"
+ Warning="Chemical Interpretation is not possible for this label"
+ LineHeight="auto"
+><s font="3" size="12" color="0" face="1">Fragmentation</s></t><t
+ id="2095188048"
+ p="1134.50 1215.50"
+ BoundingBox="1134.50 1204.35 1141.51 1218.45"
+ Z="2156"
+ Warning="Chemical Interpretation is not possible for this label"
+ LineHeight="auto"
+><s font="3" size="12" color="0" face="1">+</s></t><t
+ id="2095188061"
+ p="1069 1265"
+ BoundingBox="1069 1253.85 1135.75 1267.95"
+ Z="2171"
+ Warning="Chemical Interpretation is not possible for this label"
+ LineHeight="auto"
+><s font="3" size="12" color="0" face="1">Fragment A</s></t><t
+ id="2095188062"
+ p="1164.50 1265"
+ BoundingBox="1164.50 1253.85 1231.25 1267.95"
+ Z="2172"
+ Warning="Chemical Interpretation is not possible for this label"
+ LineHeight="auto"
+><s font="3" size="12" color="0" face="1">Fragment B</s></t><t
+ id="2095188063"
+ p="746.12 1050.25"
+ BoundingBox="746.12 1039.10 774.48 1053.20"
+ Z="2173"
+ Warning="Chemical Interpretation is not possible for this label"
+ LineHeight="auto"
+><s font="3" size="12" color="0" face="1">[5+2]</s></t><t
+ id="2095188065"
+ p="741.94 1072.69"
+ BoundingBox="741.94 1061.54 778.02 1075.64"
+ Z="2175"
+ Warning="Chemical Interpretation is not possible for this label"
+ LineHeight="auto"
+><s font="3" size="12" color="0" face="1">Step II</s></t><t
+ id="2095188066"
+ p="900 1051.88"
+ BoundingBox="900 1040.72 929.40 1054.82"
+ Z="2176"
+ Warning="Chemical Interpretation is not possible for this label"
+ LineHeight="auto"
+><s font="3" size="12" color="0" face="1">bond</s></t><t
+ id="2095188067"
+ p="889.31 1072.50"
+ BoundingBox="889.31 1061.35 944.73 1075.45"
+ Z="2177"
+ Warning="Chemical Interpretation is not possible for this label"
+ LineHeight="auto"
+><s font="3" size="12" color="0" face="1">formation</s></t><graphic
+ id="2095187735"
+ SupersededBy="2095188096"
+ BoundingBox="630.81 1058.50 565.81 1058.50"
+ Z="1681"
+ GraphicType="Line"
+ ArrowType="FullHead"
+ HeadSize="1000"
+/><graphic
+ id="2095187786"
+ SupersededBy="2095188097"
+ BoundingBox="798.81 1058.50 733.81 1058.50"
+ Z="1762"
+ GraphicType="Line"
+ ArrowType="FullHead"
+ HeadSize="1000"
+/><graphic
+ id="2095187907"
+ SupersededBy="2095188098"
+ BoundingBox="954.81 1058.50 889.81 1058.50"
+ Z="1913"
+ GraphicType="Line"
+ ArrowType="FullHead"
+ HeadSize="1000"
+/><graphic
+ id="2095187960"
+ SupersededBy="2095188099"
+ BoundingBox="848.88 1214.25 848.88 1146.50"
+ Z="1999"
+ GraphicType="Line"
+ HeadSize="1000"
+/><graphic
+ id="2095187961"
+ SupersededBy="2095188100"
+ BoundingBox="910.13 1214.25 848.88 1214.25"
+ Z="2000"
+ GraphicType="Line"
+ ArrowType="FullHead"
+ HeadSize="1000"
+/><graphic
+ id="2095188010"
+ SupersededBy="2095188101"
+ BoundingBox="1057 1214.25 1000 1214.25"
+ Z="2083"
+ GraphicType="Line"
+ ArrowType="FullHead"
+ HeadSize="1000"
+/><embeddedobject
+ id="2095187689"
+ BoundingBox="114.38 1022.25 356.62 1160.25"
+ Z="1635"
+ CompressedEnhancedMetafile="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
+
+"
+ UncompressedEnhancedMetafileSize="119536"
+/><scheme
+ id="2095188102"
+><step
+ id="2095188103"
+ ReactionStepReactants="2095187698"
+ ReactionStepProducts="2095187740 2095188050 2095188053"
+ ReactionStepArrows="2095187735"
+ ReactionStepObjectsAboveArrow="2095187736"
+ ReactionStepObjectsBelowArrow="2095187737"
+/><step
+ id="2095188104"
+ ReactionStepReactants="2095187740 2095188050 2095188053"
+ ReactionStepProducts="2095187908"
+ ReactionStepArrows="2095187786"
+ ReactionStepObjectsAboveArrow="2095188063"
+ ReactionStepObjectsBelowArrow="2095188065"
+/><step
+ id="2095188105"
+ ReactionStepReactants="2095187908"
+ ReactionStepProducts="2095187855"
+ ReactionStepArrows="2095187907"
+ ReactionStepObjectsAboveArrow="2095188066"
+ ReactionStepObjectsBelowArrow="2095188067"
+/></scheme><scheme
+ id="2095188106"
+><step
+ id="2095188107"
+ ReactionStepReactants="2095187952 2095187953"
+ ReactionStepProducts="2095187965"
+ ReactionStepArrows="2095187961"
+ ReactionStepObjectsAboveArrow="2095187963"
+ ReactionStepObjectsBelowArrow="2095187964"
+/><step
+ id="2095188108"
+ ReactionStepReactants="2095187965"
+ ReactionStepProducts="2095188032 2095188012"
+ ReactionStepArrows="2095188010"
+ ReactionStepObjectsAboveArrow="2095188031"
+/></scheme><arrow
+ id="2095188096"
+ BoundingBox="565.81 1054.44 630.81 1062.05"
+ Z="1681"
+ FillType="None"
+ ArrowheadHead="Full"
+ ArrowheadType="Solid"
+ HeadSize="1000"
+ ArrowheadCenterSize="875"
+ ArrowheadWidth="250"
+ Head3D="630.81 1058.50 0"
+ Tail3D="565.81 1058.50 0"
+ Center3D="916.06 1587.75 0"
+ MajorAxisEnd3D="981.06 1587.75 0"
+ MinorAxisEnd3D="916.06 1652.75 0"
+/><arrow
+ id="2095188097"
+ BoundingBox="733.81 1054.44 798.81 1062.05"
+ Z="1762"
+ FillType="None"
+ ArrowheadHead="Full"
+ ArrowheadType="Solid"
+ HeadSize="1000"
+ ArrowheadCenterSize="875"
+ ArrowheadWidth="250"
+ Head3D="798.81 1058.50 0"
+ Tail3D="733.81 1058.50 0"
+ Center3D="1084.06 1587.75 0"
+ MajorAxisEnd3D="1149.06 1587.75 0"
+ MinorAxisEnd3D="1084.06 1652.75 0"
+/><arrow
+ id="2095188098"
+ BoundingBox="889.81 1054.44 954.81 1062.05"
+ Z="1913"
+ FillType="None"
+ ArrowheadHead="Full"
+ ArrowheadType="Solid"
+ HeadSize="1000"
+ ArrowheadCenterSize="875"
+ ArrowheadWidth="250"
+ Head3D="954.81 1058.50 0"
+ Tail3D="889.81 1058.50 0"
+ Center3D="1240.06 1587.75 0"
+ MajorAxisEnd3D="1305.06 1587.75 0"
+ MinorAxisEnd3D="1240.06 1652.75 0"
+/><arrow
+ id="2095188099"
+ BoundingBox="848.16 1146.50 849.58 1214.25"
+ Z="1999"
+ FillType="None"
+ ArrowheadType="Solid"
+ HeadSize="1000"
+ ArrowheadCenterSize="875"
+ ArrowheadWidth="250"
+ Head3D="848.88 1214.25 0"
+ Tail3D="848.88 1146.50 0"
+ Center3D="1190.31 1783.75 0"
+ MajorAxisEnd3D="1258.06 1783.75 0"
+ MinorAxisEnd3D="1190.31 1851.50 0"
+/><arrow
+ id="2095188100"
+ BoundingBox="848.88 1210.19 910.13 1217.80"
+ Z="2000"
+ FillType="None"
+ ArrowheadHead="Full"
+ ArrowheadType="Solid"
+ HeadSize="1000"
+ ArrowheadCenterSize="875"
+ ArrowheadWidth="250"
+ Head3D="910.13 1214.25 0"
+ Tail3D="848.88 1214.25 0"
+ Center3D="1253.45 1818.38 0"
+ MajorAxisEnd3D="1314.70 1818.38 0"
+ MinorAxisEnd3D="1253.45 1879.63 0"
+/><arrow
+ id="2095188101"
+ BoundingBox="1000 1210.19 1057 1217.80"
+ Z="2083"
+ FillType="None"
+ ArrowheadHead="Full"
+ ArrowheadType="Solid"
+ HeadSize="1000"
+ ArrowheadCenterSize="875"
+ ArrowheadWidth="250"
+ Head3D="1057 1214.25 0"
+ Tail3D="1000 1214.25 0"
+ Center3D="1474 1817.62 0"
+ MajorAxisEnd3D="1531 1817.62 0"
+ MinorAxisEnd3D="1474 1874.62 0"
+/><annotation
+ Keyword="GUID"
+ Content="841B63F5-73DC-4D2E-89E0-791ECB0A5A66"
+/><annotation
+ Keyword="HATU"
+ Content="HATU"
+/><annotation
+ Keyword="Name"
+ Content="2-methylpenta-2,3-diene"
+/><annotation
+ Keyword="Type"
+ Content="stnd."
+/></page></CDXML>

@@ -1,0 +1,2 @@
+sample_id,thermo.dE_activation,thermo.dE_reaction,geom.r_avg,geom.dr,geom.close_contacts_density,ts.imag1_cm1_abs,asm.distortion_total_kcal,fmo.dipolar_omega_ev,qc.sample_weight
+,5.15322993564523,254.51951796342058,2.196764130439255,-0.0038735346797671433,1.4615384615384615,,,,

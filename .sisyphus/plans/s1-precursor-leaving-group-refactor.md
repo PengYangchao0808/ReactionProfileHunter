@@ -372,7 +372,7 @@ Parallel Speedup: ~50% faster than sequential
   - Files: `rph_core/steps/anchor/handler.py`, `tests/test_anchor_cache_integration.py`
   - Pre-commit: `pytest tests/test_anchor_cache_integration.py`
 
-- [ ] 5. 修改 orchestrator 读取 precursor 和 leaving group
+- [x] 5. 修改 orchestrator 读取 precursor 和 leaving group
 
   **What to do**:
   - 修改 `rph_core/orchestrator.py` 中的 `run_single_reaction()` 方法
@@ -429,7 +429,7 @@ Parallel Speedup: ~50% faster than sequential
   - Files: `rph_core/orchestrator.py`, `tests/test_orchestrator_multi_molecule.py`
   - Pre-commit: `pytest tests/test_orchestrator_multi_molecule.py`
 
-- [ ] 6. 修改 AnchorPhase 输出结构支持多分子
+- [x] 6. 修改 AnchorPhase 输出结构支持多分子
 
   **What to do**:
   - 修改 `AnchorPhaseResult` dataclass，确保 `anchored_molecules` 可以包含多个条目
@@ -481,7 +481,7 @@ Parallel Speedup: ~50% faster than sequential
 
 ### Wave 3: 目录重命名和路径更新
 
-- [ ] 7. 重命名所有 S1_Product → S1_ConfGeneration
+- [x] 7. 重命名所有 S1_Product → S1_ConfGeneration
 
   **What to do**:
   - 使用 Task 3 的扫描结果，逐个文件替换：
@@ -526,7 +526,7 @@ Parallel Speedup: ~50% faster than sequential
   - Files: `rph_core/**/*.py`, `tests/**/*.py`, `README.md`, `rph_core/steps/*/AGENTS.md`
   - Pre-commit: `pytest tests/ -k "s1"`
 
-- [ ] 8. 更新 S2 的路径引用
+- [x] 8. 更新 S2 的路径引用
 
   **What to do**:
   - 修改 `rph_core/steps/step2_retro/retro_scanner.py`

@@ -40,7 +40,7 @@ def pipeline_root(tmp_path):
     s3_ts.mkdir(parents=True, exist_ok=True)
 
     # S1/S2 directories (minimal)
-    s1 = root / "S1_Product"
+    s1 = root / "S1_ConfGeneration"
     s1.mkdir(parents=True, exist_ok=True)
     (s1 / "product_min.xyz").write_text("3\nProduct\nC 0 0 0\nH 1 0 0\n")
 
@@ -145,7 +145,7 @@ class TestQCArtifactsInMechIndex:
         # Run packager
         mech_index = pack_mechanism_assets(
             step_dirs={
-                'S1': pipeline_root / "S1_Product",
+                'S1': pipeline_root / "S1_ConfGeneration",
                 'S2': pipeline_root / "S2_Retro",
                 'S3': pipeline_root / "S3_TS"
             },
@@ -195,7 +195,7 @@ class TestQCArtifactsInMechIndex:
 
         pack_mechanism_assets(
             step_dirs={
-                'S1': pipeline_root / "S1_Product",
+                'S1': pipeline_root / "S1_ConfGeneration",
                 'S2': pipeline_root / "S2_Retro",
                 'S3': pipeline_root / "S3_TS"
             },

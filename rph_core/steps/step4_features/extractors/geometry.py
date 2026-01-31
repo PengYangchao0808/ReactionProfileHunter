@@ -13,19 +13,7 @@ import numpy as np
 
 from .base import BaseExtractor, register_extractor
 from rph_core.utils.file_io import read_xyz
-
-
-def calculate_distance(coords1, coords2):
-    """Calculate Euclidean distance between two coordinates.
-
-    Args:
-        coords1: First coordinate array (3,)
-        coords2: Second coordinate array (3,)
-
-    Returns:
-        Distance in Angstroms
-    """
-    return np.linalg.norm(coords1 - coords2)
+from rph_core.utils.geometry_tools import GeometryUtils
 
 
 def calculate_radius_of_gyration(coordinates):
@@ -77,24 +65,27 @@ class GeometryExtractor(BaseExtractor):
             raise ValueError("Failed to read ts_xyz file")
 
         n_atoms = len(symbols)
+        distance_matrix = GeometryUtils.compute_distance_matrix(coords)
 
         features = {}
         features["geom.natoms_ts"] = n_atoms
 
+        r1: float = float("nan")
+        r2: float = float("nan")
+
         # Forming bond distances
         if forming_bonds:
-            r1 = r2 = np.nan
             bond_pairs = list(forming_bonds)
 
             if len(bond_pairs) >= 1:
                 i, j = bond_pairs[0]
                 if i < n_atoms and j < n_atoms:
-                    r1 = calculate_distance(coords[i], coords[j])
+                    r1 = distance_matrix[i, j]
 
             if len(bond_pairs) >= 2:
                 i, j = bond_pairs[1]
                 if i < n_atoms and j < n_atoms:
-                    r2 = calculate_distance(coords[i], coords[j])
+                    r2 = distance_matrix[i, j]
 
             features["geom.r1"] = r1
             features["geom.r2"] = r2
@@ -141,7 +132,7 @@ class GeometryExtractor(BaseExtractor):
                 if pair in bonded_pairs:
                     continue
 
-                dist = calculate_distance(coords[i], coords[j])
+                dist = distance_matrix[i, j]
                 if dist < 1.25:
                     continue
 
@@ -155,8 +146,10 @@ class GeometryExtractor(BaseExtractor):
 
         # V6.1: Add new geometry columns for linear models
         if not np.isnan(r1) and not np.isnan(r2):
-            features["geom.r_avg"] = (r1 + r2) / 2.0
-            features["geom.dr"] = r1 - r2  # Signed asynchronicity
+            r1_val = float(r1)
+            r2_val = float(r2)
+            features["geom.r_avg"] = (r1_val + r2_val) / 2.0
+            features["geom.dr"] = r1_val - r2_val
         else:
             features["geom.r_avg"] = np.nan
             features["geom.dr"] = np.nan

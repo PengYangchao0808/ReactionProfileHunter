@@ -1316,6 +1316,84 @@ class GaussianInterface:
             return None
         return np.array(freqs)
 
+    def constrained_optimize(
+        self,
+        xyz_file: Path,
+        output_dir: Path,
+        frozen_indices: List[int],
+        charge: int = 0,
+        spin: int = 1,
+        route: Optional[str] = None,
+        timeout: Optional[int] = None
+    ) -> QCResult:
+        from rph_core.utils.file_io import read_xyz
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        coords, symbols = read_xyz(xyz_file)
+
+        if route is None:
+            route = "#p opt b3lyp/def2-svp"
+
+        mod_redundant_lines = [f"X  {idx + 1}  F" for idx in frozen_indices]
+        mod_redundant_block = "\n".join(mod_redundant_lines)
+
+        route_line = route.strip().lstrip('#').strip()
+        if route_line.lower().startswith('p '):
+            route_line = route_line[1:].strip()
+
+        chk_name = f"{xyz_file.stem}_constrained.chk"
+        gjf_file = output_dir / f"{xyz_file.stem}_constrained.gjf"
+        log_file = output_dir / f"{xyz_file.stem}_constrained.log"
+
+        lines = [
+            f"%chk={chk_name}\n",
+            f"%mem={self.mem}\n",
+            f"%nprocshared={self.nprocshared}\n",
+            f"{_format_gaussian_route_block(route_line)}\n\n",
+            f"Constrained Optimization\n\n",
+            f"{charge} {spin}\n"
+        ]
+        for symbol, coord in zip(symbols, coords):
+            lines.append(f"{symbol:<2} {coord[0]:14.8f} {coord[1]:14.8f} {coord[2]:14.8f}\n")
+        lines.append("\n")
+        lines.append(mod_redundant_block)
+        lines.append("\n\n")
+
+        gjf_file.write_text("".join(lines))
+
+        try:
+            cmd = [self.gaussian_cmd, gjf_file.name, log_file.name] if self.use_wrapper else [self.gaussian_cmd, gjf_file.name]
+            result = subprocess.run(
+                cmd,
+                cwd=str(output_dir),
+                capture_output=True,
+                text=True,
+                timeout=timeout
+            )
+            if not log_file.exists():
+                return QCResult(success=False, converged=False, error_message="Gaussian log not created")
+
+            log_content = log_file.read_text()
+            converged = "Normal termination" in log_content
+
+            atoms = LogParser.extract_final_geometry(log_content)
+            result_coords = np.array([[a['x'], a['y'], a['z']] for a in atoms]) if atoms else None
+
+            return QCResult(
+                success=converged,
+                converged=converged,
+                coordinates=result_coords,
+                output_file=log_file,
+                error_message=None if converged else "Gaussian did not converge"
+            )
+
+        except subprocess.TimeoutExpired:
+            return QCResult(success=False, converged=False, error_message="Gaussian timed out")
+        except Exception as e:
+            return QCResult(success=False, converged=False, error_message=str(e))
+
 
 class QCInterfaceFactory:
     @staticmethod

@@ -43,7 +43,7 @@ def sample_symbols():
 @pytest.fixture
 def s1_only_dir(tmp_path):
     """S1 only - has precursor but no S2 neutral_precursor."""
-    s1 = tmp_path / "S1_Product"
+    s1 = tmp_path / "S1_ConfGeneration"
     s1.mkdir(parents=True)
 
     # Create S1 precursor
@@ -63,7 +63,7 @@ def s1_only_dir(tmp_path):
 @pytest.fixture
 def s1_and_s2_neutral_dir(tmp_path):
     """S1 and S2 with neutral_precursor intermediate."""
-    s1 = tmp_path / "S1_Product"
+    s1 = tmp_path / "S1_ConfGeneration"
     s1.mkdir(parents=True)
 
     # Create S1 precursor
@@ -102,7 +102,7 @@ def s2_only_dir(tmp_path):
 @pytest.fixture
 def full_pipeline_dir(tmp_path):
     """Full S1+S2+S3+S4 with all assets."""
-    s1 = tmp_path / "S1_Product"
+    s1 = tmp_path / "S1_ConfGeneration"
     s1.mkdir(parents=True)
     s2 = tmp_path / "S2_Retro"
     s2.mkdir(parents=True)

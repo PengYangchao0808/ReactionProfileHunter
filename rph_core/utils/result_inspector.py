@@ -128,6 +128,8 @@ class ResultInspector:
 
     def _select_global_min_xyz(self) -> Optional[Path]:
         candidates = [
+            self.work_dir / "S1_ConfGeneration" / "product" / "product_global_min.xyz",
+            self.work_dir / "S1_ConfGeneration" / "product_global_min.xyz",
             self.work_dir / "S1_Product" / "product" / "product_global_min.xyz",
             self.work_dir / "S1_Product" / "product_global_min.xyz"
         ]
@@ -138,6 +140,8 @@ class ResultInspector:
 
     def _global_min_target(self) -> Path:
         candidates = [
+            self.work_dir / "S1_ConfGeneration" / "product" / "product_global_min.xyz",
+            self.work_dir / "S1_ConfGeneration" / "product_global_min.xyz",
             self.work_dir / "S1_Product" / "product" / "product_global_min.xyz",
             self.work_dir / "S1_Product" / "product_global_min.xyz"
         ]
@@ -148,6 +152,8 @@ class ResultInspector:
 
     def _select_sp_dir(self) -> Optional[Path]:
         candidates = [
+            self.work_dir / "S1_ConfGeneration" / "product" / "dft",
+            self.work_dir / "S1_ConfGeneration" / "dft",
             self.work_dir / "S1_Product" / "product" / "dft",
             self.work_dir / "S1_Product" / "dft"
         ]
@@ -203,7 +209,10 @@ class ResultInspector:
             return InspectionResult(False, "missing_ts_xyz", [])
 
         if self.strict:
-            logs = list(s3_dir.glob("*.log")) + list(s3_dir.glob("*.out"))
+            logs = [
+                path for path in s3_dir.iterdir()
+                if path.is_file() and path.suffix in (".log", ".out")
+            ]
             logs = [log for log in logs if not self._is_fake_path(log) and "ts" in log.name.lower()]
             for log in logs:
                 if self._check_normal_termination(log, engine="gaussian") or self._check_normal_termination(log, engine="orca"):

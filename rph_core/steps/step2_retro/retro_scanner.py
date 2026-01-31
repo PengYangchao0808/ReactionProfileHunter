@@ -13,14 +13,13 @@ import logging
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple, Optional, List, Any
+from typing import Tuple, Optional, Dict, Any
 
 import numpy as np
 
 from rph_core.utils.log_manager import LoggerMixin
 from rph_core.utils.file_io import read_xyz, write_xyz
 from rph_core.utils.geometry_tools import LogParser
-from rph_core.utils.data_types import QCResult
 from rph_core.utils.xtb_runner import XTBRunner
 from rph_core.utils.tsv_dataset import ReactionRecord
 from .smarts_matcher import SMARTSMatcher
@@ -41,10 +40,10 @@ class RetroScanResultV2:
 
 class RetroScanner(LoggerMixin):
     """
-    逆向扫描引擎 (Step 2) - v3.0
+    逆向扫描引擎 (Step 2) - v3.0/v6.1
 
     v2.1 核心创新: Product-First 策略
-    v3.0 更新: 适配分子自治目录结构
+    v3.0/v6.1 更新: 适配分子自治及扁平目录结构
 
     职责:
     1. 识别产物中的形成键 (SMARTS)
@@ -63,13 +62,13 @@ class RetroScanner(LoggerMixin):
     DEFAULT_TS_DISTANCE = 2.2  # Å - TS 典型距离 (✅ PROMOTE.md 标准)
     DEFAULT_BREAK_DISTANCE = 3.50  # Å - 断裂距离
 
-    def __init__(self, config: dict, molecule_name: Optional[str] = None):
+    def __init__(self, config: Dict[str, Any], molecule_name: Optional[str] = None):
         """
-        初始化逆向扫描引擎 - v3.0
+        初始化逆向扫描引擎 - v3.0/v6.1
 
         Args:
             config: 配置字典
-            molecule_name: 分子名称（用于定位 v3.0 目录结构）
+            molecule_name: 分子名称（用于定位 v3.0/v6.1 目录结构）
         """
         self.config = config
         self.ts_distance = config.get('ts_distance', self.DEFAULT_TS_DISTANCE)
@@ -84,21 +83,21 @@ class RetroScanner(LoggerMixin):
         # 初始化键拉伸器
         self.bond_stretcher = BondStretcher()
 
-        self.logger.info(f"RetroScanner v3.0 初始化: TS距离={self.ts_distance}Å, 断裂距离={self.break_distance}Å")
+        self.logger.info(f"RetroScanner v3.0/v6.1 初始化: TS距离={self.ts_distance}Å, 断裂距离={self.break_distance}Å")
         if molecule_name:
             self.logger.info(f"  目标分子: {molecule_name}")
 
     def run(self, product_xyz: Path, output_dir: Path, molecule_name: Optional[str] = None) -> Tuple[Path, Path, Tuple[Tuple[int, int], Tuple[int, int]]]:
         """
-        执行逆向扫描 - v3.0 (Legacy Path)
+        执行逆向扫描 - v3.0/v6.1 (Legacy Path)
 
         NOTE: This is the legacy run() method maintained for backward compatibility.
         For new code requiring neutral precursor support, use run_with_precursor() instead.
 
         Args:
-            product_xyz: 产物 XYZ 文件路径（v2.1）或 S1_Product 目录（v3.0）
+            product_xyz: 产物 XYZ 文件路径（v2.1）或 S1_ConfGeneration 目录（v3.0/v6.1）
             output_dir: 输出目录
-            molecule_name: 分子名称（v3.0，用于定位分子自治目录）
+            molecule_name: 分子名称（v3.0，用于定位分子自治目录，默认 "product"）
 
         Returns:
             (ts_guess_xyz, reactant_xyz, forming_bonds) 元组
@@ -107,57 +106,86 @@ class RetroScanner(LoggerMixin):
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # v3.0 目录适配逻辑
+        # v3.0/v6.1 目录适配逻辑
         if product_xyz.is_dir():
-            # v3.0: product_xyz 是 S1_Product 目录
-            self.logger.info("检测到 v3.0 目录结构")
-
-            # 尝试定位分子目录
-            if molecule_name:
-                molecule_dir = product_xyz / molecule_name
-            else:
-                # 自动查找分子目录
-                molecule_dirs = [d for d in product_xyz.iterdir() if d.is_dir() and not d.name.startswith('.')]
-                if len(molecule_dirs) == 1:
-                    molecule_dir = molecule_dirs[0]
-                    self.logger.info(f"自动检测到分子目录: {molecule_dir.name}")
-                elif len(molecule_dirs) > 1:
-                    raise RuntimeError(
-                        f"发现多个分子目录: {[d.name for d in molecule_dirs]}。"
-                        f"请显式指定 molecule_name 参数。"
-                    )
-                else:
-                    raise RuntimeError(
-                        f"在 {product_xyz} 中未找到分子目录。"
-                    )
-
-            # 查找全局最低构象文件
-            global_min_patterns = [
-                f"{molecule_dir.name}_global_min.xyz",
-                "global_min.xyz",
-            ]
+            # v3.0: product_xyz 是 S1_ConfGeneration 目录
+            self.logger.info(f"检测到 v3.0/v6.1 目录结构: {product_xyz}")
 
             product_min_xyz = None
-            for pattern in global_min_patterns:
-                candidate = molecule_dir / pattern
-                if candidate.exists():
-                    product_min_xyz = candidate
-                    self.logger.info(f"找到产物文件: {product_min_xyz}")
-                    break
+            
+            # 1. 优先尝试直接在目录中查找 (v6.1 扁平结构)
+            direct_patterns = [
+                "product_min.xyz",
+                f"{molecule_name}_min.xyz" if molecule_name else None,
+                f"{self.molecule_name}_min.xyz" if self.molecule_name else None,
+            ]
+            for pattern in direct_patterns:
+                if pattern is not None:
+                    candidate = product_xyz.joinpath(pattern)
+                    if candidate.exists():
+                        product_min_xyz = candidate
+                        self.logger.info(f"直接在目录中找到产物文件: {product_min_xyz}")
+                        break
 
             if product_min_xyz is None:
-                # 回退：查找 dft 目录中的 SP 输出
-                dft_dir = molecule_dir / "dft"
-                if dft_dir.exists():
-                    sp_files = list(dft_dir.glob("*_SP.out"))
-                    if sp_files:
-                        product_min_xyz = sp_files[0]
-                        self.logger.info(f"使用 SP 输出文件: {product_min_xyz}")
+                # 2. 回退到分子子目录结构 (v3.0 分子自治结构)
+                molecule_dir = None
+                # 尝试定位分子目录
+                if molecule_name is not None:
+                    molecule_dir = product_xyz.joinpath(molecule_name)
+                elif self.molecule_name is not None:
+                    molecule_dir = product_xyz.joinpath(self.molecule_name)
+                else:
+                    # 自动查找分子目录 (排除 . 开头的和 dft/crest 等工具目录)
+                    excluded = {'.', 'dft', 'crest', 'cluster', 'xtb2', 'S2_Retro', 'S3_TS', 'S4_Data'}
+                    molecule_dirs = [d for d in product_xyz.iterdir() if d.is_dir() and not d.name.startswith('.') and d.name not in excluded]
+                    if len(molecule_dirs) == 1:
+                        molecule_dir = molecule_dirs[0]
+                        self.logger.info(f"自动检测到分子子目录: {molecule_dir.name}")
+                    elif len(molecule_dirs) > 1:
+                        # 如果有多个，优先选择 'product'
+                        product_dir = product_xyz / "product"
+                        if product_dir.exists() and product_dir.is_dir():
+                            molecule_dir = product_dir
+                        else:
+                            raise RuntimeError(
+                                f"发现多个候选分子目录: {[d.name for d in molecule_dirs]}。"
+                                f"请显式指定 molecule_name 参数。"
+                            )
+                
+                if molecule_dir and molecule_dir.exists():
+                    # 查找全局最低构象文件
+                    global_min_patterns = [
+                        "product_min.xyz",
+                        f"{molecule_dir.name}_min.xyz",
+                        f"{molecule_dir.name}_global_min.xyz",
+                        "global_min.xyz",
+                    ]
+
+                    for pattern in global_min_patterns:
+                        candidate = molecule_dir.joinpath(pattern)
+                        if candidate.exists():
+                            product_min_xyz = candidate
+                            self.logger.info(f"在子目录中找到产物文件: {product_min_xyz}")
+                            break
+
+                    if product_min_xyz is None:
+                        # 回退：查找 dft 目录中的 SP 输出
+                        dft_dir = molecule_dir.joinpath("dft")
+                        if dft_dir.exists():
+                            sp_files = list(dft_dir.glob("*_SP.out"))
+                            if sp_files:
+                                product_min_xyz = sp_files[0]
+                                self.logger.info(f"使用 SP 输出文件: {product_min_xyz}")
+                else:
+                    # 既没直接找到文件，也没找到合适的子目录
+                    raise RuntimeError(
+                        f"在 {product_xyz} 中未找到产物文件 (product_min.xyz) 或分子子目录。"
+                    )
 
             if product_min_xyz is None:
                 raise RuntimeError(
-                    f"无法在 {molecule_dir} 中找到产物结构文件。"
-                    f"查找的文件: {global_min_patterns}"
+                    f"无法在 {product_xyz} (或其子目录) 中找到产物结构文件。"
                 )
         else:
             # v2.1: product_xyz 直接是文件路径

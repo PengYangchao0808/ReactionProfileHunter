@@ -14,7 +14,10 @@ Session: #4 - ORCAInterface.single_point()
 
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Optional, Union, TYPE_CHECKING
+from typing import Optional, Union, TYPE_CHECKING, Dict, Any
+import uuid
+import hashlib
+import json
 import re
 import subprocess
 import shutil
@@ -33,7 +36,7 @@ from rph_core.utils.resource_utils import (
     resolve_executable_config
 )
 from rph_core.utils.geometry_tools import CoordinateExtractor
-from rph_core.utils.qc_interface import QCResult
+from rph_core.utils.data_types import QCResult
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +53,7 @@ class ORCAInterface:
         maxcore: Optional[int] = None,
         solvent: str = "acetone",
         orca_binary_path: Optional[str] = None,
-        config: Optional[dict] = None
+        config: Optional[Dict[str, Any]] = None
     ):
         """
         初始化 ORCA 接口
@@ -86,6 +89,57 @@ class ORCAInterface:
         # 设置日志
         self.logger = logging.getLogger(f"{__name__}.{method}/{basis}")
 
+        # SP cache (in-memory, per-process)
+        self._sp_cache = {}
+        self._sp_cache_hits = 0
+        self._sp_cache_misses = 0
+
+    def _compute_sp_cache_key(
+        self,
+        xyz_file: Path,
+        charge: Optional[int] = None,
+        spin: Optional[int] = None
+    ) -> Optional[str]:
+        try:
+            content = xyz_file.read_bytes()
+        except Exception as e:
+            self.logger.debug(f"SP cache skipped: failed to read {xyz_file}: {e}")
+            return None
+
+        geometry_hash = hashlib.sha256(content).hexdigest()
+
+        if charge is None or spin is None:
+            inferred_charge, inferred_spin = 0, 1
+            if xyz_file.suffix == '.out':
+                try:
+                    inferred_charge, inferred_spin = CoordinateExtractor.get_charge_spin_from_orca_out(xyz_file)
+                except Exception as e:
+                    self.logger.debug(f"SP cache charge/spin fallback for {xyz_file}: {e}")
+            charge = inferred_charge if charge is None else charge
+            spin = inferred_spin if spin is None else spin
+
+        payload = {
+            "geometry_hash": geometry_hash,
+            "method": self.method,
+            "basis": self.basis,
+            "aux_basis": self.aux_basis,
+            "solvent": self.solvent,
+            "charge": charge,
+            "spin": spin
+        }
+
+        payload_str = json.dumps(payload, sort_keys=True, default=str)
+        return hashlib.sha256(payload_str.encode("utf-8")).hexdigest()
+
+    def _log_sp_cache_stats(self) -> None:
+        total = self._sp_cache_hits + self._sp_cache_misses
+        if total == 0:
+            return
+        hit_rate = (self._sp_cache_hits / total) * 100.0
+        self.logger.info(
+            f"SP cache hit rate: {self._sp_cache_hits}/{total} ({hit_rate:.1f}%)"
+        )
+
     def _is_double_hybrid(self) -> bool:
         """
         检查当前方法是否为双杂化泛函
@@ -102,7 +156,15 @@ class ORCAInterface:
 
         return self.method.upper() in [fh.upper() for fh in double_hybrid_functionals]
 
-    def _generate_input(self, xyz_file: Path, output_dir: Path) -> Path:
+    def _generate_input(
+        self,
+        xyz_file: Path,
+        output_dir: Path,
+        charge: Optional[int] = None,
+        spin: Optional[int] = None,
+        extra_input_block: Optional[str] = None,
+        job_tag: Optional[str] = None
+    ) -> Path:
         """
         生成 ORCA 输入文件
 
@@ -133,19 +195,27 @@ class ORCAInterface:
  end
  """
  
-        # 如果 xyz_file 是 .out 文件，尝试从中提取电荷和自旋
+        if charge is None or spin is None:
+            inferred_charge, inferred_spin = 0, 1
+            if xyz_file.suffix == '.out':
+                try:
+                    inferred_charge, inferred_spin = CoordinateExtractor.get_charge_spin_from_orca_out(xyz_file)
+                    self.logger.debug(
+                        f"从 {xyz_file.name} 提取电荷/自旋: {inferred_charge}/{inferred_spin}"
+                    )
+                except Exception as e:
+                    self.logger.warning(f"无法从 {xyz_file.name} 提取电荷/自旋: {e}")
+            charge = inferred_charge if charge is None else charge
+            spin = inferred_spin if spin is None else spin
 
-        charge, spin = 0, 1
-        if xyz_file.suffix == '.out':
-            try:
-                charge, spin = CoordinateExtractor.get_charge_spin_from_orca_out(xyz_file)
-                self.logger.debug(f"从 {xyz_file.name} 提取电荷/自旋: {charge}/{spin}")
-            except Exception as e:
-                self.logger.warning(f"无法从 {xyz_file.name} 提取电荷/自旋: {e}")
+        if job_tag is None:
+            job_tag = uuid.uuid4().hex[:8]
+
+        base_name = f"{xyz_file.stem}_{job_tag}"
 
         # 组装完整输入文件内容 - 直接嵌入xyz坐标
         import shutil
-        xyz_copy = output_dir / xyz_file.name
+        xyz_copy = output_dir / f"{base_name}{xyz_file.suffix}"
         shutil.copy(xyz_file, xyz_copy)
 
         # 读取xyz文件内容，跳过前两行（原子数和标题）
@@ -155,20 +225,116 @@ class ORCAInterface:
         else:
             xyz_content = xyz_copy.read_text()
 
+        extra_block = ""
+        if extra_input_block:
+            extra_block = f"\n{extra_input_block}\n"
+
         inp_content = f"""{route}
-%maxcore {self.maxcore}
-%pal nprocs {self.nprocs} end
-{cpcm_block}
- * xyz {charge} {spin}
+ %maxcore {self.maxcore}
+ %pal nprocs {self.nprocs} end
+ {cpcm_block}
+{extra_block}
+  * xyz {charge} {spin}
 {xyz_content}
- *
+  *
 """
 
         # 写入文件
-        inp_file = output_dir / f"{xyz_file.stem}.inp"
+        inp_file = output_dir / f"{base_name}.inp"
         inp_file.write_text(inp_content)
 
         return inp_file
+
+    def constrained_optimize(
+        self,
+        xyz_file: Path,
+        output_dir: Path,
+        charge: int,
+        spin: int,
+        constraints_block: str,
+        timeout: Optional[int] = None
+    ) -> QCResult:
+        """
+        ORCA constrained optimization with custom %geom block.
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        route = f"! {self.method} {self.basis} {self.aux_basis} Opt tightSCF"
+        route += " noautostart miniprint nopop"
+
+        if self._is_double_hybrid():
+            c_basis = self.basis + "/C"
+            route += f" {c_basis}"
+
+        cpcm_block = ""
+        if self.solvent and self.solvent.upper() != "NONE":
+            from rph_core.utils.solvent_map import orca_smd_solvent
+
+            solvent_name = orca_smd_solvent(self.solvent)
+            cpcm_block = f"""
+ %cpcm
+    smd true
+    SMDsolvent \"{solvent_name}\"
+ end
+ """
+
+        import shutil
+        job_tag = uuid.uuid4().hex[:8]
+        base_name = f"{xyz_file.stem}_constrained_opt_{job_tag}"
+        xyz_copy = output_dir / f"{base_name}{xyz_file.suffix}"
+        shutil.copy(xyz_file, xyz_copy)
+
+        xyz_lines = xyz_copy.read_text().split('\n')
+        if len(xyz_lines) > 2:
+            xyz_content = '\n'.join(xyz_lines[2:])
+        else:
+            xyz_content = xyz_copy.read_text()
+
+        inp_content = f"""{route}
+ %maxcore {self.maxcore}
+ %pal nprocs {self.nprocs} end
+ {cpcm_block}
+{constraints_block}
+  * xyz {charge} {spin}
+{xyz_content}
+  *
+"""
+
+        inp_file = output_dir / f"{base_name}.inp"
+        inp_file.write_text(inp_content)
+
+        try:
+            out_file = self._run_orca(inp_file, output_dir, timeout=timeout)
+            result = self._parse_output(out_file)
+
+            try:
+                coord_block = re.search(
+                    r"CARTESIAN COORDINATES \(ANGSTROEM\)\s*\n(.*?)(?=\n\n|\n[A-Z])",
+                    out_file.read_text(),
+                    re.DOTALL
+                )
+                if coord_block:
+                    coord_lines = [l for l in coord_block.group(1).split('\n') if l.strip()]
+                    if len(coord_lines) >= 3:
+                        result.coordinates = np.array([
+                            [float(coord_lines[i + 1].split()[1]),
+                             float(coord_lines[i + 1].split()[2]),
+                             float(coord_lines[i + 1].split()[3])]
+                            for i in range(0, len(coord_lines) - 1, 3)
+                        ])
+            except Exception:
+                pass
+
+            return result
+
+        except Exception as e:
+            self.logger.error(f"ORCA constrained optimization failed: {e}")
+            return QCResult(
+                energy=0.0,
+                converged=False,
+                error_message=str(e)
+            )
 
     def _parse_output(self, out_file: Path) -> QCResult:
         """
@@ -225,7 +391,7 @@ class ORCAInterface:
             error_message=None
         )
 
-    def _find_orca_binary(self, provided_path: Optional[str] = None, config: Optional[dict] = None) -> Optional[Path]:
+    def _find_orca_binary(self, provided_path: Optional[str] = None, config: Optional[Dict[str, Any]] = None) -> Optional[Path]:
         """
         查找 ORCA 可执行文件（集成新的配置系统）
 
@@ -297,17 +463,24 @@ class ORCAInterface:
 
         out_file = inp_file.with_suffix('.out')
 
-        # ORCA MPI 路径解析不能处理空格，使用临时目录
-        if ' ' in str(output_dir.resolve()) or ' ' in str(inp_file.resolve()):
+        # ORCA / MPI 对含空格或特殊字符的路径支持较差；检测到 toxic path 时使用临时目录运行
+        from rph_core.utils.path_compat import is_toxic_path
+
+        if is_toxic_path(output_dir.resolve()) or is_toxic_path(inp_file.resolve()):
             import tempfile
             import shutil
 
-            self.logger.warning("检测到路径包含空格，使用临时目录运行 ORCA")
+            self.logger.warning("检测到路径包含空格/特殊字符，使用临时目录运行 ORCA")
 
-            temp_dir = Path(tempfile.mkdtemp(prefix='orca_run_'))
+            # Use a unique temp directory per ORCA job to avoid MPI/IO collisions.
+            job_tag = inp_file.stem.split('_')[-1]
+            if not (len(job_tag) == 8 and all(c in '0123456789abcdef' for c in job_tag.lower())):
+                job_tag = uuid.uuid4().hex[:8]
+            temp_dir = Path(tempfile.mkdtemp(prefix=f"orca_run_{job_tag}_"))
+            temp_out_file: Optional[Path] = None
             try:
-                temp_inp_file = temp_dir / "orca_input.inp"
-                temp_out_file = temp_dir / "orca_output.out"
+                temp_inp_file = temp_dir / inp_file.name
+                temp_out_file = temp_inp_file.with_suffix('.out')
                 shutil.copy(inp_file, temp_inp_file)
 
                 cmd = [str(self.orca_binary), str(temp_inp_file.name)]
@@ -347,8 +520,24 @@ class ORCAInterface:
 
                 return out_file
 
+            except Exception as e:
+                # Preserve temp dir for postmortem; show tail of .out for faster diagnosis.
+                try:
+                    if temp_out_file is not None and temp_out_file.exists():
+                        tail_lines = temp_out_file.read_text(errors='ignore').splitlines()[-50:]
+                        self.logger.error(
+                            "ORCA sandbox run failed; last 50 lines of output:\n" + "\n".join(tail_lines)
+                        )
+                except Exception as tail_e:
+                    self.logger.warning(f"Failed to read ORCA sandbox output tail: {tail_e}")
+
+                self.logger.error(f"ORCA sandbox dir preserved for debugging: {temp_dir}")
+                raise RuntimeError(f"ORCA 运行出错 (sandbox): {e}")
+
             finally:
-                shutil.rmtree(temp_dir, ignore_errors=True)
+                # Only cleanup on success; keep failed sandbox directory for postmortem.
+                if temp_out_file is not None and temp_out_file.exists():
+                    shutil.rmtree(temp_dir, ignore_errors=True)
 
         inp_file_abs = inp_file.resolve()
         cmd = [str(self.orca_binary), str(inp_file_abs)]
@@ -380,6 +569,16 @@ class ORCAInterface:
                     )
 
         except Exception as e:
+            # Provide output tail for faster diagnosis
+            try:
+                if out_file.exists():
+                    tail_lines = out_file.read_text(errors='ignore').splitlines()[-50:]
+                    self.logger.error(
+                        "ORCA run failed; last 50 lines of output:\n" + "\n".join(tail_lines)
+                    )
+            except Exception as tail_e:
+                self.logger.warning(f"Failed to read ORCA output tail: {tail_e}")
+
             raise RuntimeError(f"ORCA 运行出错: {e}")
 
         return out_file
@@ -388,7 +587,9 @@ class ORCAInterface:
         self,
         xyz_file: Path,
         output_dir: Path,
-        timeout: int = 3600
+        timeout: int = 3600,
+        charge: Optional[int] = None,
+        spin: Optional[int] = None
     ) -> QCResult:
         """
         执行单点能计算（端到端流程）
@@ -409,6 +610,22 @@ class ORCAInterface:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
+        cache_key = self._compute_sp_cache_key(xyz_file, charge=charge, spin=spin)
+        if cache_key and cache_key in self._sp_cache:
+            self._sp_cache_hits += 1
+            cached_energy = self._sp_cache[cache_key]
+            self.logger.info(f"SP cache hit: {xyz_file.name}")
+            self._log_sp_cache_stats()
+            return QCResult(
+                energy=cached_energy,
+                converged=True,
+                output_file=None,
+                error_message=None
+            )
+
+        if cache_key:
+            self._sp_cache_misses += 1
+
         self.logger.info(f"开始 ORCA 单点能计算: {xyz_file.name}")
         self.logger.info(f"  方法: {self.method}/{self.basis}")
         self.logger.info(f"  输出目录: {output_dir}")
@@ -416,7 +633,13 @@ class ORCAInterface:
         try:
             # 步骤 1: 生成输入文件
             self.logger.debug("  生成 ORCA 输入文件...")
-            inp_file = self._generate_input(xyz_file, output_dir)
+            inp_file = self._generate_input(
+                xyz_file,
+                output_dir,
+                charge=charge,
+                spin=spin,
+                job_tag=uuid.uuid4().hex[:8]
+            )
             self.logger.debug(f"  输入文件: {inp_file}")
 
             # 步骤 2: 运行 ORCA
@@ -430,6 +653,9 @@ class ORCAInterface:
 
             if result.converged:
                 self.logger.info(f"  ✓ 计算成功: 能量 = {result.energy:.8f} Hartree")
+                if cache_key and result.energy is not None:
+                    self._sp_cache[cache_key] = result.energy
+                    self._log_sp_cache_stats()
             else:
                 self.logger.error(f"  ✗ 计算失败: {result.error_message}")
 
@@ -516,7 +742,9 @@ class ORCAInterface:
 
         # 生成优化输入文件
         import shutil
-        xyz_copy = output_dir / xyz_file.name
+        job_tag = uuid.uuid4().hex[:8]
+        base_name = f"{xyz_file.stem}_opt_{job_tag}"
+        xyz_copy = output_dir / f"{base_name}{xyz_file.suffix}"
         shutil.copy(xyz_file, xyz_copy)
 
         # 读取 XYZ 内容
@@ -554,7 +782,7 @@ end
  *
 """
 
-        inp_file = output_dir / f"{xyz_file.stem}_opt.inp"
+        inp_file = output_dir / f"{base_name}.inp"
         inp_file.write_text(inp_content)
 
         # 运行 ORCA
@@ -740,7 +968,9 @@ end
                 self.logger.warning(f"无法从 {xyz_file.name} 提取电荷/自旋: {e}")
 
         # 读取 XYZ 内容
-        xyz_copy = output_dir / xyz_file.name
+        job_tag = uuid.uuid4().hex[:8]
+        base_name = f"{xyz_file.stem}_ts_opt_{job_tag}"
+        xyz_copy = output_dir / f"{base_name}{xyz_file.suffix}"
         shutil.copy(xyz_file, xyz_copy)
         xyz_lines = xyz_copy.read_text().split('\n')
         if len(xyz_lines) > 2:
@@ -762,7 +992,7 @@ end
 """
 
         # 写入文件
-        inp_file = output_dir / f"{xyz_file.stem}_ts_opt.inp"
+        inp_file = output_dir / f"{base_name}.inp"
         inp_file.write_text(inp_content)
 
         return inp_file
