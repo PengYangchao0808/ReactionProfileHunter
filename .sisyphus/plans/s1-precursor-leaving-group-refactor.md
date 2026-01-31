@@ -280,7 +280,7 @@ Parallel Speedup: ~50% faster than sequential
   - Files: `rph_core/utils/small_molecule_cache.py`, `tests/test_small_molecule_cache.py`
   - Pre-commit: `pytest tests/test_small_molecule_cache.py`
 
-- [ ] 3. 扫描代码中所有 S1_Product 引用
+- [x] 3. 扫描代码中所有 S1_Product 引用
 
   **What to do**:
   - 使用 `grep` 或 `ast-grep` 查找所有包含 `S1_Product` 的文件
