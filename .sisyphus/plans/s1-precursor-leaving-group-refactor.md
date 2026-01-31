@@ -232,7 +232,7 @@ Parallel Speedup: ~50% faster than sequential
   - Files: `rph_core/utils/molecule_utils.py`, `tests/test_molecule_utils.py`
   - Pre-commit: `pytest tests/test_molecule_utils.py`
 
-- [ ] 2. 实现小分子缓存管理器
+- [x] 2. 实现小分子缓存管理器
 
   **What to do**:
   - 在 `rph_core/utils/small_molecule_cache.py` 中创建 `SmallMoleculeCache` 类
