@@ -321,7 +321,7 @@ Parallel Speedup: ~50% faster than sequential
 
 ### Wave 2: 核心逻辑修改
 
-- [ ] 4. 在 AnchorPhase 中集成 SmallMoleculeCache
+- [x] 4. 在 AnchorPhase 中集成 SmallMoleculeCache
 
   **What to do**:
   - 修改 `rph_core/steps/anchor/handler.py`
