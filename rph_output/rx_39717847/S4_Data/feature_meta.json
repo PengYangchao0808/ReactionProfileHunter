@@ -24,7 +24,7 @@
     "plugins": {
       "thermo": {
         "status": "ok",
-        "runtime_ms": 0.015497207641601562,
+        "runtime_ms": 0.013113021850585938,
         "missing_fields": [],
         "missing_paths": [],
         "errors": [],
@@ -34,7 +34,7 @@
       },
       "geometry": {
         "status": "ok",
-        "runtime_ms": 5.678415298461914,
+        "runtime_ms": 5.568981170654297,
         "missing_fields": [],
         "missing_paths": [],
         "errors": [],
@@ -44,7 +44,7 @@
       },
       "qc_checks": {
         "status": "ok",
-        "runtime_ms": 0.0069141387939453125,
+        "runtime_ms": 0.00762939453125,
         "missing_fields": [],
         "missing_paths": [],
         "errors": [],
@@ -54,7 +54,7 @@
       },
       "ts_quality": {
         "status": "skipped",
-        "runtime_ms": 0.0050067901611328125,
+        "runtime_ms": 0.006198883056640625,
         "missing_fields": [
           "ts_log"
         ],
@@ -68,7 +68,7 @@
       },
       "asm_enrichment": {
         "status": "ok",
-        "runtime_ms": 1.4798641204833984,
+        "runtime_ms": 1.5802383422851562,
         "missing_fields": [],
         "missing_paths": [],
         "errors": [],
@@ -78,7 +78,7 @@
       },
       "fmo_cdft_dipolar": {
         "status": "ok",
-        "runtime_ms": 11.001110076904297,
+        "runtime_ms": 11.503219604492188,
         "missing_fields": [
           "fmo_cdft_dipolar features"
         ],

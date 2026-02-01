@@ -1,2 +1,0 @@
-[console_scripts]
-rph_run = rph_core.orchestrator:main

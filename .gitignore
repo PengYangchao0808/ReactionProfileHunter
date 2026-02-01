@@ -1,0 +1,32 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 测试与打包
+.pytest_cache/
+.tox/
+*.egg-info/
+dist/
+build/
+
+# 本地备份与补丁
+*_backup_*/
+*.patch
+
+# 计算任务中间文件/日志 (针对 CREST, Gaussian 等)
+*.log
+*.xyz
+*.gjf
+*.out
+!input.xyz  # 如果你希望保留名为 input.xyz 的模板，可以用 ! 排除
+
+# 运行输出目录
+Output/
+rph_output/
+test_ui_verify/rx_manual/
+
+# 编辑器配置
+.vscode/
+.idea/
+.sisyphus/

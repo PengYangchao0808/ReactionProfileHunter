@@ -989,16 +989,23 @@ class XTBInterface:
 
 
 class CRESTInterface:
+    """CREST conformer search interface with support for two-stage workflow.
+
+    Supports both single-stage (GFN2 only) and two-stage (GFN0→GFN2) conformer search.
+    """
+
     def __init__(
         self,
         gfn_level: int = 2,
         solvent: Optional[str] = None,
         nproc: int = 1,
-        config: Optional[dict] = None
+        config: Optional[dict] = None,
+        additional_flags: Optional[str] = None
     ):
         self.gfn_level = gfn_level
         self.solvent = solvent
         self.nproc = nproc
+        self.additional_flags = additional_flags
         self.config = config or {}
 
         exe_config = resolve_executable_config(
@@ -1012,16 +1019,40 @@ class CRESTInterface:
         else:
             self.crest_cmd = None
 
-    def run_conformer_search(self, xyz_file: Path, output_dir: Path) -> Path:
+    def run_conformer_search(
+        self,
+        xyz_file: Path,
+        output_dir: Path,
+        gfn_override: Optional[int] = None,
+        additional_flags: Optional[str] = None
+    ) -> Path:
+        """Run CREST conformer search on a single structure.
+
+        Args:
+            xyz_file: Input XYZ structure file
+            output_dir: Output directory for CREST artifacts
+            gfn_override: Override GFN level (0, 1, or 2). If None, uses instance gfn_level
+            additional_flags: Additional command-line flags for CREST
+
+        Returns:
+            Path to best structure or ensemble file
+        """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
         if not self.crest_cmd:
             raise RuntimeError("CREST executable not found")
 
-        cmd = [self.crest_cmd, "input.xyz", f"-gfn{self.gfn_level}", "-T", str(self.nproc)]
+        gfn_use = gfn_override if gfn_override is not None else self.gfn_level
+        cmd = [self.crest_cmd, "input.xyz", f"-gfn{gfn_use}", "-T", str(self.nproc)]
+
         if self.solvent:
             cmd.extend(["-alpb", self.solvent])
+
+        # Handle additional flags
+        flags = additional_flags or self.additional_flags
+        if flags:
+            cmd.extend(flags.split())
 
         shutil.copy(xyz_file, output_dir / "input.xyz")
         result = subprocess.run(
@@ -1031,7 +1062,7 @@ class CRESTInterface:
             text=True
         )
         if result.returncode != 0:
-            raise RuntimeError(f"CREST failed: {result.stderr}")
+            raise RuntimeError(f"CREST conformer search failed: {result.stderr}")
 
         best_path = output_dir / "crest_best.xyz"
         if best_path.exists():
@@ -1042,6 +1073,76 @@ class CRESTInterface:
         fallback_path = output_dir / xyz_file.name
         shutil.copy(xyz_file, fallback_path)
         return fallback_path
+
+    def run_batch_optimization(
+        self,
+        ensemble_xyz: Path,
+        output_dir: Path,
+        gfn_level: int = 2,
+        solvent: Optional[str] = None,
+        additional_flags: Optional[str] = None
+    ) -> Path:
+        """Batch optimize multiple structures from an ensemble file.
+
+        This method is used in Stage 2 of the two-stage workflow to refine
+        structures that passed through GFN0 screening and ISOSTAT clustering.
+
+        Args:
+            ensemble_xyz: Input ensemble XYZ file (from GFN0 stage)
+            output_dir: Output directory for optimization artifacts
+            gfn_level: GFN level for optimization (0, 1, or 2)
+            solvent: Solvent model (ALPB)
+            additional_flags: Additional command-line flags for CREST
+
+        Returns:
+            Path to optimized ensemble file (crest_ensemble.xyz)
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        if not self.crest_cmd:
+            raise RuntimeError("CREST executable not found")
+
+        # Use -mdopt mode for batch ensemble optimization
+        # This takes an ensemble and optimizes all structures within it
+        cmd = [
+            self.crest_cmd,
+            "-mdopt",
+            ensemble_xyz.name,
+            f"-gfn{gfn_level}",
+            "-T", str(self.nproc)
+        ]
+
+        sol = solvent or self.solvent
+        if sol:
+            cmd.extend(["--alpb", sol])
+
+        flags = additional_flags or self.additional_flags
+        if flags:
+            cmd.extend(flags.split())
+
+        # Copy ensemble file to output directory
+        local_ensemble = output_dir / ensemble_xyz.name
+        shutil.copy(ensemble_xyz, local_ensemble)
+
+        result = subprocess.run(
+            cmd,
+            cwd=output_dir,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            # Log the error but don't raise - may have partial results
+            logger.warning(f"CREST batch optimization returned non-zero: {result.stderr}")
+
+        # Return the optimized ensemble
+        optimized_ensemble = output_dir / "crest_ensemble.xyz"
+        if optimized_ensemble.exists():
+            return optimized_ensemble
+
+        # Fallback: return input if no optimization output
+        logger.warning("No optimized ensemble found, returning input ensemble")
+        return ensemble_xyz
 
 
 toxic_chars = {' ', '[', ']', '(', ')', '{', '}'}

@@ -39,7 +39,7 @@ theory:
     enabled: true  # 是否启用 xTB 预优化（建议开启）
     gfn_level: 2  # GFN-xTB 方法级别 (1 或 2, 推荐 2)
     solvent: acetone  # 与主计算保持一致
-    nproc: 8  # xTB 通常 4-8 核即可
+    nproc: 16  # xTB 通常 4-8 核即可
     # 原子重叠检测阈值（Å）
     overlap_threshold: 1.0  # 若任意两原子距离 < 此值，触发预优化
     # 优化收敛标准
@@ -108,7 +108,50 @@ optimization_control:
 
 # Step 1: Product Anchor (产物锚定)
 step1:
-  # CREST 构象搜索配置
+  # ==============================================================
+  # 两阶段构象搜索配置 (v3.1 新增)
+  # 策略: GFN0(快速粗筛) → ISOSTAT(聚类) → GFN2(精细优化)
+  # ==============================================================
+  conformer_search:
+    # 主开关: true=两阶段模式, false=单阶段GFN2(向后兼容)
+    two_stage_enabled: true
+
+    # Stage 1: GFN0 粗筛 (快速覆盖构象空间)
+    stage1_gfn0:
+      enabled: true
+      gfn_level: 0  # 使用GFN0快速模式
+      energy_window_kcal: 10.0  # 宽松能量窗口,保留更多候选构象
+      # CREST专用参数 (额外标志)
+      crest_flags: "--niceprint"
+      # ISOSTAT聚类配置
+      clustering:
+        run_after: true
+        isostat_gdis: 0.5  # RMSD阈值 (Å)
+        isostat_edis: 1.0    # 能量阈值 (kcal/mol)
+
+    # Stage 2: GFN2 精细优化 (仅优化GFN0筛选出的候选)
+    stage2_gfn2:
+      enabled: true
+      gfn_level: 2  # 使用GFN2精细模式
+      energy_window_kcal: 3.0  # 严格能量窗口
+      crest_flags: "--niceprint"
+      # ISOSTAT聚类配置
+      clustering:
+        run_after: true
+        isostat_gdis: 1  # RMSD阈值 (Å)
+        isostat_edis: 1.0  # 能量阈值 (kcal/mol)
+
+    # 通用构象搜索参数 (单阶段/两阶段共用)
+    common:
+      solvent: acetone
+      threads: 16
+      ngeom_default: 3   # 默认筛选构象数
+      ngeom_max: 6     # 最大筛选构象数
+
+  # ==============================================================
+  # 遗留配置 (单阶段模式或向后兼容)
+  # ==============================================================
+  # CREST 构象搜索配置 (单阶段模式使用)
   crest:
     gfn_level: 2  # GFN-xTB 方法级别 (0, 1, 2)
     solvent: acetone
@@ -116,7 +159,7 @@ step1:
     threads: 16
 
   # 是否启用 DFT 优化 (在 CREST 之后)
-  enable_dft_opt: false  # 默认使用 CREST 结果 + L2 SP
+  enable_dft_opt: true  # 默认使用DFT精修产物构象
 
 # Step 2: Retro Scanner (逆向扫描)
 step2:
@@ -242,3 +285,47 @@ global:
   checkpoint: true  # 是否启用断点续算
   # 程序查找顺序：配置文件 > 环境变量 > 系统 PATH
   enable_path_search: true  # 允许自动查找（如果配置文件中的路径不存在）
+
+# ==================== Reference States (小分子参考态) ====================
+# 小分子离去基团目录，用于：
+#   1. Step 1 产物构象搜索时处理离去基团
+#   2. 参考态能量计算 (reference_states.py)
+#   3. 数据集中 ylide_leaving_group / leaving_group 字段的解析
+# 配置格式：
+#   <key>:           # 离去基团标识符（数据集中使用的 key，如 "AcOH"）
+#     smiles: ""     # SMILES 字符串（必填）
+#     charge: 0      # 电荷（默认 0）
+#     multiplicity: 1  # 自旋多重度（默认 1，单重态）
+reference_states:
+  small_molecule_map:
+    # 乙酸 (Acetic Acid) - 最常见的离去基团
+    AcOH:
+      smiles: "CC(=O)O"
+      charge: 0
+      multiplicity: 1
+    
+    # 三氟乙醇 (Trifluoroethanol)
+    TFE:
+      smiles: "OCC(F)(F)F"
+      charge: 0
+      multiplicity: 1
+    
+    # 可根据数据集需要添加其他离去基团：
+    # 
+    # 水 (Water)
+    # H2O:
+    #   smiles: "O"
+    #   charge: 0
+    #   multiplicity: 1
+    # 
+    # 甲醇 (Methanol)
+    # MeOH:
+    #   smiles: "CO"
+    #   charge: 0
+    #   multiplicity: 1
+    # 
+    # 甲苯磺酸 (Tosic Acid)
+    # TsOH:
+    #   smiles: "CC1=CC=C(C=C1)S(=O)(=O)O"
+    #   charge: 0
+    #   multiplicity: 1

@@ -33,7 +33,8 @@ Architecture (Code Map)
 IO Contract (Required Outputs)
 RPH is built around a strict step output contract:
 S1 output (required):
-- S1_ConfGeneration/product_min.xyz
+- S1_ConfGeneration/product/product_min.xyz
+- S1_ConfGeneration/precursor/precursor_min.xyz (optional)
 S2 output (required; must output BOTH):
 - S2_Retro/ts_guess.xyz
 - S2_Retro/reactant_complex.xyz
@@ -66,7 +67,10 @@ Removed In v5.4
 Output Directory Layout (Example)
 Output/rx_xxx/
   S1_ConfGeneration/
-    product_min.xyz
+    product/
+      product_min.xyz
+    precursor/
+      precursor_min.xyz
   S2_Retro/
     ts_guess.xyz
     reactant_complex.xyz

@@ -56,11 +56,32 @@ HARTREE_TO_KCAL = 627.509
 
 class ConformerEngine(LoggerMixin):
     """
-    Unified Conformer Engine (UCE) - v3.0 (Refactored)
-    
-    This engine performs conformer search using CREST, clustering with isostat,
-    and DFT OPT-SP coupled optimization.
-    
+    Unified Conformer Engine (UCE) - v3.1 (Two-Stage Architecture)
+
+    This engine performs conformer search using a two-stage CREST workflow:
+    - Stage 1: GFN0-xTB (fast, broad sampling) → ISOSTAT clustering
+    - Stage 2: GFN2-xTB (refinement) → ISOSTAT clustering
+    - Stage 3: DFT OPT-SP coupled optimization (single-conformer atomic operation)
+
+    Supports backward-compatible single-stage mode (GFN2 only) via config toggle.
+
+    Directory Structure (Two-Stage Mode):
+        S1_ConfGeneration/[Molecule_Name]/
+            ├── xtb2/
+            │   ├── stage1_gfn0/          # GFN0 coarse search
+            │   │   ├── crest_conformers.xyz
+            │   │   └── cluster/
+            │   │       ├── cluster.xyz   # Representatives for Stage 2
+            │   │       └── isostat.log
+            │   ├── stage2_gfn2/          # GFN2 refinement
+            │   │   ├── crest_ensemble.xyz
+            │   │   └── cluster/
+            │   │       ├── cluster.xyz   # Final ensemble
+            │   │       └── isostat.log
+            │   └── ensemble.xyz          # Symlink to stage2/cluster/cluster.xyz
+            ├── cluster/                  # Legacy (for single-stage)
+            └── dft/                      # DFT OPT-SP jobs
+
     Note on enabled semantics:
     - ConformerEngine does not have an 'enabled' flag.
     - When instantiated, it always operates in real engine mode.
@@ -96,29 +117,55 @@ class ConformerEngine(LoggerMixin):
         self.thermo_config = config.get('thermo', {})
         self.solvent_config = config.get('solvent', {})
 
-        self.energy_window = self.confsearch_config.get('energy_window_kcal', 3.0)
-        self.rmsd_threshold = self.crest_config.get('rmsd_threshold', 0.125)
-        self.solvent = self.solvent_config.get('name', self.crest_config.get('solvent', 'acetone'))
-        self.nproc = self.crest_config.get('threads', 8)
-        self.max_conformers = self.confsearch_config.get('ngeom_max', 20)
-        self.ngeom_default = self.confsearch_config.get('ngeom_default', 6)
-        self.isostat_gdis = self.confsearch_config.get('isostat_gdis', 0.125)
-        self.isostat_edis = self.confsearch_config.get('isostat_edis', 1.0)
+        # ==============================================================
+        # Two-Stage Configuration (v3.1)
+        # ==============================================================
+        self.two_stage_enabled = self.confsearch_config.get('two_stage_enabled', False)
+        self.logger.info(f"🔀 Two-stage conformer search: {'enabled' if self.two_stage_enabled else 'disabled'}")
+
+        # Stage 1: GFN0 configuration
+        stage1_config = self.confsearch_config.get('stage1_gfn0', {})
+        self.stage1_enabled = stage1_config.get('enabled', True)
+        self.stage1_gfn_level = stage1_config.get('gfn_level', 0)
+        self.stage1_energy_window = stage1_config.get('energy_window_kcal', 10.0)
+        self.stage1_crest_flags = stage1_config.get('crest_flags', '')
+        stage1_clustering = stage1_config.get('clustering', {})
+        self.stage1_run_clustering = stage1_clustering.get('run_after', True)
+        self.stage1_isostat_gdis = stage1_clustering.get('isostat_gdis', 0.125)
+        self.stage1_isostat_edis = stage1_clustering.get('isostat_edis', 1.0)
+
+        # Stage 2: GFN2 configuration
+        stage2_config = self.confsearch_config.get('stage2_gfn2', {})
+        self.stage2_enabled = stage2_config.get('enabled', True)
+        self.stage2_gfn_level = stage2_config.get('gfn_level', 2)
+        self.stage2_energy_window = stage2_config.get('energy_window_kcal', 3.0)
+        self.stage2_crest_flags = stage2_config.get('crest_flags', '')
+        stage2_clustering = stage2_config.get('clustering', {})
+        self.stage2_run_clustering = stage2_clustering.get('run_after', True)
+        self.stage2_isostat_gdis = stage2_clustering.get('isostat_gdis', 0.125)
+        self.stage2_isostat_edis = stage2_clustering.get('isostat_edis', 1.0)
+
+        # Common configuration
+        common_config = self.confsearch_config.get('common', {})
+        self.energy_window = self.confsearch_config.get('energy_window_kcal', common_config.get('energy_window_kcal', 3.0))
+        self.solvent = self.solvent_config.get('name', common_config.get('solvent', self.crest_config.get('solvent', 'acetone')))
+        self.nproc = common_config.get('threads', self.crest_config.get('threads', 8))
+        self.max_conformers = self.confsearch_config.get('ngeom_max', common_config.get('ngeom_max', 20))
+        self.ngeom_default = self.confsearch_config.get('ngeom_default', common_config.get('ngeom_default', 6))
+
+        # ISOSTAT configuration (uses Stage 1 params as defaults for single-stage)
+        self.isostat_gdis = self.confsearch_config.get('isostat_gdis', self.stage1_isostat_gdis)
+        self.isostat_edis = self.confsearch_config.get('isostat_edis', self.stage1_isostat_edis)
         self.isostat_temp_k = self.thermo_config.get('temperature_k', 298.15)
         self.isostat_threads = self.confsearch_config.get('isostat_threads', self.nproc)
         executables = config.get('executables', {})
         self.isostat_bin = Path(executables.get('isostat', {}).get('path', 'isostat'))
         self.shermo_bin = Path(executables.get('shermo', {}).get('path', 'Shermo'))
 
-        # Initialize Interfaces
-        self.xtb = XTBInterface(
-            gfn_level=2,
-            solvent=self.solvent,
-            nproc=self.nproc,
-            config=config
-        )
+        # Initialize CREST Interface (uses Stage 2 GFN level by default for single-stage)
+        default_gfn = self.stage2_gfn_level if self.two_stage_enabled else self.crest_config.get('gfn_level', 2)
         self.crest_interface = CRESTInterface(
-            gfn_level=2,
+            gfn_level=default_gfn,
             solvent=self.solvent,
             nproc=self.nproc,
             config=config
@@ -150,6 +197,8 @@ class ConformerEngine(LoggerMixin):
         """
         Execute full conformer search workflow (OPT-SP coupled).
 
+        Automatically dispatches to single-stage or two-stage workflow based on config.
+
         Args:
             smiles: SMILES string of the molecule
 
@@ -157,12 +206,14 @@ class ConformerEngine(LoggerMixin):
             Tuple[Path, float]: (Path to global min XYZ, Global min SP Energy in Hartree)
         """
         self.logger.info(f"🚀 Starting Unified Conformer Search for: {self.molecule_name}")
+        mode = "two-stage (GFN0→GFN2)" if self.two_stage_enabled else "single-stage (GFN2)"
+        self.logger.info(f"   Mode: {mode}")
 
         # Step 0: Final Output Check (Idempotency)
         global_min_path = self.molecule_dir / f"{self.molecule_name}_global_min.xyz"
 
         if self._is_valid_xyz(global_min_path):
-            self.logger.info(f"⏭️ Found {global_min_path.name}, skipping Step 1")
+            self.logger.info(f"⏭️ Found {global_min_path.name}, skipping conformer search")
 
             # Extract energy - let ValueError propagate if extraction fails
             energy = self._extract_energy_from_xyz(global_min_path)
@@ -173,8 +224,13 @@ class ConformerEngine(LoggerMixin):
         # Step 1: RDKit Embedding
         initial_xyz = self._step_rdkit_embed(smiles)
 
-        # Step 2: CREST Global Search
-        crest_ensemble_file = self._step_crest_search(initial_xyz)
+        # Step 2: CREST Search (Single or Two-Stage)
+        if self.two_stage_enabled and self.stage1_enabled and self.stage2_enabled:
+            self.logger.info("🔀 Executing two-stage CREST workflow (GFN0→GFN2)...")
+            crest_ensemble_file = self._step_two_stage_crest(initial_xyz)
+        else:
+            self.logger.info("📍 Executing single-stage CREST workflow (GFN2)...")
+            crest_ensemble_file = self._step_crest_search(initial_xyz)
 
         # Step 3: Process Ensemble (Cluster & Filter)
         candidates = self._step_process_ensemble(crest_ensemble_file)
@@ -230,7 +286,8 @@ class ConformerEngine(LoggerMixin):
         return output_path
 
     def _step_crest_search(self, input_xyz: Path) -> Path:
-        self.logger.info("  [2/5] CREST Global Search...")
+        """Single-stage CREST search (GFN2 only) - backward compatible."""
+        self.logger.info("  [2/5] CREST Global Search (Single-Stage)...")
 
         crest_ensemble_file = self.crest_dir / "ensemble.xyz"
 
@@ -249,6 +306,216 @@ class ConformerEngine(LoggerMixin):
         shutil.copy(best_xyz, crest_ensemble_file)
         return crest_ensemble_file
 
+    def _step_two_stage_crest(self, input_xyz: Path) -> Path:
+        """Execute two-stage CREST workflow: GFN0 → ISOSTAT → GFN2 → ISOSTAT.
+
+        Stage 1: GFN0-xTB for fast, broad conformational space sampling
+        Stage 2: GFN2-xTB for refinement of Stage 1 candidates
+
+        Returns:
+            Path to final ensemble file (after Stage 2 + clustering)
+        """
+        # ==============================================================
+        # Stage 1: GFN0 Conformer Search
+        # ==============================================================
+        self.logger.info("  [2a/5] Stage 1: CREST GFN0 Conformer Search (Fast Sampling)...")
+
+        stage1_dir = self.crest_dir / "stage1_gfn0"
+        stage1_dir.mkdir(exist_ok=True)
+
+        gfn0_ensemble = self._run_crest_stage(
+            input_xyz=input_xyz,
+            output_dir=stage1_dir,
+            gfn_level=self.stage1_gfn_level,
+            stage_name="GFN0",
+            additional_flags=self.stage1_crest_flags
+        )
+
+        # ==============================================================
+        # Stage 1: ISOSTAT Clustering
+        # ==============================================================
+        if self.stage1_run_clustering:
+            self.logger.info("  [2b/5] Stage 1: ISOSTAT Clustering...")
+            gfn0_clustered = self._run_isostat_clustering(
+                input_ensemble=gfn0_ensemble,
+                output_dir=stage1_dir,
+                energy_window=self.stage1_energy_window,
+                gdis=self.stage1_isostat_gdis,
+                edis=self.stage1_isostat_edis
+            )
+        else:
+            gfn0_clustered = gfn0_ensemble
+
+        # ==============================================================
+        # Stage 2: GFN2 Batch Optimization
+        # ==============================================================
+        self.logger.info("  [2c/5] Stage 2: CREST GFN2 Batch Optimization (Refinement)...")
+
+        stage2_dir = self.crest_dir / "stage2_gfn2"
+        stage2_dir.mkdir(exist_ok=True)
+
+        gfn2_ensemble = self._run_crest_batch_optimization(
+            input_xyz=gfn0_clustered,
+            output_dir=stage2_dir,
+            gfn_level=self.stage2_gfn_level,
+            stage_name="GFN2",
+            additional_flags=self.stage2_crest_flags
+        )
+
+        # ==============================================================
+        # Stage 2: ISOSTAT Clustering
+        # ==============================================================
+        if self.stage2_run_clustering:
+            self.logger.info("  [2d/5] Stage 2: ISOSTAT Clustering...")
+            gfn2_clustered = self._run_isostat_clustering(
+                input_ensemble=gfn2_ensemble,
+                output_dir=stage2_dir,
+                energy_window=self.stage2_energy_window,
+                gdis=self.stage2_isostat_gdis,
+                edis=self.stage2_isostat_edis
+            )
+        else:
+            gfn2_clustered = gfn2_ensemble
+
+        # ==============================================================
+        # Final: Copy to standard location for downstream processing
+        # ==============================================================
+        self.logger.info("  [2e/5] Finalizing ensemble for DFT processing...")
+
+        final_ensemble = self.crest_dir / "ensemble.xyz"
+        shutil.copy(gfn2_clustered, final_ensemble)
+
+        self.logger.info(f"  ✓ Two-stage CREST complete: {final_ensemble}")
+
+        return final_ensemble
+
+    def _run_crest_stage(
+        self,
+        input_xyz: Path,
+        output_dir: Path,
+        gfn_level: int,
+        stage_name: str,
+        additional_flags: Optional[str] = None
+    ) -> Path:
+        """Run CREST conformer search for a single stage.
+
+        Args:
+            input_xyz: Input structure file
+            output_dir: Stage output directory
+            gfn_level: GFN level (0, 1, or 2)
+            stage_name: Display name for logging
+            additional_flags: Additional CREST command-line flags
+
+        Returns:
+            Path to ensemble file
+        """
+        self.logger.info(f"    [{stage_name}] Running conformer search (GFN{gfn_level})...")
+
+        try:
+            result = self.crest_interface.run_conformer_search(
+                xyz_file=input_xyz,
+                output_dir=output_dir,
+                gfn_override=gfn_level,
+                additional_flags=additional_flags
+            )
+
+            ensemble_file = output_dir / "crest_conformers.xyz"
+            if result != ensemble_file and ensemble_file.exists():
+                shutil.copy(ensemble_file, result)
+
+            self.logger.info(f"    [{stage_name}] ✓ Found {result.name}")
+            return result
+
+        except Exception as e:
+            self.logger.warning(f"    [{stage_name}] CREST failed: {e}, using input structure")
+            fallback = output_dir / input_xyz.name
+            shutil.copy(input_xyz, fallback)
+            return fallback
+
+    def _run_crest_batch_optimization(
+        self,
+        input_xyz: Path,
+        output_dir: Path,
+        gfn_level: int,
+        stage_name: str,
+        additional_flags: Optional[str] = None
+    ) -> Path:
+        """Run CREST batch optimization on ensemble structures.
+
+        Args:
+            input_xyz: Input ensemble file (from Stage 1)
+            output_dir: Stage output directory
+            gfn_level: GFN level for optimization
+            stage_name: Display name for logging
+            additional_flags: Additional CREST command-line flags
+
+        Returns:
+            Path to optimized ensemble file
+        """
+        self.logger.info(f"    [{stage_name}] Running batch optimization on ensemble...")
+
+        try:
+            result = self.crest_interface.run_batch_optimization(
+                ensemble_xyz=input_xyz,
+                output_dir=output_dir,
+                gfn_level=gfn_level,
+                additional_flags=additional_flags
+            )
+
+            # Prefer crest_ensemble.xyz if it exists
+            optimized = output_dir / "crest_ensemble.xyz"
+            if optimized.exists():
+                result = optimized
+
+            self.logger.info(f"    [{stage_name}] ✓ Batch optimization complete: {result.name}")
+            return result
+
+        except Exception as e:
+            self.logger.warning(f"    [{stage_name}] Batch optimization failed: {e}")
+            return input_xyz
+
+    def _run_isostat_clustering(
+        self,
+        input_ensemble: Path,
+        output_dir: Path,
+        energy_window: float,
+        gdis: float,
+        edis: float
+    ) -> Path:
+        """Run ISOSTAT clustering on ensemble structures.
+
+        Args:
+            input_ensemble: Input ensemble XYZ file
+            output_dir: Directory for clustering output
+            energy_window: Energy window for filtering (kcal/mol)
+            gdis: RMSD distance threshold for clustering (Å)
+            edis: Energy distance threshold for clustering (kcal/mol)
+
+        Returns:
+            Path to cluster.xyz (representative structures)
+        """
+        cluster_dir = output_dir / "cluster"
+        cluster_dir.mkdir(exist_ok=True)
+
+        # Copy ensemble to cluster directory
+        isomers_xyz = cluster_dir / "isomers.xyz"
+        shutil.copy(input_ensemble, isomers_xyz)
+
+        # Run ISOSTAT
+        result = run_isostat(
+            isostat_bin=self.isostat_bin,
+            input_xyz=isomers_xyz,
+            output_dir=cluster_dir,
+            gdis=gdis,
+            edis=edis,
+            temp_k=self.isostat_temp_k,
+            threads=self.isostat_threads,
+            energy_window=energy_window
+        )
+
+        self.logger.info(f"    ✓ Clustering complete: {result.cluster_xyz.name}")
+        return result.cluster_xyz
+
     def _step_process_ensemble(self, ensemble_file: Path) -> List[Path]:
         self.logger.info("  [3/5] Processing Ensemble (Clustering & Filtering)...")
 
@@ -266,24 +533,21 @@ class ConformerEngine(LoggerMixin):
             energy_window=self.energy_window
         )
 
-        conformers = self._split_xyz_ensemble(result.cluster_xyz, self.dft_dir)
-        self.logger.info(f"    - Found {len(conformers)} conformers from isostat.")
-
-        if not conformers:
-            return []
-
         if result.n_within_window is None:
             n_calc = min(self.ngeom_default, self.max_conformers)
         else:
             n_calc = min(result.n_within_window, self.max_conformers)
 
-        if len(conformers) > n_calc:
-            conformers = conformers[:n_calc]
+        conformers = self._split_xyz_ensemble(result.cluster_xyz, self.dft_dir, limit=n_calc)
+        self.logger.info(f"    - Found {len(conformers)} conformers from isostat (Limit: {n_calc}).")
+
+        if not conformers:
+            return []
 
         self.logger.info(f"    - Selected {len(conformers)} conformers for DFT.")
         return conformers
 
-    def _split_xyz_ensemble(self, ensemble_file: Path, output_dir: Optional[Path] = None) -> List[Path]:
+    def _split_xyz_ensemble(self, ensemble_file: Path, output_dir: Optional[Path] = None, limit: Optional[int] = None) -> List[Path]:
 
         split_dir = output_dir if output_dir is not None else self.crest_dir / "conf_split"
         split_dir.mkdir(parents=True, exist_ok=True)
@@ -295,6 +559,9 @@ class ConformerEngine(LoggerMixin):
         i = 0
         count = 0
         while i < len(lines):
+            if limit is not None and count >= limit:
+                break
+
             try:
                 natoms = int(lines[i].strip())
                 block = lines[i:i + natoms + 2]

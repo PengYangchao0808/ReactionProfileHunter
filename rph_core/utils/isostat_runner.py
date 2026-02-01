@@ -24,17 +24,24 @@ def _count_within_window(log_file: Path, energy_window: float) -> Optional[int]:
         return None
     count = 0
     for line in content:
-        if "DE=" not in line:
+        # Relaxed check for DE and = (can be separated by spaces)
+        if "DE" not in line or "=" not in line:
             continue
         parts = line.replace("=", " = ").split()
         for i, token in enumerate(parts):
-            if token == "DE" and i + 1 < len(parts):
-                try:
-                    val = float(parts[i + 1])
-                    if val <= energy_window:
-                        count += 1
-                except ValueError:
-                    continue
+            if token == "DE":
+                # Check next token (could be "=" or value)
+                val_idx = i + 1
+                if val_idx < len(parts) and parts[val_idx] == "=":
+                    val_idx += 1
+                
+                if val_idx < len(parts):
+                    try:
+                        val = float(parts[val_idx])
+                        if val <= energy_window:
+                            count += 1
+                    except ValueError:
+                        continue
     return count if count > 0 else None
 
 

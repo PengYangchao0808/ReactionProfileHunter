@@ -609,7 +609,7 @@ Parallel Speedup: ~50% faster than sequential
   - Files: `rph_core/steps/step3_opt/*.py`, `tests/test_step3_path_compat.py`
   - Pre-commit: `pytest tests/test_step3_path_compat.py`
 
-- [ ] 10. 更新 S4 的路径引用
+- [x] 10. 更新 S4 的路径引用
 
   **What to do**:
   - 修改 `rph_core/steps/step4_features/mech_packager.py`
@@ -654,7 +654,7 @@ Parallel Speedup: ~50% faster than sequential
   - Files: `rph_core/steps/step4_features/mech_packager.py`, `tests/test_s4_path_compat.py`
   - Pre-commit: `pytest tests/test_s4_path_compat.py`
 
-- [ ] 11. 更新所有测试文件的路径
+- [x] 11. 更新所有测试文件的路径
 
   **What to do**:
   - 批量替换 `tests/` 中的 `S1_Product` → `S1_ConfGeneration`
@@ -696,7 +696,7 @@ Parallel Speedup: ~50% faster than sequential
 
 ### Wave 4: 集成测试和文档
 
-- [ ] 12. 端到端集成测试 + 文档更新
+- [x] 12. 端到端集成测试 + 文档更新
 
   **What to do**:
   - **集成测试**:
