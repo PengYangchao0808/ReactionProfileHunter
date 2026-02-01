@@ -16,6 +16,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from rph_core.utils.geometry_tools import GeometryUtils
+
 
 logger = logging.getLogger(__name__)
 
@@ -190,9 +192,11 @@ class TSValidator:
         """
         n_atoms = len(coordinates)
 
+        distance_matrix = GeometryUtils.compute_distance_matrix(coordinates)
+
         for i in range(n_atoms):
             for j in range(i + 1, n_atoms):
-                dist = np.linalg.norm(coordinates[i] - coordinates[j])
+                dist = distance_matrix[i, j]
 
                 if dist < min_distance:
                     raise TSValidationError(

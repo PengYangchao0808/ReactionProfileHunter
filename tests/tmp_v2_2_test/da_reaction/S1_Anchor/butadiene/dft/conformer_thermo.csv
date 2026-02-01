@@ -1,0 +1,3 @@
+name,weight,g_used,g_sum,g_conc,h_sum,u_sum,s_total,sp_energy,log_file
+conf_000,0.500859,-152.95055640,-152.95055640,,-152.91950140,-19.487000,-153.02367924,/mnt/e/Calculations/[5+2] Mechain learning/Scripts/ReactionProfileHunter/ReactionProfileHunter_20260121/tests/tmp_v2_2_test/da_reaction/S1_Anchor/butadiene/dft/conf_000.log
+conf_001,0.499141,-152.94852120,-152.94852120,,-152.91659690,-20.033000,-153.02082578,/mnt/e/Calculations/[5+2] Mechain learning/Scripts/ReactionProfileHunter/ReactionProfileHunter_20260121/tests/tmp_v2_2_test/da_reaction/S1_Anchor/butadiene/dft/conf_001.log

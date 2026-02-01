@@ -22,7 +22,7 @@ from rph_core.steps.step4_features.feature_miner import FeatureMiner
 
 @pytest.fixture
 def pipeline_dirs(tmp_path: Path) -> dict[str, Path]:
-    s1 = tmp_path / "S1_Product"
+    s1 = tmp_path / "S1_ConfGeneration"
     s2 = tmp_path / "S2_Retro"
     s3 = tmp_path / "S3_TS"
     s4 = tmp_path / "S4_Data"

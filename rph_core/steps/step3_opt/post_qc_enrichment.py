@@ -373,3 +373,35 @@ class PostQCEnrichment(LoggerMixin):
 def forming_bonds_to_list(forming_bonds: Tuple[Tuple[int, int], Tuple[int, int]]) -> list:
     """Convert forming_bonds tuple to list format."""
     return [list(bond) for bond in forming_bonds]
+
+
+def run_post_qc_enrichment(
+    s3_dir: Path,
+    config: dict,
+    sp_report: "SPMatrixReport",
+    reactant_complex_xyz: Path,
+    forming_bonds: Tuple[Tuple[int, int], Tuple[int, int]]
+) -> None:
+    """
+    Run post-QC enrichment (convenience function).
+
+    Args:
+        s3_dir: Step3 output directory
+        config: Enrichment configuration dict
+        sp_report: SPMatrixReport with electronic energies
+        reactant_complex_xyz: Path to reactant complex XYZ
+        forming_bonds: ((u1, v1), (u2, v2)) forming bond atom pairs
+    """
+    enrichment = PostQCEnrichment(config)
+    # Get ts_final_xyz from s3_dir (standard location)
+    ts_final_xyz = s3_dir / "ts_final.xyz"
+    if not ts_final_xyz.exists():
+        # Try alternative location
+        ts_final_xyz = s3_dir / "TS" / "ts_final.xyz"
+    enrichment.run(
+        s3_dir=s3_dir,
+        reactant_complex_xyz=reactant_complex_xyz,
+        ts_final_xyz=ts_final_xyz,
+        sp_report=sp_report,
+        forming_bonds=forming_bonds
+    )

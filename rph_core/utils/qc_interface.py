@@ -989,16 +989,23 @@ class XTBInterface:
 
 
 class CRESTInterface:
+    """CREST conformer search interface with support for two-stage workflow.
+
+    Supports both single-stage (GFN2 only) and two-stage (GFN0→GFN2) conformer search.
+    """
+
     def __init__(
         self,
         gfn_level: int = 2,
         solvent: Optional[str] = None,
         nproc: int = 1,
-        config: Optional[dict] = None
+        config: Optional[dict] = None,
+        additional_flags: Optional[str] = None
     ):
         self.gfn_level = gfn_level
         self.solvent = solvent
         self.nproc = nproc
+        self.additional_flags = additional_flags
         self.config = config or {}
 
         exe_config = resolve_executable_config(
@@ -1012,16 +1019,40 @@ class CRESTInterface:
         else:
             self.crest_cmd = None
 
-    def run_conformer_search(self, xyz_file: Path, output_dir: Path) -> Path:
+    def run_conformer_search(
+        self,
+        xyz_file: Path,
+        output_dir: Path,
+        gfn_override: Optional[int] = None,
+        additional_flags: Optional[str] = None
+    ) -> Path:
+        """Run CREST conformer search on a single structure.
+
+        Args:
+            xyz_file: Input XYZ structure file
+            output_dir: Output directory for CREST artifacts
+            gfn_override: Override GFN level (0, 1, or 2). If None, uses instance gfn_level
+            additional_flags: Additional command-line flags for CREST
+
+        Returns:
+            Path to best structure or ensemble file
+        """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
         if not self.crest_cmd:
             raise RuntimeError("CREST executable not found")
 
-        cmd = [self.crest_cmd, "input.xyz", f"-gfn{self.gfn_level}", "-T", str(self.nproc)]
+        gfn_use = gfn_override if gfn_override is not None else self.gfn_level
+        cmd = [self.crest_cmd, "input.xyz", f"-gfn{gfn_use}", "-T", str(self.nproc)]
+
         if self.solvent:
             cmd.extend(["-alpb", self.solvent])
+
+        # Handle additional flags
+        flags = additional_flags or self.additional_flags
+        if flags:
+            cmd.extend(flags.split())
 
         shutil.copy(xyz_file, output_dir / "input.xyz")
         result = subprocess.run(
@@ -1031,7 +1062,7 @@ class CRESTInterface:
             text=True
         )
         if result.returncode != 0:
-            raise RuntimeError(f"CREST failed: {result.stderr}")
+            raise RuntimeError(f"CREST conformer search failed: {result.stderr}")
 
         best_path = output_dir / "crest_best.xyz"
         if best_path.exists():
@@ -1042,6 +1073,76 @@ class CRESTInterface:
         fallback_path = output_dir / xyz_file.name
         shutil.copy(xyz_file, fallback_path)
         return fallback_path
+
+    def run_batch_optimization(
+        self,
+        ensemble_xyz: Path,
+        output_dir: Path,
+        gfn_level: int = 2,
+        solvent: Optional[str] = None,
+        additional_flags: Optional[str] = None
+    ) -> Path:
+        """Batch optimize multiple structures from an ensemble file.
+
+        This method is used in Stage 2 of the two-stage workflow to refine
+        structures that passed through GFN0 screening and ISOSTAT clustering.
+
+        Args:
+            ensemble_xyz: Input ensemble XYZ file (from GFN0 stage)
+            output_dir: Output directory for optimization artifacts
+            gfn_level: GFN level for optimization (0, 1, or 2)
+            solvent: Solvent model (ALPB)
+            additional_flags: Additional command-line flags for CREST
+
+        Returns:
+            Path to optimized ensemble file (crest_ensemble.xyz)
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        if not self.crest_cmd:
+            raise RuntimeError("CREST executable not found")
+
+        # Use -mdopt mode for batch ensemble optimization
+        # This takes an ensemble and optimizes all structures within it
+        cmd = [
+            self.crest_cmd,
+            "-mdopt",
+            ensemble_xyz.name,
+            f"-gfn{gfn_level}",
+            "-T", str(self.nproc)
+        ]
+
+        sol = solvent or self.solvent
+        if sol:
+            cmd.extend(["--alpb", sol])
+
+        flags = additional_flags or self.additional_flags
+        if flags:
+            cmd.extend(flags.split())
+
+        # Copy ensemble file to output directory
+        local_ensemble = output_dir / ensemble_xyz.name
+        shutil.copy(ensemble_xyz, local_ensemble)
+
+        result = subprocess.run(
+            cmd,
+            cwd=output_dir,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            # Log the error but don't raise - may have partial results
+            logger.warning(f"CREST batch optimization returned non-zero: {result.stderr}")
+
+        # Return the optimized ensemble
+        optimized_ensemble = output_dir / "crest_ensemble.xyz"
+        if optimized_ensemble.exists():
+            return optimized_ensemble
+
+        # Fallback: return input if no optimization output
+        logger.warning("No optimized ensemble found, returning input ensemble")
+        return ensemble_xyz
 
 
 toxic_chars = {' ', '[', ']', '(', ')', '{', '}'}
@@ -1315,6 +1416,84 @@ class GaussianInterface:
         if not freqs:
             return None
         return np.array(freqs)
+
+    def constrained_optimize(
+        self,
+        xyz_file: Path,
+        output_dir: Path,
+        frozen_indices: List[int],
+        charge: int = 0,
+        spin: int = 1,
+        route: Optional[str] = None,
+        timeout: Optional[int] = None
+    ) -> QCResult:
+        from rph_core.utils.file_io import read_xyz
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        coords, symbols = read_xyz(xyz_file)
+
+        if route is None:
+            route = "#p opt b3lyp/def2-svp"
+
+        mod_redundant_lines = [f"X  {idx + 1}  F" for idx in frozen_indices]
+        mod_redundant_block = "\n".join(mod_redundant_lines)
+
+        route_line = route.strip().lstrip('#').strip()
+        if route_line.lower().startswith('p '):
+            route_line = route_line[1:].strip()
+
+        chk_name = f"{xyz_file.stem}_constrained.chk"
+        gjf_file = output_dir / f"{xyz_file.stem}_constrained.gjf"
+        log_file = output_dir / f"{xyz_file.stem}_constrained.log"
+
+        lines = [
+            f"%chk={chk_name}\n",
+            f"%mem={self.mem}\n",
+            f"%nprocshared={self.nprocshared}\n",
+            f"{_format_gaussian_route_block(route_line)}\n\n",
+            f"Constrained Optimization\n\n",
+            f"{charge} {spin}\n"
+        ]
+        for symbol, coord in zip(symbols, coords):
+            lines.append(f"{symbol:<2} {coord[0]:14.8f} {coord[1]:14.8f} {coord[2]:14.8f}\n")
+        lines.append("\n")
+        lines.append(mod_redundant_block)
+        lines.append("\n\n")
+
+        gjf_file.write_text("".join(lines))
+
+        try:
+            cmd = [self.gaussian_cmd, gjf_file.name, log_file.name] if self.use_wrapper else [self.gaussian_cmd, gjf_file.name]
+            result = subprocess.run(
+                cmd,
+                cwd=str(output_dir),
+                capture_output=True,
+                text=True,
+                timeout=timeout
+            )
+            if not log_file.exists():
+                return QCResult(success=False, converged=False, error_message="Gaussian log not created")
+
+            log_content = log_file.read_text()
+            converged = "Normal termination" in log_content
+
+            atoms = LogParser.extract_final_geometry(log_content)
+            result_coords = np.array([[a['x'], a['y'], a['z']] for a in atoms]) if atoms else None
+
+            return QCResult(
+                success=converged,
+                converged=converged,
+                coordinates=result_coords,
+                output_file=log_file,
+                error_message=None if converged else "Gaussian did not converge"
+            )
+
+        except subprocess.TimeoutExpired:
+            return QCResult(success=False, converged=False, error_message="Gaussian timed out")
+        except Exception as e:
+            return QCResult(success=False, converged=False, error_message=str(e))
 
 
 class QCInterfaceFactory:

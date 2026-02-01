@@ -25,7 +25,7 @@ class StepCheckpoint:
     completed: bool
     timestamp: str
     output_files: Dict[str, str]  # {"product_xyz": "path/to/file.xyz"}
-    metadata: Dict[str, Any] = None
+    metadata: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> dict:
         """转换为字典"""
@@ -49,7 +49,7 @@ class PipelineState:
     steps: Dict[str, StepCheckpoint]
 
     # 全局配置
-    config_snapshot: Dict[str, Any] = None
+    config_snapshot: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> dict:
         """转换为字典"""
@@ -256,6 +256,16 @@ class CheckpointManager:
             return None
 
         return state.steps[step_key].output_files.get(output_key)
+
+    def get_step_metadata(self, step_name: str, meta_key: str) -> Optional[Any]:
+        state = self.load_state()
+        if state is None:
+            return None
+        step_key = f"step_{step_name}"
+        if step_key not in state.steps:
+            return None
+        metadata = state.steps[step_key].metadata or {}
+        return metadata.get(meta_key)
 
     def initialize_state(self, product_smiles: str, config: Dict[str, Any]):
         """

@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 S3_DIR_ALIASES = ["S3_TS", "S3_TransitionAnalysis"]
 S2_DIR_ALIASES = ["S2_Retro"]
-S1_DIR_ALIASES = ["S1_Product"]
+S1_DIR_ALIASES = ["S1_ConfGeneration", "S1_Product"]
 
 # ============================================================================
 # Dataclasses
@@ -167,27 +167,44 @@ def resolve_mechanism_context(
     Raises:
         RuntimeError: If work_dir cannot be determined from s4_dir
     """
-    work_dir = s4_dir.parent
-    if not work_dir.exists():
-        raise RuntimeError(f"Cannot find work_dir from s4_dir: {s4_dir}")
+    work_dir = _find_work_dir(s4_dir, max_recursion_depth)
+    if work_dir is None:
+        return MechanismContext(
+            s1_dir=None,
+            s2_dir=None,
+            s3_dir=None,
+            s1_product=None,
+            s1_precursor=None,
+            s1_precursor_source="none",
+            s2_ts_guess=None,
+            s2_reactant_complex=None,
+            s3_ts_final=None,
+            s3_reactant_sp=None,
+        )
 
-    s1_product = _resolve_s1_product(work_dir / "S1_Product")
-    s2_ts_guess, s2_reactant = _resolve_s2_assets(work_dir / "S2_Retro")
+    s1_dir = _find_step_dir(work_dir, S1_DIR_ALIASES)
+    s2_dir = _find_step_dir(work_dir, S2_DIR_ALIASES)
 
-    # Resolve S3 directory via alias table, then resolve assets from that directory.
-    # This avoids hard-coding S3_TS when orchestrator writes S3_TransitionAnalysis.
+    s1_product = _resolve_s1_product(s1_dir)
+    s2_ts_guess, s2_reactant = _resolve_s2_assets(s2_dir)
+
     s3_dir = _find_s3_dir(work_dir, max_recursion_depth)
     s3_ts_final, s3_reactant = _resolve_s3_assets(s3_dir)
 
-    s1_precursor, s1_precursor_source = _resolve_s1_precursor(
-        work_dir / "S1_Product",
-        work_dir / "S2_Retro",
-        config.get('precursor_source_priority', None)
-    )
+    precursor_priority = config.get('precursor_source_priority', None)
+    if precursor_priority is not None:
+        s1_precursor, s1_precursor_source = _resolve_s1_precursor(
+            s1_dir,
+            s2_dir,
+            precursor_priority
+        )
+    else:
+        s1_precursor = None
+        s1_precursor_source = "none"
 
     return MechanismContext(
-        s1_dir=work_dir / "S1_Product",
-        s2_dir=work_dir / "S2_Retro",
+        s1_dir=s1_dir,
+        s2_dir=s2_dir,
         s3_dir=s3_dir,
 
         s1_product=s1_product,
@@ -224,11 +241,53 @@ def _find_s3_dir(work_dir: Path, max_recursion_depth: int) -> Optional[Path]:
 
     logger.warning(f"S3 directory not found, tried aliases: {S3_DIR_ALIASES}")
     return None
+
+
+def _find_step_dir(work_dir: Path, aliases: List[str]) -> Optional[Path]:
+    for alias in aliases:
+        candidate = work_dir / alias
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _has_step_dirs(work_dir: Path) -> bool:
+    for alias in S1_DIR_ALIASES + S2_DIR_ALIASES + S3_DIR_ALIASES:
+        if (work_dir / alias).exists():
+            return True
+    return False
+
+
+def _find_work_dir(s4_dir: Path, max_recursion_depth: int) -> Optional[Path]:
+    base_dir = s4_dir.parent
+    if base_dir.exists() and _has_step_dirs(base_dir):
+        return base_dir
+    if max_recursion_depth <= 1:
+        return None
+    max_depth = max_recursion_depth - 1
+    queue = [(base_dir, 0)]
+    while queue:
+        current, depth = queue.pop(0)
+        if depth >= max_depth:
+            continue
+        children = [p for p in current.iterdir() if p.is_dir()]
+        for child in sorted(children):
+            if _has_step_dirs(child):
+                return child
+            queue.append((child, depth + 1))
+    return None
+
+
+def _first_existing(candidates: List[Path]) -> Optional[Path]:
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
 def _resolve_s1_product(s1_dir: Optional[Path]) -> Optional[Path]:
     """Resolve S1 product file.
 
     Args:
-        s1_dir: S1_Product directory path
+        s1_dir: S1_ConfGeneration directory path
 
     Returns:
         Path to product file or None
@@ -243,11 +302,7 @@ def _resolve_s1_product(s1_dir: Optional[Path]) -> Optional[Path]:
         s1_dir / "global_min.xyz"
     ]
 
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-
-    return None
+    return _first_existing(candidates)
 
 
 def _copy_or_link_asset(src: Path, target: Path, mode: str = "copy") -> bool:
@@ -367,17 +422,11 @@ def _resolve_s2_assets(s2_dir: Optional[Path]) -> Tuple[Optional[Path], Optional
     Returns:
         Tuple of (ts_guess_path, reactant_complex_path)
     """
-    ts_guess = None
-    reactant_complex = None
+    if s2_dir is None or not s2_dir.exists():
+        return None, None
 
-    if s2_dir is not None and s2_dir.exists():
-        ts_guess_path = s2_dir / "ts_guess.xyz"
-        if ts_guess_path.exists():
-            ts_guess = ts_guess_path
-
-        reactant_path = s2_dir / "reactant_complex.xyz"
-        if reactant_path.exists():
-            reactant_complex = reactant_path
+    ts_guess = _first_existing([s2_dir / "ts_guess.xyz"])
+    reactant_complex = _first_existing([s2_dir / "reactant_complex.xyz"])
 
     return ts_guess, reactant_complex
 
@@ -391,38 +440,27 @@ def _resolve_s3_assets(s3_dir: Optional[Path]) -> Tuple[Optional[Path], Optional
     Returns:
         Tuple of (ts_final_path, reactant_sp_path)
     """
-    ts_final = None
-    reactant_sp = None
+    if s3_dir is None or not s3_dir.exists():
+        return None, None
 
-    if s3_dir is not None and s3_dir.exists():
-        # TS final - must be .xyz
-        ts_path = s3_dir / "ts_final.xyz"
-        if ts_path.exists():
-            ts_final = ts_path
+    ts_final = _first_existing([s3_dir / "ts_final.xyz"])
 
-        # M1-P0: Reactant SP - STRICTLY .xyz only for dipole source
-        # If no .xyz available, return None (will be marked as missing in meta)
-        reactant_candidates = [
-            s3_dir / "reactant_sp.xyz",
-            s3_dir / "reactant_sp.out",
-            s3_dir / "reactant_sp.log"
-        ]
+    reactant_candidates = [
+        s3_dir / "reactant_sp.xyz",
+        s3_dir / "reactant_sp.out",
+        s3_dir / "reactant_sp.log"
+    ]
 
-        # Also check in reactant_opt subdirectory
-        reactant_opt_dir = s3_dir / "reactant_opt"
-        if reactant_opt_dir.exists():
-            reactant_candidates.extend([
-                reactant_opt_dir / "final_output.log",
-                reactant_opt_dir / "final_output.xyz",
-                reactant_opt_dir / "reactant_sp.xyz"
-            ])
+    reactant_opt_dir = s3_dir / "reactant_opt"
+    if reactant_opt_dir.exists():
+        reactant_candidates.extend([
+            reactant_opt_dir / "final_output.log",
+            reactant_opt_dir / "final_output.xyz",
+            reactant_opt_dir / "reactant_sp.xyz"
+        ])
 
-        # M1-P0: Filter to ONLY .xyz candidates for dipole source
-        xyz_candidates = [c for c in reactant_candidates if c.suffix == ".xyz"]
-        for candidate in xyz_candidates:
-            if candidate.exists():
-                reactant_sp = candidate
-                break
+    xyz_candidates = [c for c in reactant_candidates if c.suffix == ".xyz"]
+    reactant_sp = _first_existing(xyz_candidates)
 
     return ts_final, reactant_sp
 
@@ -442,7 +480,7 @@ def _resolve_s1_precursor(
     - Respects Step2 contract: reactant_complex.xyz must be available as fallback
 
     Args:
-        s1_dir: S1_Product directory path (MUST be a directory, not a file)
+        s1_dir: S1_ConfGeneration directory path (MUST be a directory, not a file)
         s2_dir: S2_Retro directory path (MUST be a directory, not a file)
         priority: Precursor source priority list from config
 
@@ -464,27 +502,29 @@ def _resolve_s1_precursor(
     if priority is None:
         priority = ["S1_precursor", "S2_neutral_precursor", "S2_reactant_complex"]
 
-    # M2-B2: Try S1 precursor first
-    if "S1_precursor" in priority and s1_dir is not None and s1_dir.exists():
-        s1_candidates = [
-            s1_dir / "precursor.xyz",
-            s1_dir / "neutral_precursor.xyz"
-        ]
-        for candidate in s1_candidates:
-            if candidate.exists():
-                return candidate, "S1_precursor"
-
-    # M2-B2: Try S2 neutral_precursor (intermediate fallback)
-    if "S2_neutral_precursor" in priority and s2_dir is not None and s2_dir.exists():
-        s2_precursor = s2_dir / "neutral_precursor.xyz"
-        if s2_precursor.exists():
-            return s2_precursor, "S2_neutral_precursor"
-
-    # M2-B2: Fallback to S2 reactant_complex (required by Step2 contract)
-    if "S2_reactant_complex" in priority and s2_dir is not None and s2_dir.exists():
-        s2_reactant = s2_dir / "reactant_complex.xyz"
-        if s2_reactant.exists():
-            return s2_reactant, "S2_reactant_complex"
+    # M2-B2: Iterate through priority list and return first valid source
+    for label in priority:
+        if label == "S1_precursor":
+            if s1_dir is not None and s1_dir.exists():
+                s1_candidates = [
+                    s1_dir / "precursor.xyz",
+                    s1_dir / "neutral_precursor.xyz"
+                ]
+                s1_candidate = _first_existing(s1_candidates)
+                if s1_candidate is not None:
+                    return s1_candidate, "S1_precursor"
+        
+        elif label == "S2_neutral_precursor":
+            if s2_dir is not None and s2_dir.exists():
+                s2_precursor = _first_existing([s2_dir / "neutral_precursor.xyz"])
+                if s2_precursor is not None:
+                    return s2_precursor, "S2_neutral_precursor"
+        
+        elif label == "S2_reactant_complex":
+            if s2_dir is not None and s2_dir.exists():
+                s2_reactant = _first_existing([s2_dir / "reactant_complex.xyz"])
+                if s2_reactant is not None:
+                    return s2_reactant, "S2_reactant_complex"
 
     return None, "none"
 
@@ -958,20 +998,14 @@ def migrate_mech_index(old_index: Dict[str, Any]) -> Dict[str, Any]:
 # QC Artifact Collection Constants
 # ============================================================================
 
-# V5.4: NMR and Hirshfeld removed to reduce computational complexity.
-# NBO is integrated into Reactant OPT+FREQ (via QCTaskRunner.enable_nbo=True).
-
-# Subdirectory whitelist for QC artifact search (relative to S3 root)
 QC_ARTIFACT_SUBDIRS = {
     "nbo": ["nbo_analysis/", "nbo/", "reactant_opt/standard/", "reactant_opt/rescue/"]
 }
 
-# Fixed target filename mapping
 QC_ARTIFACT_TARGETS = {
     "nbo_outputs": "qc_nbo.37"
 }
 
-# File patterns per artifact type (within whitelisted subdirs)
 QC_ARTIFACT_PATTERNS = {
     "nbo_outputs": ["*.37", "*.nbo", "*.nbo7"]
 }
@@ -1013,6 +1047,7 @@ def _collect_qc_artifacts(
         Empty result for types not found.
     """
     artifacts: Dict[str, Dict[str, Any]] = {}
+    glob_cache: Dict[Tuple[str, str, str], List[Path]] = {}
     import hashlib
 
     def _compute_file_hash(file_path: Path, limit_bytes: int = 4096) -> str:
@@ -1026,6 +1061,15 @@ def _collect_qc_artifacts(
             return h.hexdigest()[:16]  # First 16 chars sufficient for identification
         except Exception:
             return "unknown"
+
+    def _glob_cached(search_root: Path, pattern: str, recursive: bool = False) -> List[Path]:
+        key = (str(search_root), pattern, "r" if recursive else "g")
+        cached = glob_cache.get(key)
+        if cached is not None:
+            return cached
+        results = list(search_root.rglob(pattern)) if recursive else list(search_root.glob(pattern))
+        glob_cache[key] = results
+        return results
 
     if not s3_dir or not s3_dir.exists():
         logger.debug(f"S3 directory not found, skipping QC artifact collection: {s3_dir}")
@@ -1047,7 +1091,7 @@ def _collect_qc_artifacts(
                 continue
 
             for pattern in patterns:
-                for candidate in search_root.glob(pattern):
+                for candidate in _glob_cached(search_root, pattern, recursive=False):
                     if candidate.is_file():
                         try:
                             stat = candidate.stat()
@@ -1064,7 +1108,7 @@ def _collect_qc_artifacts(
         # Fallback: search in S3 root with very restricted patterns (max depth 2)
         if not candidates:
             for pattern in patterns:
-                for candidate in s3_dir.rglob(pattern):
+                for candidate in _glob_cached(s3_dir, pattern, recursive=True):
                     if candidate.is_file():
                         try:
                             rel_depth = len(candidate.relative_to(s3_dir).parts)
@@ -1308,6 +1352,7 @@ def pack_mechanism_assets(
                 filename="mech_step1_precursor.xyz",
                 source_path=precursor,
                 source_step="S1" if "S1" in precursor_label else "S2",
+                source_label=precursor_label,
                 sha256=_compute_sha256(target)
             )
             logger.info(f"  ✓ Created: {target}")

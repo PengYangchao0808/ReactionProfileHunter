@@ -14,12 +14,15 @@ Version: v3.0 (Molecule-Autonomous Architecture)
 """
 
 import logging
+import shutil
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 
 from rph_core.utils.log_manager import LoggerMixin
 from rph_core.steps.conformer_search.engine import ConformerEngine
+from rph_core.utils.molecule_utils import is_small_molecule
+from rph_core.utils.small_molecule_cache import SmallMoleculeCache
 
 logger = logging.getLogger(__name__)
 
@@ -57,37 +60,55 @@ class AnchorPhase(LoggerMixin):
         }
     """
 
-    def __init__(self, config: dict, base_work_dir: Path):
+    def __init__(self, config: Dict[str, Any], base_work_dir: Optional[Path] = None):
         """
         初始化 AnchorPhase - v3.0
 
         Args:
             config: 配置字典
-            base_work_dir: 基础工作目录（例如 S1_Product/）
+            base_work_dir: 基础工作目录（例如 S1_ConfGeneration/）
         """
         self.config = config
-        self.base_work_dir = Path(base_work_dir)
+        self.base_work_dir = Path(base_work_dir) if base_work_dir else Path.cwd()
         self.base_work_dir.mkdir(parents=True, exist_ok=True)
+
+        # Initialize SmallMoleculeCache
+        cache_dir = self.config.get("global", {}).get("small_molecule_cache_dir")
+        if cache_dir:
+            self.cache_root = Path(cache_dir).resolve()
+        else:
+            self.cache_root = self.base_work_dir.parent.resolve() / "SmallMolecules"
+        
+        self.small_mol_cache = SmallMoleculeCache(self.cache_root)
+
+        # 结果缓存
+        self.anchored_molecules: Dict[str, Dict[str, Any]] = {}
 
         # 初始化 ConformerEngine（但不在 run 方法中创建实例）
         # ConformerEngine 将在内部创建分子自治目录结构
-        # 例如：S1_Product/[Molecule_Name]/crest 和 .../dft
+        # 例如：S1_ConfGeneration/[Molecule_Name]/crest 和 .../dft
 
         self.logger.info("AnchorPhase v3.0 初始化完成（分子自治架构）")
 
     def run(
         self,
-        molecules: Dict[str, str]
+        molecules: Dict[str, str],
+        base_work_dir: Optional[Path] = None
     ) -> AnchorPhaseResult:
         """
         执行统一锚定流程（新结构）
 
         Args:
             molecules: 分子字典 {名称: SMILES}
+            base_work_dir: 可选，覆盖初始化的基础工作目录
 
         Returns:
             AnchorPhaseResult 对象
         """
+        if base_work_dir:
+            self.base_work_dir = Path(base_work_dir)
+            self.base_work_dir.mkdir(parents=True, exist_ok=True)
+
         self.logger.info("=" * 60)
         self.logger.info("Anchor Phase: 统一锚定底物池和产物（v3.0）")
         self.logger.info("=" * 60)
@@ -96,58 +117,99 @@ class AnchorPhase(LoggerMixin):
         anchored_molecules: Dict[str, Dict[str, Any]] = {}
         error_messages = []
 
-        # 对每个分子执行系综搜索 + OPT-SP 耦合
         for name, smiles in molecules.items():
             self.logger.info(f"\n>>> 锚定 {name}...")
             self.logger.info(f"    SMILES: {smiles}")
 
+            best_sp_out: Optional[Path] = None
+            sp_energy: Optional[float] = None
+
             try:
-                # ConformerEngine 内部会创建：base_work_dir/[name]/crest 和 .../dft
-                self.logger.info(f"    步骤 1/2: 系综搜索 + DFT OPT-SP 耦合...")
+                is_small = is_small_molecule(smiles)
+                cache_hit = False
 
-                # ConformerEngine 内部管理目录，不需要传递 work_dir
-                # 每次调用 ConformerEngine.run 会创建该分子的自治目录结构
-                temp_engine = ConformerEngine(
-                    config=self.config,
-                    work_dir=self.base_work_dir,
-                    molecule_name=name
-                )
+                if is_small and self.small_mol_cache.exists(smiles):
+                    cache_dir = self.small_mol_cache.get_path(smiles)
+                    if isinstance(cache_dir, Path):
+                        self.logger.info(f"    ✓ Small molecule {name} found in cache, skipping")
+                        local_mol_dir = self.base_work_dir / name
+                        local_mol_dir.mkdir(parents=True, exist_ok=True)
+                        local_dft_dir = local_mol_dir / "dft"
+                        local_dft_dir.mkdir(parents=True, exist_ok=True)
 
-                # 调用 ConformerEngine.run (OPT-SP 已耦合在内部）
-                best_sp_out, sp_energy = temp_engine.run(smiles=smiles)
+                        cached_min_xyz = cache_dir / "molecule_min.xyz"
+                        local_min_xyz = local_mol_dir / f"{name}_global_min.xyz"
+                        shutil.copy(cached_min_xyz, local_min_xyz)
+
+                        cached_dft = cache_dir / "dft"
+                        if cached_dft.exists():
+                            for f in cached_dft.glob("*"):
+                                if f.is_file():
+                                    shutil.copy(f, local_dft_dir / f.name)
+                        
+                        best_sp_out = local_min_xyz
+                        with open(best_sp_out, "r") as f:
+                            lines = f.readlines()
+                            comment = lines[1] if len(lines) > 1 else ""
+                            import re
+                            match = re.search(r"E=([-+]?\d*\.\d+|\d+)", comment)
+                            if match:
+                                sp_energy = float(match.group(1))
+                            else:
+                                try:
+                                    sp_energy = float(comment.split()[0])
+                                except (ValueError, IndexError):
+                                    sp_energy = 0.0
+                        
+                        cache_hit = True
+
+                if not cache_hit:
+                    self.logger.info("    步骤 1/2: 系综搜索 + DFT OPT-SP 耦合...")
+                    temp_engine = ConformerEngine(
+                        config=self.config,
+                        work_dir=self.base_work_dir,
+                        molecule_name=name
+                    )
+                    best_sp_out, sp_energy = temp_engine.run(smiles=smiles)
+
+                    if is_small:
+                        cache_dir = self.small_mol_cache.get_or_create(smiles, name=name)
+                        shutil.copy(best_sp_out, cache_dir / "molecule_min.xyz")
+                        mol_dft_dir = self.base_work_dir / name / "dft"
+                        if mol_dft_dir.exists():
+                            dest_dft = cache_dir / "dft"
+                            if dest_dft.exists():
+                                shutil.rmtree(dest_dft)
+                            shutil.copytree(mol_dft_dir, dest_dft)
+                        self.logger.info(f"    ✓ Small molecule {name} saved to cache")
 
                 self.logger.info(f"    ✓ OPT-SP 完成: {best_sp_out}")
                 self.logger.info(f"    ✓ SP 能量: {sp_energy:.8f} Hartree")
 
-                # Extract Gaussian artifacts for S4 (log/chk/fchk/qm_output)
                 mol_dir = self.base_work_dir / name / "dft"
                 log_file = None
                 chk_file = None
                 fchk_file = None
 
-                # Find log file (Gaussian .log or ORCA .out)
-                if best_sp_out.suffix == ".log":
+                if best_sp_out and best_sp_out.suffix == ".log":
                     log_file = best_sp_out
-                elif best_sp_out.suffix == ".out":
-                    # ORCA .out - treat as qm_output
-                    log_file = None
+                elif best_sp_out and best_sp_out.suffix == ".out":
+                    log_file = best_sp_out
                 else:
-                    # Search for log file in dft directory
                     potential_logs = list(mol_dir.glob("*.log")) + list(mol_dir.glob("*.out"))
                     if potential_logs:
                         log_file = potential_logs[0]
 
-                # Find checkpoint file (Gaussian .chk)
-                if best_sp_out.stem:
-                    potential_chk = list(mol_dir.glob(f"{best_sp_out.stem}.chk")) + \
-                                   list(mol_dir.glob("*.chk"))
+                if best_sp_out and best_sp_out.stem:
+                    potential_chk = (
+                        list(mol_dir.glob(f"{best_sp_out.stem}.chk"))
+                        + list(mol_dir.glob("*.chk"))
+                    )
                     if potential_chk:
                         chk_file = potential_chk[0]
-                        # Try to generate .fchk
                         from rph_core.utils.qc_interface import try_formchk
                         fchk_file = try_formchk(chk_file)
 
-                # 保存结果（新结构）
                 anchored_molecules[name] = {
                     "xyz": best_sp_out,
                     "e_sp": sp_energy,
@@ -164,7 +226,6 @@ class AnchorPhase(LoggerMixin):
                 self.logger.error(error_msg, exc_info=True)
                 error_messages.append(error_msg)
 
-                # 失败时仍然记录部分结果
                 mol_dir = self.base_work_dir / name
                 potential_xyz = list((mol_dir / "dft").glob("*_SP.out"))
                 if potential_xyz:

@@ -61,7 +61,7 @@ def test_s4_artifact_parameter_passing():
         hunter.logger = logger
         hunter.config = {}
 
-        s1_dir = work_dir / "S1_Product"
+        s1_dir = work_dir / "S1_ConfGeneration"
         s1_dir.mkdir()
         s3_dir = work_dir / "S3_TS"
         s3_dir.mkdir()
@@ -157,7 +157,7 @@ def test_degradation_missing_fchk_warning():
             success=True,
             product_smiles="C=C(O)C",
             work_dir=work_dir,
-            product_xyz=work_dir / "S1_Product/product_min.xyz",
+            product_xyz=work_dir / "S1_ConfGeneration/product_min.xyz",
             ts_final_xyz=work_dir / "S3_TS/ts_final.xyz",
             reactant_xyz=work_dir / "S2_Retro/reactant.xyz",
             features_csv=output_dir / "features_raw.csv",
@@ -168,10 +168,10 @@ def test_degradation_missing_fchk_warning():
             product_fchk=None,
             ts_log=work_dir / "S3_TS/ts.log",
             reactant_log=work_dir / "S3_TS/reactant.log",
-            product_log=work_dir / "S1_Product/product.log",
+            product_log=work_dir / "S1_ConfGeneration/product.log",
             ts_qm_output=work_dir / "S3_TS/ts.out",
             reactant_qm_output=work_dir / "S3_TS/reactant.out",
-            product_qm_output=work_dir / "S1_Product/product.out"
+            product_qm_output=work_dir / "S1_ConfGeneration/product.out"
         )
 
         warnings_logged = []

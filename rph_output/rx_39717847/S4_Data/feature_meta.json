@@ -1,0 +1,96 @@
+{
+  "meta": {
+    "schema_version": "6.1",
+    "schema_signature": "",
+    "feature_status": "invalid_inputs",
+    "method": "extract-only",
+    "solvent": "",
+    "temperature_K": 298.15,
+    "enabled_plugins": [
+      "thermo",
+      "geometry",
+      "qc_checks",
+      "ts_quality",
+      "asm_enrichment",
+      "fmo_cdft_dipolar"
+    ],
+    "policies": {
+      "job_run_policy": "disallow",
+      "nics_trigger_policy": "gen"
+    }
+  },
+  "trace": {
+    "inputs_fingerprint": {},
+    "plugins": {
+      "thermo": {
+        "status": "ok",
+        "runtime_ms": 0.013113021850585938,
+        "missing_fields": [],
+        "missing_paths": [],
+        "errors": [],
+        "warnings": [],
+        "cache_hit": false,
+        "job_specs": []
+      },
+      "geometry": {
+        "status": "ok",
+        "runtime_ms": 5.568981170654297,
+        "missing_fields": [],
+        "missing_paths": [],
+        "errors": [],
+        "warnings": [],
+        "cache_hit": false,
+        "job_specs": []
+      },
+      "qc_checks": {
+        "status": "ok",
+        "runtime_ms": 0.00762939453125,
+        "missing_fields": [],
+        "missing_paths": [],
+        "errors": [],
+        "warnings": [],
+        "cache_hit": false,
+        "job_specs": []
+      },
+      "ts_quality": {
+        "status": "skipped",
+        "runtime_ms": 0.006198883056640625,
+        "missing_fields": [
+          "ts_log"
+        ],
+        "missing_paths": [],
+        "errors": [
+          "Missing required inputs: ['ts_log']"
+        ],
+        "warnings": [],
+        "cache_hit": false,
+        "job_specs": []
+      },
+      "asm_enrichment": {
+        "status": "ok",
+        "runtime_ms": 1.5802383422851562,
+        "missing_fields": [],
+        "missing_paths": [],
+        "errors": [],
+        "warnings": [],
+        "cache_hit": false,
+        "job_specs": []
+      },
+      "fmo_cdft_dipolar": {
+        "status": "ok",
+        "runtime_ms": 11.503219604492188,
+        "missing_fields": [
+          "fmo_cdft_dipolar features"
+        ],
+        "missing_paths": [],
+        "errors": [
+          "Failed to parse HOMO/LUMO"
+        ],
+        "warnings": [],
+        "cache_hit": false,
+        "job_specs": []
+      }
+    }
+  },
+  "warnings": []
+}

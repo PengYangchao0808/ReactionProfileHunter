@@ -54,6 +54,7 @@ class QCOptimizationResult:
     """完整优化结果（含频率验证和 L2 SP）"""
     optimized_xyz: Path  # 优化后的结构 XYZ
     l2_energy: Optional[float] = None  # L2 高精度能量 (Hartree)
+    l2_sp_result: Optional[QCSPResult] = None  # L2 SP provenance/artifacts
     opt_energy: Optional[float] = None  # 几何优化能量 (Hartree)
     converged: bool = False
     frequencies: Optional[np.ndarray] = None
@@ -223,6 +224,7 @@ class QCTaskRunner(LoggerMixin):
         执行基态优化 + 频率验证 + L2 SP 完整流程
 
         策略:
+        0. [NEW] xTB 预优化 (如果检测到原子重叠，避免 Gaussian 崩溃)
         1. 标准几何优化
         2. 频率分析验证无虚频
         3. 失败则救援: CalcFC + MaxStep=10
@@ -245,12 +247,42 @@ class QCTaskRunner(LoggerMixin):
 
         self.logger.info(f"=== Normal 模式优化: {xyz_file.name} ===")
 
+        # 【NEW】Step 0: 几何预处理 (检测重叠 → xTB 预优化)
+        from rph_core.utils.geometry_preprocessor import GeometryPreprocessor
+        
+        preprocessor = GeometryPreprocessor(self.config)
+        preopt_result = preprocessor.preprocess(
+            xyz_file=xyz_file,
+            output_dir=output_dir / "preoptimization",
+            charge=charge,
+            uhf=spin - 1
+        )
+        
+        # 如果预优化成功，使用预优化后的结构；否则继续使用原始结构
+        if preopt_result.success and preopt_result.coordinates:
+            working_xyz = preopt_result.coordinates
+            # 通过 error_message 判断预优化状态
+            status = preopt_result.error_message or ""
+            if status == "preopt_success":
+                self.logger.info(f"✓ xTB 预优化已完成，将使用预优化结构: {working_xyz}")
+            elif status in ("no_overlap", "preopt_disabled"):
+                self.logger.info(f"无需预优化（{status}），继续使用原始结构: {working_xyz}")
+            elif status.startswith("xtb_preopt_failed"):
+                self.logger.warning(f"xTB 预优化失败但继续：{status}")
+            else:
+                self.logger.info(f"预优化状态: {status}, 使用结构: {working_xyz}")
+        else:
+            working_xyz = xyz_file
+            self.logger.warning(
+                f"预优化失败或被跳过，将直接使用原始结构进行 DFT 优化: {working_xyz}"
+            )
+
         self.normal_route = self._get_normal_route()
         self.normal_rescue_route = self._get_normal_route(rescue=True)
 
-        # 尝试标准优化
+        # 尝试标准优化（使用预处理后的结构）
         opt_result = self._try_normal_optimization(
-            xyz_file, output_dir, charge, spin, old_checkpoint, enable_nbo
+            working_xyz, output_dir, charge, spin, old_checkpoint, enable_nbo
         )
 
         # 如果标准优化失败，尝试救援
@@ -260,15 +292,21 @@ class QCTaskRunner(LoggerMixin):
                 return opt_result
             self.logger.warning("标准优化失败，启动救援策略...")
             opt_result = self._try_normal_rescue(
-                xyz_file, output_dir, charge, spin, old_checkpoint, enable_nbo
+                working_xyz, output_dir, charge, spin, old_checkpoint, enable_nbo
             )
 
         # L2 高精度 SP
         l2_energy = None
         if enable_l2_sp and opt_result.converged:
             self.logger.info("执行 L2 高精度单点能...")
-            l2_energy = self._run_l2_sp(opt_result.optimized_xyz, output_dir / "L2_SP")
-            opt_result.l2_energy = l2_energy
+            l2_result = self._run_l2_sp(
+                opt_result.optimized_xyz,
+                output_dir / "L2_SP",
+                charge=charge,
+                spin=spin
+            )
+            opt_result.l2_sp_result = l2_result
+            opt_result.l2_energy = l2_result.energy if l2_result.converged else None
 
         return opt_result
 
@@ -285,6 +323,7 @@ class QCTaskRunner(LoggerMixin):
         执行 TS 优化 + 虚频验证 + L2 SP 完整流程
 
         策略:
+        0. [NEW] xTB 预优化 (如果检测到原子重叠，避免 Gaussian 崩溃)
         1. 标准 Berny TS 优化 (Opt=TS, CalcFC, NoEigenTest)
         2. 验证恰好 1 个虚频
         3. 失败则救援: Recalc=5 + NoEigenTest + MaxStep=10
@@ -306,12 +345,42 @@ class QCTaskRunner(LoggerMixin):
 
         self.logger.info(f"=== TS 模式优化: {xyz_file.name} ===")
 
+        # 【NEW】Step 0: 几何预处理 (检测重叠 → xTB 预优化)
+        from rph_core.utils.geometry_preprocessor import GeometryPreprocessor
+        
+        preprocessor = GeometryPreprocessor(self.config)
+        preopt_result = preprocessor.preprocess(
+            xyz_file=xyz_file,
+            output_dir=output_dir / "preoptimization",
+            charge=charge,
+            uhf=spin - 1  # 自旋多重度 → UHF 转换
+        )
+        
+        # 如果预优化成功，使用预优化后的结构；否则继续使用原始结构
+        if preopt_result.success and preopt_result.coordinates:
+            working_xyz = preopt_result.coordinates
+            # 通过 error_message 判断预优化状态
+            status = preopt_result.error_message or ""
+            if status == "preopt_success":
+                self.logger.info(f"✓ xTB 预优化已完成，将使用预优化结构: {working_xyz}")
+            elif status in ("no_overlap", "preopt_disabled"):
+                self.logger.info(f"无需预优化（{status}），继续使用原始结构: {working_xyz}")
+            elif status.startswith("xtb_preopt_failed"):
+                self.logger.warning(f"xTB 预优化失败但继续：{status}")
+            else:
+                self.logger.info(f"预优化状态: {status}, 使用结构: {working_xyz}")
+        else:
+            working_xyz = xyz_file
+            self.logger.warning(
+                f"预优化失败或被跳过，将直接使用原始结构进行 DFT 优化: {working_xyz}"
+            )
+
         self.ts_route = self._get_ts_route()
         self.ts_rescue_route = self._get_ts_route(rescue=True)
 
-        # 尝试标准 TS 优化
+        # 尝试标准 TS 优化（使用预处理后的结构）
         opt_result = self._try_ts_optimization(
-            xyz_file, output_dir, charge, spin, old_checkpoint
+            working_xyz, output_dir, charge, spin, old_checkpoint
         )
 
         # 如果 TS 优化失败，尝试救援
@@ -321,14 +390,20 @@ class QCTaskRunner(LoggerMixin):
                 return opt_result
             self.logger.warning("TS 优化失败或虚频不符，启动救援策略...")
             opt_result = self._try_ts_rescue(
-                xyz_file, output_dir, charge, spin, old_checkpoint
+                working_xyz, output_dir, charge, spin, old_checkpoint
             )
 
         l2_energy = None
         if enable_l2_sp and opt_result.converged:
             self.logger.info("执行 L2 高精度单点能...")
-            l2_energy = self._run_l2_sp(opt_result.optimized_xyz, output_dir / "L2_SP")
-            opt_result.l2_energy = l2_energy
+            l2_result = self._run_l2_sp(
+                opt_result.optimized_xyz,
+                output_dir / "L2_SP",
+                charge=charge,
+                spin=spin
+            )
+            opt_result.l2_sp_result = l2_result
+            opt_result.l2_energy = l2_result.energy if l2_result.converged else None
 
         return opt_result
 
@@ -834,7 +909,13 @@ class QCTaskRunner(LoggerMixin):
                 qm_output_file=getattr(result, 'qm_output_file', None)
             )
 
-    def _run_l2_sp(self, xyz_file: Path, output_dir: Path) -> Optional[float]:
+    def _run_l2_sp(
+        self,
+        xyz_file: Path,
+        output_dir: Path,
+        charge: int = 0,
+        spin: int = 1
+    ) -> QCSPResult:
         """
         运行 L2 高精度单点能
 
@@ -843,21 +924,44 @@ class QCTaskRunner(LoggerMixin):
             output_dir: 输出目录
 
         Returns:
-            L2 能量 (Hartree)，失败返回 None
+            QCSPResult (includes energy and provenance)
         """
         try:
-            result = self.orca.single_point(xyz_file, output_dir)
+            result = self.orca.single_point(
+                xyz_file,
+                output_dir,
+                charge=charge,
+                spin=spin
+            )
 
-            if not result.converged:
+            if not result.converged or result.energy is None:
                 self.logger.error(f"L2 SP 未收敛: {result.error_message}")
-                return None
+                return QCSPResult(
+                    energy=0.0,
+                    converged=False,
+                    output_file=result.output_file,
+                    log_file=getattr(result, 'log_file', None),
+                    chk_file=getattr(result, 'chk_file', None),
+                    fchk_file=getattr(result, 'fchk_file', None),
+                    qm_output_file=getattr(result, 'qm_output_file', None),
+                    error_message=result.error_message
+                )
 
             self.logger.info(f"✓ L2 SP 成功: {result.energy:.8f} Hartree")
-            return result.energy
+            return QCSPResult(
+                energy=float(result.energy),
+                converged=True,
+                output_file=result.output_file,
+                error_message=None
+            )
 
         except Exception as e:
             self.logger.error(f"L2 SP 计算失败: {e}")
-            return None
+            return QCSPResult(
+                energy=0.0,
+                converged=False,
+                error_message=str(e)
+            )
 
     def run_sp_only(
         self,
@@ -884,7 +988,12 @@ class QCTaskRunner(LoggerMixin):
         self.logger.info(f"执行单点能计算: {xyz_file.name}")
 
         try:
-            result = self.orca.single_point(xyz_file, output_dir)
+            result = self.orca.single_point(
+                xyz_file,
+                output_dir,
+                charge=charge,
+                spin=spin
+            )
 
             energy = result.energy if result.energy is not None else 0.0
             return QCSPResult(

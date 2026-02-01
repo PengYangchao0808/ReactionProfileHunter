@@ -1,12 +1,12 @@
 
- ReactionProfileHunter v5.4.0
+ ReactionProfileHunter v6.1.0
 ReactionProfileHunter (RPH) is a product-first reaction mechanistic pipeline:
 S1 (anchor/conformer) -> S2 (retro scan) -> S3 (TS optimize/rescue) -> S4 (feature extraction + packaging).
-V5.4 goal: integrate NBO into reactant OPT/Freq and remove Hirshfeld + NMR to minimize computational complexity.
- Key Changes In v5.4
-- NBO integrated into reactant OPT+Freq (Gaussian route adds `Pop=NBO` in the same job; Rev A compatible).
-- Hirshfeld and NMR flows removed (no compute, no packaging, no templates/config).
-- Step4/mech_packager collects only NBO artifacts (writes `S4_Data/qc_nbo.37` when found).
+V6.1 goal: S3 performs all computation; S4 is extract-only and writes fixed 3-file outputs.
+ Key Changes In v6.1
+- S4 outputs: `S4_Data/features_raw.csv`, `S4_Data/features_mlr.csv`, `S4_Data/feature_meta.json`.
+- S4 does not submit QC jobs; only parses existing outputs.
+- NBO compute and artifact collection are disabled by default.
  Entrypoints
 - CLI wrapper: `bin/rph_run`
 - Python CLI: `rph_core/orchestrator.py` (`main()`)
@@ -33,7 +33,8 @@ Architecture (Code Map)
 IO Contract (Required Outputs)
 RPH is built around a strict step output contract:
 S1 output (required):
-- S1_Product/product_min.xyz
+- S1_ConfGeneration/product/product_min.xyz
+- S1_ConfGeneration/precursor/precursor_min.xyz (optional)
 S2 output (required; must output BOTH):
 - S2_Retro/ts_guess.xyz
 - S2_Retro/reactant_complex.xyz
@@ -65,8 +66,11 @@ Removed In v5.4
 - Any optional QC task runner that previously generated NMR/Hirshfeld outputs
 Output Directory Layout (Example)
 Output/rx_xxx/
-  S1_Product/
-    product_min.xyz
+  S1_ConfGeneration/
+    product/
+      product_min.xyz
+    precursor/
+      precursor_min.xyz
   S2_Retro/
     ts_guess.xyz
     reactant_complex.xyz

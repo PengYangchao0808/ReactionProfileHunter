@@ -8,7 +8,7 @@ Author: QC Descriptors Team
 Date: 2026-01-18
 """
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, cast
 import numpy as np
 
 from .base import BaseExtractor, register_extractor
@@ -51,11 +51,14 @@ class ThermoExtractor(BaseExtractor):
         e_reactant = getattr(sp_report, "e_reactant", None)
         e_product = getattr(sp_report, "e_product", None)
 
-        has_gibbs = g_ts is not None and g_reactant is not None and g_product is not None
+        has_gibbs_activation = g_ts is not None and g_reactant is not None
+        has_gibbs_reaction = g_product is not None and g_reactant is not None
         
         # Activation energy
-        if has_gibbs:
-            features["thermo.dG_activation"] = float(g_ts) - float(g_reactant)
+        if has_gibbs_activation:
+            g_ts_val = cast(float, g_ts)
+            g_reactant_val = cast(float, g_reactant)
+            features["thermo.dG_activation"] = g_ts_val - g_reactant_val
             features["thermo.dG_activation_gibbs"] = features["thermo.dG_activation"]
             features["thermo.energy_source_activation"] = "gibbs"
         elif e_ts is not None and e_reactant is not None:
@@ -68,8 +71,10 @@ class ThermoExtractor(BaseExtractor):
             features["thermo.energy_source_activation"] = "none"
         
         # Reaction energy
-        if has_gibbs:
-            features["thermo.dG_reaction"] = float(g_product) - float(g_reactant)
+        if has_gibbs_reaction:
+            g_product_val = cast(float, g_product)
+            g_reactant_val = cast(float, g_reactant)
+            features["thermo.dG_reaction"] = g_product_val - g_reactant_val
             features["thermo.dG_reaction_gibbs"] = features["thermo.dG_reaction"]
             features["thermo.energy_source_reaction"] = "gibbs"
         elif e_product is not None and e_reactant is not None:

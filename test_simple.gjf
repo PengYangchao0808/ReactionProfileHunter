@@ -1,9 +1,0 @@
-%chk=test.chk
-%nprocshared=16
-%mem=32GB
-#p B3LYP/def2-SVP Opt=CalcFC Freq
-
-test_title
-
-0 1
- O          1.0000        2.0000        3.0000

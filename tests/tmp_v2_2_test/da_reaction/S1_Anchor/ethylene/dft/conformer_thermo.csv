@@ -1,0 +1,2 @@
+name,weight,g_used,g_sum,g_conc,h_sum,u_sum,s_total,sp_energy,log_file
+conf_000,1.000000,-77.03629880,-77.03629880,,-77.01160030,-15.499000,-77.07490515,/mnt/e/Calculations/[5+2] Mechain learning/Scripts/ReactionProfileHunter/ReactionProfileHunter_20260121/tests/tmp_v2_2_test/da_reaction/S1_Anchor/ethylene/dft/conf_000.log

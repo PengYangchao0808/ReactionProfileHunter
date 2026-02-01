@@ -31,17 +31,13 @@ class TestResolveMechanismContext:
     def test_resolve_mechanism_context_basic(self, tmp_path):
         """Basic resolution with standard directory structure."""
         work_dir = tmp_path / "work"
-        s1_dir = work_dir / "S1_Product"
+        s1_dir = work_dir / "S1_ConfGeneration"
         s2_dir = work_dir / "S2_Retro"
         s3_dir = work_dir / "S3_TS"
 
-        s1_dir.mkdir(parents=True)
-        s2_dir.mkdir(parents=True)
-        s3_dir.mkdir(parents=True)
-
-        s1_dir.mkdir(parents=True)
-        s2_dir.mkdir(parents=True)
-        s3_dir.mkdir(parents=True)
+        s1_dir.mkdir(parents=True, exist_ok=True)
+        s2_dir.mkdir(parents=True, exist_ok=True)
+        s3_dir.mkdir(parents=True, exist_ok=True)
 
         s1_product = s1_dir / "product_min.xyz"
         s1_product.write_text("S1 product")
@@ -96,7 +92,7 @@ class TestResolveMechanismContext:
     def test_resolve_mechanism_context_missing_s3(self, tmp_path):
         """Test graceful handling when S3 directory is missing."""
         work_dir = tmp_path / "work"
-        s1_dir = work_dir / "S1_Product"
+        s1_dir = work_dir / "S1_ConfGeneration"
         s2_dir = work_dir / "S2_Retro"
         s1_dir.mkdir(parents=True)
         s2_dir.mkdir(parents=True)
@@ -142,7 +138,9 @@ class TestResolveMechanismContext:
         nested = s3_dir / "nested" / "deeper"
         nested.mkdir(parents=True)
         (nested / "S3_TS").mkdir(parents=True)
-        (nested / "deeper" / "S3_TS").write_text("Nested S3")
+        deeper_dir = nested / "deeper" / "S3_TS"
+        deeper_dir.mkdir(parents=True, exist_ok=True)
+        (deeper_dir / "ts_final.xyz").write_text("Nested S3")
 
         context = resolve_mechanism_context(
             s4_dir=tmp_path / "S4_Data",
@@ -157,14 +155,12 @@ class TestResolveMechanismContext:
     def test_resolve_mechanism_context_config_priority(self, tmp_path):
         """Test precursor source priority from config."""
         work_dir = tmp_path / "work"
-        s1_dir = work_dir / "S1_Product"
+        s1_dir = work_dir / "S1_ConfGeneration"
         s2_dir = work_dir / "S2_Retro"
         s3_dir = work_dir / "S3_TS"
-        s1_dir.mkdir(parents=True)
-        s2_dir.mkdir(parents=True)
-        s3_dir.mkdir(parents=True)
-
-        s1_dir.mkdir(parents=True)
+        s1_dir.mkdir(parents=True, exist_ok=True)
+        s2_dir.mkdir(parents=True, exist_ok=True)
+        s3_dir.mkdir(parents=True, exist_ok=True)
         s1_precursor = s1_dir / "neutral_precursor.xyz"
         s1_precursor.write_text("S1 neutral precursor")
 

@@ -1,3 +1,6 @@
+import logging
+import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +14,9 @@ class IsostatResult:
     n_within_window: Optional[int]
 
 
+logger = logging.getLogger(__name__)
+
+
 def _count_within_window(log_file: Path, energy_window: float) -> Optional[int]:
     try:
         content = log_file.read_text(errors="ignore").splitlines()
@@ -18,18 +24,34 @@ def _count_within_window(log_file: Path, energy_window: float) -> Optional[int]:
         return None
     count = 0
     for line in content:
-        if "DE=" not in line:
+        # Relaxed check for DE and = (can be separated by spaces)
+        if "DE" not in line or "=" not in line:
             continue
         parts = line.replace("=", " = ").split()
         for i, token in enumerate(parts):
-            if token == "DE" and i + 1 < len(parts):
-                try:
-                    val = float(parts[i + 1])
-                    if val <= energy_window:
-                        count += 1
-                except ValueError:
-                    continue
+            if token == "DE":
+                # Check next token (could be "=" or value)
+                val_idx = i + 1
+                if val_idx < len(parts) and parts[val_idx] == "=":
+                    val_idx += 1
+                
+                if val_idx < len(parts):
+                    try:
+                        val = float(parts[val_idx])
+                        if val <= energy_window:
+                            count += 1
+                    except ValueError:
+                        continue
     return count if count > 0 else None
+
+
+def _resolve_isostat_path(isostat_bin: Path) -> Optional[Path]:
+    if isostat_bin.exists() and isostat_bin.is_file() and os.access(str(isostat_bin), os.X_OK):
+        return isostat_bin
+    which_path = shutil.which(str(isostat_bin))
+    if which_path:
+        return Path(which_path)
+    return None
 
 
 def run_isostat(
@@ -44,8 +66,21 @@ def run_isostat(
 ) -> IsostatResult:
     output_dir.mkdir(parents=True, exist_ok=True)
     log_file = output_dir / "isostat.log"
+    resolved_bin = _resolve_isostat_path(isostat_bin)
+    if resolved_bin is None:
+        message = (
+            "isostat executable not found; skipping clustering. "
+            "Set config.executables.isostat.path or ensure isostat on PATH."
+        )
+        logger.warning(message)
+        log_file.write_text(message)
+        return IsostatResult(
+            cluster_xyz=input_xyz,
+            log_file=log_file,
+            n_within_window=None
+        )
     cmd = [
-        str(isostat_bin),
+        str(resolved_bin),
         str(input_xyz),
         "-Gdis",
         f"{gdis}",

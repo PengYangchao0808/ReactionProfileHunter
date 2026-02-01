@@ -10,6 +10,7 @@ Updated: 2026-01-28 (Session #V6: 重构为插件管线)
 """
 
 import logging
+import json
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -40,9 +41,9 @@ class FeatureMiner(LoggerMixin):
     - reactant: 底物 (来自 Step 2)
     - product: 产物 (来自 Step 1)
     - forming_bonds: 形成键的原子索引 ((i, j), (k, l))
-    - ts_fchk, ts_orca_out: TS fchk/ORCA输出（用于NBO/interaction_analysis）
-    - reactant_fchk, reactant_orca_out: 底物fchk/ORCA输出
-    - product_fchk, product_orca_out: 产物fchk/ORCA输出
+    - ts_fchk, ts_orca_out: TS fchk/ORCA输出（用于TS质量解析/交互分析，纯解析）
+    - reactant_fchk, reactant_orca_out: 底物fchk/ORCA输出（可选，纯解析）
+    - product_fchk, product_orca_out: 产物fchk/ORCA输出（可选，纯解析）
 
     输出:
     - features_raw.csv: 完整特征表（所有可用特征）
@@ -87,8 +88,8 @@ class FeatureMiner(LoggerMixin):
             forming_bonds: 形成键的原子索引 ((i, j), (k, l))
             fragment_indices: 双片段索引 (fragment_A_atoms, fragment_B_atoms)
             sp_matrix_report: S3.5 SP 矩阵报告（保留兼容性）
-            ts_fchk: TS fchk 文件（用于NBO/interaction_analysis）
-            ts_orca_out: TS ORCA 输出（用于NBO）
+            ts_fchk: TS fchk 文件（用于TS质量解析/交互分析）
+            ts_orca_out: TS ORCA 输出（用于TS质量解析）
             reactant_fchk: 底物fchk 文件
             reactant_orca_out: 底物ORCA 输出
             product_fchk: 产物fchk 文件
@@ -117,6 +118,15 @@ class FeatureMiner(LoggerMixin):
                   else work_dir / "S3_TS" if (work_dir / "S3_TS").exists()
                   else None)
 
+        artifacts_index = None
+        if s3_dir is not None:
+            index_path = s3_dir / "artifacts_index.json"
+            if index_path.exists():
+                try:
+                    artifacts_index = json.loads(index_path.read_text())
+                except Exception as e:
+                    self.logger.warning(f"Failed to read artifacts_index.json: {e}")
+
         context = FeatureContext(
             ts_xyz=ts_final,
             reactant_xyz=reactant,
@@ -126,6 +136,7 @@ class FeatureMiner(LoggerMixin):
             product_fchk=product_fchk,
             ts_orca_out=ts_orca_out,
             s3_dir=s3_dir,
+            artifacts_index=artifacts_index,
             forming_bonds=forming_bonds,
             fragment_indices=fragment_indices,
             sp_report=sp_matrix_report,
