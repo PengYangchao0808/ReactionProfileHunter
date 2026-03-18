@@ -17,6 +17,7 @@ import json
 import pathlib
 
 from .base import BaseExtractor, register_extractor
+from rph_core.utils.constants import HARTREE_TO_KCAL
 
 
 class ASMEnrichmentExtractor(BaseExtractor):
@@ -63,8 +64,6 @@ class ASMEnrichmentExtractor(BaseExtractor):
             features["asm.distortion_total_kcal"] = None
             features["asm.interaction_kcal"] = None
             return features
-
-        HARTREE_TO_KCAL = 627.509
 
         sp_results = enrichment.get('sp_results', {})
         fragA_R = sp_results.get('fragA_R')

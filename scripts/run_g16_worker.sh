@@ -53,6 +53,20 @@ if [ -n "$FREE_KB" ] && [ "$FREE_KB" -lt 2000000 ]; then
 fi
 
 # ------------------------------
+# 1.5) Copy Gau_XTB scripts if needed (for external='./xtb.sh' tasks)
+# ------------------------------
+INPUT_DIR="$(cd "$(dirname "$INPUT_FILE")" && pwd)"
+if grep -q "external=" "$INPUT_FILE" 2>/dev/null; then
+    # Check for Gau_XTB scripts in input directory
+    for script in xtb.sh genxyz extderi; do
+        if [ -f "$INPUT_DIR/$script" ]; then
+            cp "$INPUT_DIR/$script" "$JOB_SCRDIR/"
+            chmod +x "$JOB_SCRDIR/$script"
+        fi
+    done
+fi
+
+# ------------------------------
 # 2) Environment setup
 # ------------------------------
 

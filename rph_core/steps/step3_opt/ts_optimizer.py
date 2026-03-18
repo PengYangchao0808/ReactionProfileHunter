@@ -2,17 +2,17 @@
 Step 3: Transition Analyzer
 ==========================
 
-反应中心全分析模块 - TS优化验证 + Reactant SP + 片段处理
+Reaction center analysis module - TS optimization validation + Intermediate SP + fragment processing
 
 Author: QCcalc Team
 Date: 2026-01-09
-Updated: 2026-01-13 (合并 S3.5，集成 SP 和片段处理)
+Updated: 2026-01-13 (merged S3.5, integrated SP and fragment processing)
 """
 
 import logging
 from pathlib import Path
-from typing import Optional, Tuple, List, cast
-from dataclasses import dataclass
+from typing import Optional, Tuple, List, cast, Dict, Any
+from dataclasses import dataclass, asdict
 import numpy as np
 import hashlib
 import json
@@ -20,15 +20,19 @@ import datetime
 
 from rph_core.utils.log_manager import LoggerMixin
 from rph_core.utils.file_io import write_xyz, read_xyz
+from rph_core.utils.naming_compat import (
+    INTERMEDIATE_XYZ,
+    REACTANT_COMPLEX_XYZ,
+    resolve_intermediate_path,
+    DIR_INTERMEDIATE_OPT,
+)
 from rph_core.utils.orca_interface import ORCAInterface
 from rph_core.utils.qc_interface import XTBInterface
 from rph_core.utils.geometry_tools import LogParser
-# ASM 功能已禁用 (2026-01-31) - 以下导入不再使用
-# from rph_core.steps.step3_opt.post_qc_enrichment import run_post_qc_enrichment
-# v3.0: SPMatrixReport 已移除（批处理 SP 功能被 ConformerEngine 替代）
-# 创建简化的占位符类以保持接口兼容性
-from dataclasses import dataclass
-from typing import Optional
+from rph_core.utils.ui import get_progress_manager
+from rph_core.utils.constants import HARTREE_TO_KCAL
+
+
 @dataclass
 class SPMatrixReport:
     e_ts: float = 0.0
@@ -40,11 +44,16 @@ class SPMatrixReport:
     g_ts: Optional[float] = None
     g_reactant: Optional[float] = None
     g_product: Optional[float] = None
+    # Shermo 来源与错误追踪
+    g_ts_source: Optional[str] = None
+    g_ts_error: Optional[str] = None
+    g_reactant_source: Optional[str] = None
+    g_reactant_error: Optional[str] = None
     # 片段能量（v3.0 可能不使用，占位符）
     e_frag_a_ts: float = 0.0
     e_frag_b_ts: float = 0.0
-    e_frag_a_relaxed: float = 0.0
-    e_frag_b_relaxed: float = 0.0
+    e_frag_a_relaxed: Optional[float] = None
+    e_frag_b_relaxed: Optional[float] = None
     fragment_split_source: Optional[str] = None
     fragment_split_reason: Optional[str] = None
     fragment_indices: Optional[Tuple[List[int], List[int]]] = None
@@ -60,10 +69,10 @@ class SPMatrixReport:
         e_ts_final = self.e_ts_final
         e_reactant = self.e_reactant
         if e_ts_final is not None and e_reactant is not None:
-            return (e_ts_final - e_reactant) * 627.509
+            return (e_ts_final - e_reactant) * HARTREE_TO_KCAL
         e_ts = self.e_ts
         if e_reactant is not None:
-            return (e_ts - e_reactant) * 627.509
+            return (e_ts - e_reactant) * HARTREE_TO_KCAL
         return None
 
     def get_reaction_energy(self) -> Optional[float]:
@@ -74,11 +83,63 @@ class SPMatrixReport:
         e_product = self.e_product
         e_reactant = self.e_reactant
         if e_product is not None and e_reactant is not None:
-            return (e_product - e_reactant) * 627.509
+            return (e_product - e_reactant) * HARTREE_TO_KCAL
         return None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to dictionary using dataclass field names."""
+        import dataclasses
+        return dataclasses.asdict(self)
+
+    def to_json(self, indent: int = 2) -> str:
+        """Serialize to JSON string."""
+        import json
+        data = self.to_dict()
+        return json.dumps(data, indent=indent, ensure_ascii=False)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SPMatrixReport":
+        """Create instance from dictionary, filtering unknown keys."""
+        import dataclasses
+        valid_fields = {f.name for f in dataclasses.fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in valid_fields}
+        return cls(**filtered)
+
+    def validate(self) -> bool:
+        """Validate data integrity. Check numeric/string fields."""
+        import dataclasses
+        for field in dataclasses.fields(self):
+            value = getattr(self, field.name)
+            if value is None:
+                continue
+            type_str = str(field.type)
+            if 'float' in type_str:
+                if not isinstance(value, (int, float)):
+                    return False
+            elif 'str' in type_str:
+                if not isinstance(value, str):
+                    return False
+        return True
+
+    def __str__(self) -> str:
+        """Formatted string representation with key energy info."""
+        lines = [f"SPMatrixReport(method={self.method}, solvent={self.solvent})"]
+        lines.append(f"  e_reactant  = {self.e_reactant}")
+        lines.append(f"  e_product   = {self.e_product}")
+        lines.append(f"  e_ts_final  = {self.e_ts_final}")
+
+        activation = self.get_activation_energy()
+        if activation is not None:
+            lines.append(f"  ΔG‡ (activation) = {activation:.4f} kcal/mol")
+
+        reaction = self.get_reaction_energy()
+        if reaction is not None:
+            lines.append(f"  ΔG_rxn (reaction) = {reaction:.4f} kcal/mol")
+
+        return "\n".join(lines)
     
     @staticmethod
-    def _write_artifacts_index(s3_dir: Path, config: dict) -> None:
+    def _write_artifacts_index(s3_dir: Path, config: dict[str, Any]) -> None:
         """
         Write S3 artifacts_index.json with dipolar artifact info.
 
@@ -119,8 +180,7 @@ class SPMatrixReport:
         
         logging.getLogger(__name__).info(f"Wrote artifacts index to {index_path}")
 
-# ASM 功能已禁用 (2026-01-31) - 以下导入不再使用
-# from rph_core.steps.step4_features.fragment_extractor import FragmentExtractor
+
 from typing import Any
 import json
 import os
@@ -152,9 +212,9 @@ class TransitionAnalysisResult:
     ts_fchk: Optional[Path] = None
     ts_log: Optional[Path] = None
     ts_qm_output: Optional[Path] = None
-    reactant_fchk: Optional[Path] = None
-    reactant_log: Optional[Path] = None
-    reactant_qm_output: Optional[Path] = None
+    intermediate_fchk: Optional[Path] = None
+    intermediate_log: Optional[Path] = None
+    intermediate_qm_output: Optional[Path] = None
 
 
 class TSOptimizer(LoggerMixin):
@@ -169,14 +229,14 @@ class TSOptimizer(LoggerMixin):
 
     输入:
     - ts_guess: TS 初猜 (来自 Step 2，可能是文件或目录)
-    - reactant: 底物复合物 (来自 Step 2，用于 QST2 救援)
+    - intermediate: 反应中间体 (来自 Step 2，用于 QST2 救援)
     - product: 产物 (来自 Step 1，用于 QST2 救援)
 
     输出:
     - ts_final_xyz: 优化后的 TS 结构
     """
 
-    def __init__(self, config: dict, molecule_name: Optional[str] = None):
+    def __init__(self, config: dict[str, Any], molecule_name: Optional[str] = None):
         """
         初始化反应分析引擎 - v3.0
 
@@ -259,21 +319,86 @@ class TSOptimizer(LoggerMixin):
         from rph_core.utils.qc_task_runner import QCTaskRunner
         self.qc_runner = QCTaskRunner(config=config)
 
-        # ASM 功能已禁用 (2026-01-31) - FragmentExtractor 不再使用
-        # self.frag_extractor = FragmentExtractor(
-        #     config={'solvent': self.theory_sp.get('solvent', 'acetone')},
-        #     sp_engine=self.orca
-        # )
+        # 中间体 DFT 优化驱动
+        int_cfg = self.step3_config.get('intermediate_opt', {})
+        if int_cfg.get('enabled', True):
+            from rph_core.steps.step3_opt.intermediate_driver import IntermediateDriver
+            self.intermediate_driver = IntermediateDriver(config)
+            self.logger.info(f"  中间体 DFT: 启用")
+        else:
+            self.intermediate_driver = None
+            self.logger.info(f"  中间体 DFT: 禁用")
 
         self.logger.info(f"TransitionAnalyzer 初始化: {self.method}/{self.basis} D3={self.dispersion}")
         self.logger.info(f"  L2 SP: {self.orca.method}/{self.orca.basis}")
         self.logger.info(f"  片段处理: {'启用' if self.calculate_relaxed_fragments else '禁用'} ({self.fragment_opt_level})")
         self.logger.info("  QCTaskRunner 已初始化（统一计算中枢）")
-    
+
+    def _load_s3_resume_state(self, output_dir: Path) -> Dict[str, Any]:
+        resume_file = output_dir / "s3_resume.json"
+        if not resume_file.exists():
+            return {}
+        try:
+            with open(resume_file, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            self.logger.warning(f"Failed to load s3_resume.json: {e}")
+            return {}
+
+    def _save_s3_resume_state(self, output_dir: Path, state: Dict[str, Any]) -> None:
+        resume_file = output_dir / "s3_resume.json"
+        try:
+            with open(resume_file, 'w') as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            self.logger.warning(f"Failed to save s3_resume.json: {e}")
+
+    def _verify_ts_result(self, ts_result, output_dir: Path) -> bool:
+        if not ts_result or not ts_result.converged:
+            return False
+        if not ts_result.optimized_xyz or not ts_result.optimized_xyz.exists():
+            return False
+        l2_sp_candidates = [
+            output_dir / "L2_SP",
+            output_dir / "ts_opt" / "L2_SP",
+        ]
+        l2_sp_dir = None
+        for candidate in l2_sp_candidates:
+            if candidate.exists():
+                out_files = list(candidate.glob("*.out")) + list(candidate.glob("*.log"))
+                if out_files:
+                    l2_sp_dir = candidate
+                    break
+        if l2_sp_dir is None:
+            return False
+        return True
+
+    def _verify_reactant_result(self, reactant_result, output_dir: Path) -> bool:
+        if not reactant_result or not reactant_result.converged:
+            return False
+        if not reactant_result.optimized_xyz or not reactant_result.optimized_xyz.exists():
+            return False
+        if reactant_result.imaginary_count != 0:
+            return False
+        l2_sp_candidates = [
+            output_dir / "L2_SP",
+            output_dir / "standard" / "L2_SP",
+        ]
+        l2_sp_dir = None
+        for candidate in l2_sp_candidates:
+            if candidate.exists():
+                out_files = list(candidate.glob("*.out")) + list(candidate.glob("*.log"))
+                if out_files:
+                    l2_sp_dir = candidate
+                    break
+        if l2_sp_dir is None:
+            return False
+        return True
+
     def run_with_qctaskrunner(
         self,
         ts_guess: Path,
-        reactant: Path,
+        intermediate: Path,
         product: Path,
         output_dir: Path,
         e_product_l2: float,
@@ -284,6 +409,17 @@ class TSOptimizer(LoggerMixin):
         """
         使用 QCTaskRunner 执行 TS 优化（统一计算中枢）- v3.0
         """
+        pm = get_progress_manager()
+        ui_step_id = "s3"
+
+        def ui_log(message: str) -> None:
+            pm.log_event("S3", message)
+
+        pm.update_step("s3", description="S3: Starting...")
+        pm.enter_phase(ui_step_id, "Initialization")
+        pm.set_subtask(ui_step_id, "S3 Workflow", 0, 3)
+        ui_log("Transition analysis started")
+
         def safe_extract_coords(file_path: Path, name: str):
             """安全提取坐标的辅助函数"""
             coords, symbols, error = LogParser.extract_last_converged_coords(
@@ -291,79 +427,275 @@ class TSOptimizer(LoggerMixin):
                 engine_type='auto'
             )
             if coords is None:
-                self.logger.warning(f"无法从 {name} ({file_path}) 提取坐标: {error}")
+                warning_msg = f"无法从 {name} ({file_path}) 提取坐标: {error}"
+                self.logger.warning(warning_msg)
+                ui_log(warning_msg)
                 # 回退
                 from rph_core.utils.file_io import read_xyz
                 return read_xyz(file_path)
-            self.logger.info(f"从 {name} 成功提取 {len(coords)} 个原子坐标")
+            info_msg = f"从 {name} 成功提取 {len(coords)} 个原子坐标"
+            self.logger.info(info_msg)
+            ui_log(info_msg)
             return coords, symbols
 
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
+        resume_state = self._load_s3_resume_state(output_dir)
+
+        with open(output_dir / ".rph_step_status.json", "w") as f:
+            json.dump({
+                "step": "s3",
+                "status": "in_progress",
+                "start_time": datetime.datetime.now().isoformat(),
+                "description": "S3: Transition Analysis Started"
+            }, f, indent=2)
+
         self.logger.info("=" * 60)
         self.logger.info("Step 3: TS 优化（使用 QCTaskRunner 统一计算中枢）- v3.0")
         self.logger.info("=" * 60)
+        ui_log("Step 3 execution initialized")
 
-        # 提取输入坐标（使用 LogParser）
         self.logger.info("验证输入文件...")
+        pm.enter_phase(ui_step_id, "Input Validation")
+        ui_log("Validating input structures")
         ts_coords, ts_symbols = safe_extract_coords(ts_guess, "TS 初猜")
-        reactant_coords, reactant_symbols = safe_extract_coords(reactant, "底物复合物")
+        intermediate_coords, intermediate_symbols = safe_extract_coords(intermediate, "中间体")
         product_coords, product_symbols = safe_extract_coords(product, "产物")
 
-        # 1. TS 优化 + L2 SP
-        self.logger.info("步骤 1/3: TS 优化 + 虚频验证 + L2 SP")
-        ts_result = self.qc_runner.run_ts_opt_cycle(
-            xyz_file=ts_guess,
-            output_dir=output_dir / "ts_opt",
-            charge=0,
-            spin=1,
-            enable_l2_sp=True,
-            old_checkpoint=old_checkpoint
-        )
+        # ========================================================================
+        # Phase 0: 中间体 DFT 优化 (可选)
+        # ========================================================================
+        intermediate_result = None
+        intermediate_optimized_xyz = None
+        driver = getattr(self, 'intermediate_driver', None)
+        if driver is not None:
+            self.logger.info("步骤 0/3: 中间体 DFT 优化")
+            pm.enter_phase(ui_step_id, "Intermediate Optimization")
+            pm.set_subtask(ui_step_id, "Intermediate Opt", 0, 3)
+            pm.update_step("s3", description="S3: Intermediate Opt")
+            ui_log("Starting intermediate DFT optimization")
 
-        if not ts_result.converged:
-            raise RuntimeError(f"TS 优化失败: {ts_result.error_message}")
+            intermediate_result = driver.run(
+                intermediate_xyz=intermediate,
+                output_dir=output_dir / DIR_INTERMEDIATE_OPT,
+            )
 
-        # 2. Reactant OPT + Freq + L2 SP (完整工作流)
-        self.logger.info("步骤 2/3: Reactant 优化 + 频率 + L2 SP...")
-        
-        # Get charge/multiplicity from config or defaults
-        reactant_opt_config = self.step3_config.get('reactant_opt', {})
-        reactant_charge = reactant_opt_config.get('charge', 0)
-        reactant_mult = reactant_opt_config.get('multiplicity', 1)
-        enable_nbo = reactant_opt_config.get('enable_nbo', False)
-        
-        # Standard optimization attempt
-        self.logger.info(f"尝试标准 Reactant 优化 (charge={reactant_charge}, mult={reactant_mult})...")
-        reactant_opt_result = self.qc_runner.run_opt_sp_cycle(
-            xyz_file=reactant,
-            output_dir=output_dir / "reactant_opt" / "standard",
-            charge=reactant_charge,
-            spin=reactant_mult,
-            enable_nbo=enable_nbo,
-            old_checkpoint=None
-        )
-        
-        # Rescue if standard fails
-        if not reactant_opt_result.converged:
-            self.logger.warning(f"Reactant 标准优化失败: {reactant_opt_result.error_message}")
-            self.logger.info("尝试 Reactant 救援优化（由 QCTaskRunner 内部处理）...")
-            reactant_opt_result = self.qc_runner.run_opt_sp_cycle(
-                xyz_file=reactant,
-                output_dir=output_dir / "reactant_opt" / "rescue",
-                charge=reactant_charge,
-                spin=reactant_mult,
-                enable_nbo=enable_nbo,
+            if intermediate_result.get('converged'):
+                intermediate_optimized_xyz = intermediate_result.get('optimized_xyz')
+                self.logger.info(f"中间体优化完成: {intermediate_optimized_xyz}")
+                self.logger.info(f"  -> 将作为 Reactant 优化的输入，避免重复优化")
+                ui_log("Intermediate optimization converged")
+            elif intermediate_result.get('skipped'):
+                ui_log("Intermediate optimization skipped (disabled)")
+            else:
+                self.logger.warning(f"中间体优化失败: {intermediate_result.get('error')}")
+                ui_log(f"Intermediate optimization failed: {intermediate_result.get('error')}")
+
+        ts_result = None
+        ts_output_dir = output_dir / "ts_opt"
+
+        if resume_state.get("ts_opt", {}).get("completed"):
+            self.logger.info("检测到已完成的 TS 优化结果，尝试复用...")
+            ui_log("Found resumable TS optimization result")
+            ts_result_data = resume_state["ts_opt"]
+            from rph_core.utils.qc_task_runner import QCOptimizationResult
+            ts_result = QCOptimizationResult(
+                optimized_xyz=Path(ts_result_data["optimized_xyz"]),
+                l2_energy=ts_result_data.get("l2_energy"),
+                opt_energy=ts_result_data.get("opt_energy"),
+                converged=ts_result_data.get("converged", False),
+                imaginary_count=ts_result_data.get("imaginary_count", 0),
+                method_used=ts_result_data.get("method_used", "Berny"),
+                freq_log=Path(ts_result_data["freq_log"]) if ts_result_data.get("freq_log") else None,
+                log_file=Path(ts_result_data["log_file"]) if ts_result_data.get("log_file") else None,
+                chk_file=Path(ts_result_data["chk_file"]) if ts_result_data.get("chk_file") else None,
+                fchk_file=Path(ts_result_data["fchk_file"]) if ts_result_data.get("fchk_file") else None,
+                qm_output_file=Path(ts_result_data["qm_output_file"]) if ts_result_data.get("qm_output_file") else None,
+            )
+            if not self._verify_ts_result(ts_result, ts_output_dir):
+                self.logger.warning("TS 优化结果验证失败，将重新计算")
+                ui_log("Resumed TS result validation failed, recomputing")
+                ts_result = None
+            else:
+                self.logger.info("TS 优化结果验证通过，成功复用")
+                ui_log("Reused TS optimization result")
+
+        if ts_result is None:
+            self.logger.info("步骤 1/3: TS 优化 + 虚频验证 + L2 SP")
+            pm.enter_phase(ui_step_id, "TS Optimization")
+            pm.set_subtask(ui_step_id, "TS Opt", 1, 3)
+            pm.update_step("s3", description="S3: TS Opt")
+            ui_log("Starting TS optimization + frequency validation + L2 SP")
+            ts_result = self.qc_runner.run_ts_opt_cycle(
+                xyz_file=ts_guess,
+                output_dir=output_dir,
+                charge=0,
+                spin=1,
+                enable_l2_sp=True,
                 old_checkpoint=None
             )
-            if not reactant_opt_result.converged:
+
+            if ts_result.converged and self._verify_ts_result(ts_result, ts_output_dir):
+                ui_log("TS optimization converged and validated")
+                resume_state["ts_opt"] = {
+                    "completed": True,
+                    "optimized_xyz": str(ts_result.optimized_xyz),
+                    "l2_energy": ts_result.l2_energy,
+                    "opt_energy": ts_result.opt_energy,
+                    "imaginary_count": ts_result.imaginary_count,
+                    "method_used": ts_result.method_used,
+                    "freq_log": str(ts_result.freq_log) if ts_result.freq_log else None,
+                    "log_file": str(ts_result.log_file) if ts_result.log_file else None,
+                    "chk_file": str(ts_result.chk_file) if ts_result.chk_file else None,
+                    "fchk_file": str(ts_result.fchk_file) if ts_result.fchk_file else None,
+                    "qm_output_file": str(ts_result.qm_output_file) if ts_result.qm_output_file else None,
+                }
+                self._save_s3_resume_state(output_dir, resume_state)
+
+        if not ts_result.converged:
+            ui_log(f"TS optimization failed: {ts_result.error_message}")
+            with open(output_dir / ".rph_step_status.json", "w") as f:
+                json.dump({
+                    "step": "s3",
+                    "status": "failed",
+                    "error": ts_result.error_message,
+                    "end_time": datetime.datetime.now().isoformat()
+                }, f, indent=2)
+            raise RuntimeError(f"TS 优化失败: {ts_result.error_message}")
+
+        reactant_opt_result = None
+        reactant_output_dir = output_dir / "reactant_opt"
+
+        if resume_state.get("reactant_opt", {}).get("completed"):
+            self.logger.info("检测到已完成的 Reactant 优化结果，尝试复用...")
+            ui_log("Found resumable Reactant optimization result")
+            reactant_result_data = resume_state["reactant_opt"]
+            from rph_core.utils.qc_task_runner import QCOptimizationResult
+            reactant_opt_result = QCOptimizationResult(
+                optimized_xyz=Path(reactant_result_data["optimized_xyz"]),
+                l2_energy=reactant_result_data.get("l2_energy"),
+                opt_energy=reactant_result_data.get("opt_energy"),
+                converged=reactant_result_data.get("converged", False),
+                imaginary_count=reactant_result_data.get("imaginary_count", 0),
+                method_used=reactant_result_data.get("method_used", "Normal"),
+                freq_log=Path(reactant_result_data["freq_log"]) if reactant_result_data.get("freq_log") else None,
+                log_file=Path(reactant_result_data["log_file"]) if reactant_result_data.get("log_file") else None,
+                chk_file=Path(reactant_result_data["chk_file"]) if reactant_result_data.get("chk_file") else None,
+                fchk_file=Path(reactant_result_data["fchk_file"]) if reactant_result_data.get("fchk_file") else None,
+                qm_output_file=Path(reactant_result_data["qm_output_file"]) if reactant_result_data.get("qm_output_file") else None,
+            )
+            if not self._verify_reactant_result(reactant_opt_result, reactant_output_dir / "standard"):
+                self.logger.warning("Reactant 优化结果验证失败，将重新计算")
+                ui_log("Resumed Reactant result validation failed, recomputing")
+                reactant_opt_result = None
+            else:
+                self.logger.info("Reactant 优化结果验证通过，成功复用")
+                ui_log("Reused Reactant optimization result")
+
+        if reactant_opt_result is None:
+            # 复用中间体结果作为 Reactant，避免重复 DFT 优化
+            if intermediate_result is not None and intermediate_result.get('converged') and intermediate_optimized_xyz:
+                self.logger.info("=" * 60)
+                self.logger.info("复用中间体优化结果作为 Reactant (跳过重复 DFT 优化)")
+                self.logger.info(f"  来源: intermediate_optimized_xyz = {intermediate_optimized_xyz}")
+                self.logger.info(f"  L2 Energy: {intermediate_result.get('l2_energy'):.6f} Hartree")
+                self.logger.info("=" * 60)
+                ui_log("Reusing intermediate optimization result as Reactant")
+                
+                from rph_core.utils.qc_task_runner import QCOptimizationResult
+                reactant_opt_result = QCOptimizationResult(
+                    optimized_xyz=intermediate_optimized_xyz,
+                    l2_energy=intermediate_result.get('l2_energy'),
+                    opt_energy=intermediate_result.get('l2_energy'),
+                    converged=True,
+                    imaginary_count=0,
+                    method_used="Intermediate_Reuse",
+                    freq_log=intermediate_result.get('freq_output'),
+                    log_file=intermediate_result.get('opt_output'),
+                    chk_file=None,
+                    fchk_file=None,
+                    qm_output_file=intermediate_result.get('sp_output'),
+                )
+                
+                resume_state["reactant_opt"] = {
+                    "completed": True,
+                    "source": "intermediate_reuse",
+                    "optimized_xyz": str(intermediate_optimized_xyz),
+                    "l2_energy": intermediate_result.get('l2_energy'),
+                    "opt_energy": intermediate_result.get('l2_energy'),
+                    "imaginary_count": 0,
+                    "method_used": "Intermediate_Reuse",
+                    "freq_log": str(intermediate_result.get('freq_output')) if intermediate_result.get('freq_output') else None,
+                    "log_file": str(intermediate_result.get('opt_output')) if intermediate_result.get('opt_output') else None,
+                    "chk_file": None,
+                    "fchk_file": None,
+                    "qm_output_file": str(intermediate_result.get('sp_output')) if intermediate_result.get('sp_output') else None,
+                }
+                self._save_s3_resume_state(output_dir, resume_state)
+            else:
+                self.logger.info("步骤 2/3: Reactant 优化 + 频率 + L2 SP...")
+                pm.enter_phase(ui_step_id, "Reactant Optimization")
+                pm.set_subtask(ui_step_id, "Reactant Opt", 2, 3)
+                pm.update_step("s3", description="S3: Reactant Opt")
+                ui_log("Starting Reactant optimization + frequency + L2 SP")
+                
+                reactant_opt_config = self.step3_config.get('reactant_opt', {})
+                reactant_charge = reactant_opt_config.get('charge', 0)
+                reactant_mult = reactant_opt_config.get('multiplicity', 1)
+                enable_nbo = reactant_opt_config.get('enable_nbo', False)
+                
+                self.logger.info(f"尝试标准 Reactant 优化 (charge={reactant_charge}, mult={reactant_mult})...")
+                ui_log(f"Reactant optimization parameters: charge={reactant_charge}, mult={reactant_mult}")
+                
+                reactant_input = intermediate_optimized_xyz if intermediate_optimized_xyz else intermediate
+                if intermediate_optimized_xyz:
+                    self.logger.info(f"  -> 使用中间体优化结果: {intermediate_optimized_xyz}")
+                else:
+                    self.logger.info(f"  -> 使用原始输入 (中间体优化未成功): {intermediate}")
+                
+                reactant_opt_result = self.qc_runner.run_opt_sp_cycle(
+                    xyz_file=reactant_input,
+                    output_dir=reactant_output_dir,
+                    charge=reactant_charge,
+                    spin=reactant_mult,
+                    enable_nbo=enable_nbo,
+                    old_checkpoint=None
+                )
+
+                if reactant_opt_result.converged and self._verify_reactant_result(reactant_opt_result, reactant_output_dir / "standard"):
+                    ui_log("Reactant optimization converged and validated")
+                    resume_state["reactant_opt"] = {
+                        "completed": True,
+                        "optimized_xyz": str(reactant_opt_result.optimized_xyz),
+                        "l2_energy": reactant_opt_result.l2_energy,
+                        "opt_energy": reactant_opt_result.opt_energy,
+                        "imaginary_count": reactant_opt_result.imaginary_count,
+                        "method_used": reactant_opt_result.method_used,
+                        "freq_log": str(reactant_opt_result.freq_log) if reactant_opt_result.freq_log else None,
+                        "log_file": str(reactant_opt_result.log_file) if reactant_opt_result.log_file else None,
+                        "chk_file": str(reactant_opt_result.chk_file) if reactant_opt_result.chk_file else None,
+                        "fchk_file": str(reactant_opt_result.fchk_file) if reactant_opt_result.fchk_file else None,
+                        "qm_output_file": str(reactant_opt_result.qm_output_file) if reactant_opt_result.qm_output_file else None,
+                    }
+                    self._save_s3_resume_state(output_dir, resume_state)
+
+        if not reactant_opt_result.converged:
+            ui_log(f"Reactant optimization failed: {reactant_opt_result.error_message}")
+            with open(output_dir / ".rph_step_status.json", "w") as f:
+                json.dump({
+                    "step": "s3",
+                    "status": "failed",
+                    "error": reactant_opt_result.error_message,
+                    "end_time": datetime.datetime.now().isoformat()
+                }, f, indent=2)
                 raise RuntimeError(f"Reactant 优化失败（含rescue）: {reactant_opt_result.error_message}")
         
         assert reactant_opt_result.l2_energy is not None, "Reactant L2 能量缺失"
         e_reactant_l2 = reactant_opt_result.l2_energy
         reactant_optimized_xyz = reactant_opt_result.optimized_xyz
         self.logger.info(f"✓ Reactant 优化完成，L2 能量: {e_reactant_l2:.6f} Hartree")
+        ui_log(f"Reactant optimization completed, L2={e_reactant_l2:.6f} Hartree")
         
         if e_product_l2 is None:
             self.logger.warning("Product L2 能量缺失，执行补算 SP。")
@@ -373,15 +705,19 @@ class TSOptimizer(LoggerMixin):
 
         # 3. 片段处理 (基于 TS 优化后的几何)
         self.logger.info("步骤 3/3: 构建 SP 矩阵报告 (含片段)...")
+        pm.enter_phase(ui_step_id, "SP Matrix Build")
+        pm.set_subtask(ui_step_id, "SP Matrix", 3, 3)
+        pm.update_step("s3", description="S3: Building SP Matrix")
+        ui_log("Building SP matrix report")
         ts_l2_result = ts_result.l2_sp_result
         if ts_l2_result is None or not ts_l2_result.converged:
             raise RuntimeError("TS L2 SP 结果缺失或未收敛，无法构建 SP 矩阵报告。")
 
         sp_report = self._build_sp_matrix(
             ts_final_xyz=ts_result.optimized_xyz,
-            reactant=reactant,
+            intermediate=intermediate,
             e_product_l2=e_product_l2,
-            e_reactant_l2=e_reactant_l2,
+            e_intermediate_l2=e_reactant_l2,
             output_dir=output_dir / "ASM_SP_Mat",
             forming_bonds=forming_bonds,
             ts_l2_result=ts_l2_result,
@@ -389,53 +725,108 @@ class TSOptimizer(LoggerMixin):
         )
         # 更新报告中的 Reactant 能量（默认是复合物能量）
         sp_report.e_reactant = e_reactant_l2
-        
-        # ASM 功能已禁用 (2026-01-31) - Post-QC enrichment 不再运行
-        # if forming_bonds is not None:
-        #     self.logger.info("Running post-QC enrichment...")
-        #     enrichment_config = self.config.get('step3', {}).get('enrichment', {})
-        #     run_post_qc_enrichment(
-        #         s3_dir=output_dir,
-        #         config=enrichment_config,
-        #         sp_report=sp_report,
-        #         reactant_complex_xyz=reactant,
-        #         forming_bonds=forming_bonds
-        #     )
+
+        # 计算 Shermo Gibbs 自由能 (TS 和 Reactant)
+        self.logger.info("计算 Shermo Gibbs 自由能 (SP energy + freq log)...")
+        pm.enter_phase(ui_step_id, "Thermochemistry")
+        ui_log("Computing Shermo Gibbs energies")
+        self._compute_shermo_gibbs(
+            sp_report=sp_report,
+            ts_result=ts_result,
+            reactant_result=reactant_opt_result,
+            ts_l2_energy=ts_l2_result.energy,
+            reactant_l2_energy=e_reactant_l2,
+            output_dir=output_dir
+        )
+
+        with open(output_dir / "sp_matrix_metadata.json", "w") as f:
+            json.dump({
+                "e_ts": sp_report.e_ts_final,
+                "e_reactant": sp_report.e_reactant,
+                "e_product": sp_report.e_product,
+                "g_ts": sp_report.g_ts,
+                "g_reactant": sp_report.g_reactant,
+                "g_ts_source": sp_report.g_ts_source,
+                "g_ts_error": sp_report.g_ts_error,
+                "g_reactant_source": sp_report.g_reactant_source,
+                "g_reactant_error": sp_report.g_reactant_error,
+                "activation_energy_kcal": sp_report.get_activation_energy(),
+                "reaction_energy_kcal": sp_report.get_reaction_energy(),
+                "method": sp_report.method,
+                "solvent": sp_report.solvent,
+                "timestamp": datetime.datetime.now().isoformat()
+            }, f, indent=2)
 
         dipolar_output = self._ensure_dipolar_output(output_dir, output_dir / "ts_opt" / "L2_SP")
         if dipolar_output is None:
             self.logger.warning("Dipolar output not found; artifacts_index will omit dipolar entry")
+            ui_log("Dipolar output missing; artifacts index omits dipolar entry")
 
         # V6.3: Write artifacts_index.json
         SPMatrixReport._write_artifacts_index(output_dir, self.config)
-        
+        ui_log("Wrote artifacts_index.json")
+
+        ts_final_canonical: Optional[Path] = None
+        try:
+            import shutil
+            ts_final_canonical = output_dir / "ts_final.xyz"
+            shutil.copy2(ts_result.optimized_xyz, ts_final_canonical)
+            if isinstance(resume_state.get("ts_opt"), dict):
+                resume_state["ts_opt"]["optimized_xyz"] = str(ts_final_canonical)
+                self._save_s3_resume_state(output_dir, resume_state)
+
+            from rph_core.utils.checkpoint_manager import CheckpointManager
+            cm = CheckpointManager(output_dir.parent)
+            sig = cm._compute_step3_signature(self.config)
+            hashes = {
+                "ts_guess": cm.compute_file_hash(ts_guess) or "",
+                "intermediate": cm.compute_file_hash(intermediate) or "",
+                "product": cm.compute_file_hash(product) or ""
+            }
+            with open(output_dir / "step3_signature.json", "w") as f:
+                json.dump({"step3_signature": sig, "input_hashes": hashes}, f, indent=2)
+        except Exception as e:
+            self.logger.warning(f"Failed to write rehydration artifacts: {e}")
+            ui_log(f"Failed to write rehydration artifacts: {e}")
+
+        with open(output_dir / ".rph_step_status.json", "w") as f:
+            json.dump({
+                "step": "s3",
+                "status": "completed",
+                "end_time": datetime.datetime.now().isoformat(),
+                "description": "S3: Transition Analysis Completed Successfully"
+            }, f, indent=2)
+
         # 返回结果
         result = TransitionAnalysisResult(
-            ts_final_xyz=ts_result.optimized_xyz,
+            ts_final_xyz=ts_final_canonical if ts_final_canonical is not None else ts_result.optimized_xyz,
             ts_checkpoint=ts_result.optimized_xyz.with_suffix('.chk') if ts_result.optimized_xyz.with_suffix('.chk').exists() else None,
             sp_report=sp_report,
             method_used=ts_result.method_used,
             ts_fchk=ts_result.fchk_file,
             ts_log=ts_result.log_file,
             ts_qm_output=ts_result.qm_output_file,
-            reactant_fchk=reactant_opt_result.fchk_file,
-            reactant_log=reactant_opt_result.freq_log or reactant_opt_result.log_file,
-            reactant_qm_output=reactant_opt_result.qm_output_file
+            intermediate_fchk=reactant_opt_result.fchk_file,
+            intermediate_log=reactant_opt_result.freq_log or reactant_opt_result.log_file,
+            intermediate_qm_output=reactant_opt_result.qm_output_file
         )
         
         self.logger.info("=" * 60)
         self.logger.info(f"ΔG‡ (Complex-based): {sp_report.get_activation_energy():.2f} kcal/mol")
         self.logger.info("Step 3 完成")
         self.logger.info("=" * 60)
+        pm.enter_phase(ui_step_id, "Completed")
+        pm.update_step("s3", completed=100, description="S3: Completed")
+        ui_log("Step 3 completed successfully")
         
         return result
 
     def _build_sp_matrix(
         self,
         ts_final_xyz: Path,
-        reactant: Path,
+        intermediate: Path,
         e_product_l2: float,
-        e_reactant_l2: float,
+        e_intermediate_l2: float,
         output_dir: Path,
         forming_bonds: Optional[Tuple[Tuple[int, int], Tuple[int, int]]],
         ts_l2_result: Any,
@@ -452,40 +843,13 @@ class TSOptimizer(LoggerMixin):
         e_ts_l2 = ts_l2_result.energy
         self._alias_ts_sp_dir(output_dir / "ts_sp", ts_l2_dir)
 
-        # ASM 功能已禁用 (2026-01-31)
-        # 原因: 片段分割算法未能正常工作
         e_frag_a_l2 = 0.0
         e_frag_b_l2 = 0.0
-        e_frag_a_relaxed = 0.0
-        e_frag_b_relaxed = 0.0
+        e_frag_a_relaxed = None
+        e_frag_b_relaxed = None
         fragment_split_source = None
         fragment_split_reason = None
         fragment_indices = None
-
-        # if forming_bonds:
-        #     self.logger.info("  提取片段并计算能量...")
-        #     split_config = self.step3_config.get("fragment_split", None)
-        #     if split_config is None:
-        #         split_config = self.step3_config.get("fragments", {})
-        #
-        #     frag_results = self.frag_extractor.extract_and_calculate(
-        #         ts_xyz=ts_final_xyz,
-        #         fragment_indices=None,
-        #         output_dir=output_dir,
-        #         forming_bonds=forming_bonds,
-        #         reactant_xyz=reactant,
-        #         split_config=split_config,
-        #         system_charge=0,
-        #         system_mult=1
-        #     )
-        #
-        #     e_frag_a_l2 = frag_results.get("e_fragment_a_ts", 0.0)
-        #     e_frag_b_l2 = frag_results.get("e_fragment_b_ts", 0.0)
-        #     e_frag_a_relaxed = frag_results.get("e_fragment_a_relaxed", 0.0)
-        #     e_frag_b_relaxed = frag_results.get("e_fragment_b_relaxed", 0.0)
-        #     fragment_split_source = frag_results.get("fragment_split_source")
-        #     fragment_split_reason = frag_results.get("fragment_split_reason")
-        #     fragment_indices = frag_results.get("fragment_indices")
 
         # 构建报告
         report = SPMatrixReport(
@@ -521,8 +885,8 @@ class TSOptimizer(LoggerMixin):
                 '{"mode": "symlink", "source_dir": ' + json.dumps(str(l2_sp_dir)) + '}'
             )
             return
-        except Exception:
-            pass
+        except Exception as exc:
+            self.logger.debug(f"Symlink alias failed, fallback to copytree: {exc}")
 
         try:
             shutil.copytree(l2_sp_dir, ts_sp_dir)
@@ -530,7 +894,7 @@ class TSOptimizer(LoggerMixin):
                 '{"mode": "copy", "copied_from": ' + json.dumps(str(l2_sp_dir)) + '}'
             )
         except Exception as e:
-            self.logger.warning(f"Failed to alias ts_sp dir: {e}")
+            self.logger.warning(f"Failed to alias ts_sp dir (from {l2_sp_dir} to {ts_sp_dir}): {e}")
 
     def _run_sp(self, xyz_file: Path, output_dir: Path):
         """运行 ORCA SP 计算"""
@@ -577,6 +941,110 @@ class TSOptimizer(LoggerMixin):
                 return None
 
         return None
+
+    def _compute_shermo_gibbs(
+        self,
+        sp_report: SPMatrixReport,
+        ts_result: Any,
+        reactant_result: Any,
+        ts_l2_energy: float,
+        reactant_l2_energy: float,
+        output_dir: Path
+    ) -> None:
+        from rph_core.utils.shermo_runner import run_shermo
+        from pathlib import Path
+
+        shermo_dir = output_dir / "shermo"
+        shermo_dir.mkdir(parents=True, exist_ok=True)
+
+        shermo_bin_path = self.config.get("executables", {}).get("shermo", {}).get("path", "Shermo")
+        shermo_bin = Path(shermo_bin_path) if shermo_bin_path else Path("Shermo")
+
+        thermo_config = self.config.get("thermo", {})
+        temperature_k = thermo_config.get("temperature_k", 298.15)
+        pressure_atm = thermo_config.get("pressure_atm", 1.0)
+        scl_zpe = thermo_config.get("scl_zpe", 0.9905)
+        ilowfreq = thermo_config.get("ilowfreq", 2)
+        imagreal = thermo_config.get("imagreal", None)
+        conc = thermo_config.get("conc", None)
+
+        sp_report.g_ts = None
+        sp_report.g_ts_source = None
+        sp_report.g_ts_error = None
+
+        freq_log_ts = ts_result.freq_log if hasattr(ts_result, "freq_log") and ts_result.freq_log else ts_result.log_file
+        if freq_log_ts and freq_log_ts.exists():
+            try:
+                ts_shermo_out = shermo_dir / "ts_Shermo.sum"
+                thermo_ts = run_shermo(
+                    shermo_bin=shermo_bin,
+                    freq_output=freq_log_ts,
+                    sp_energy=ts_l2_energy,
+                    output_file=ts_shermo_out,
+                    temperature_k=temperature_k,
+                    pressure_atm=pressure_atm,
+                    scl_zpe=scl_zpe,
+                    ilowfreq=ilowfreq,
+                    imagreal=imagreal,
+                    conc=conc
+                )
+                g_ts_h = thermo_ts.g_conc if thermo_ts.g_conc is not None else thermo_ts.g_sum
+                sp_report.g_ts = g_ts_h * HARTREE_TO_KCAL
+                sp_report.g_ts_source = "shermo_sp_freq"
+                self.logger.info(
+                    f"✓ TS Gibbs 计算成功: {sp_report.g_ts:.6f} kcal/mol (来源: Shermo SP+Freq)"
+                )
+            except Exception as e:
+                sp_report.g_ts_error = str(e)
+                sp_report.g_ts_source = "shermo_failed"
+                self.logger.warning(f"Shermo TS Gibbs 计算失败: {e}")
+        else:
+            sp_report.g_ts_error = "freq_log not found"
+            sp_report.g_ts_source = "missing_freq_log"
+            self.logger.warning(f"TS freq log 未找到，跳过 Gibbs 计算")
+
+        sp_report.g_reactant = None
+        sp_report.g_reactant_source = None
+        sp_report.g_reactant_error = None
+
+        freq_log_reactant = (
+            reactant_result.freq_log
+            if hasattr(reactant_result, "freq_log") and reactant_result.freq_log
+            else reactant_result.log_file
+        )
+        if freq_log_reactant and freq_log_reactant.exists():
+            try:
+                reactant_shermo_out = shermo_dir / "reactant_Shermo.sum"
+                thermo_reactant = run_shermo(
+                    shermo_bin=shermo_bin,
+                    freq_output=freq_log_reactant,
+                    sp_energy=reactant_l2_energy,
+                    output_file=reactant_shermo_out,
+                    temperature_k=temperature_k,
+                    pressure_atm=pressure_atm,
+                    scl_zpe=scl_zpe,
+                    ilowfreq=ilowfreq,
+                    imagreal=imagreal,
+                    conc=conc
+                )
+                g_reactant_h = (
+                    thermo_reactant.g_conc
+                    if thermo_reactant.g_conc is not None
+                    else thermo_reactant.g_sum
+                )
+                sp_report.g_reactant = g_reactant_h * HARTREE_TO_KCAL
+                sp_report.g_reactant_source = "shermo_sp_freq"
+                self.logger.info(
+                    f"✓ Reactant Gibbs 计算成功: {sp_report.g_reactant:.6f} kcal/mol (来源: Shermo SP+Freq)"
+                )
+            except Exception as e:
+                sp_report.g_reactant_error = str(e)
+                sp_report.g_reactant_source = "shermo_failed"
+                self.logger.warning(f"Shermo Reactant Gibbs 计算失败: {e}")
+        else:
+            sp_report.g_reactant_error = "freq_log not found"
+            sp_report.g_reactant_source = "missing_freq_log"
+            self.logger.warning(f"Reactant freq log 未找到，跳过 Gibbs 计算")
 
     def run(self, *args, **kwargs):
         # 保持旧接口兼容性（内部调用新逻辑）

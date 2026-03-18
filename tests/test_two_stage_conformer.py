@@ -4,14 +4,17 @@ Tests for Two-Stage Conformer Search (v3.1)
 Tests the GFN0 → ISOSTAT → GFN2 workflow for high-flexibility molecules.
 """
 
+import json
 import shutil
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 
 from rph_core.steps.conformer_search.engine import ConformerEngine
+from rph_core.steps.conformer_search.state_manager import ConformerStateManager
 from rph_core.utils.qc_interface import CRESTInterface
 
 
@@ -409,3 +412,108 @@ class TestBackwardCompatibility:
         # Should use defaults from legacy crest config
         assert engine.stage1_gfn_level == 0  # Default from defaults.yaml
         assert engine.stage2_gfn_level == 2  # Default from defaults.yaml
+
+
+class TestConformerStateAndResume:
+    def test_emit_structured_progress_is_parseable(self, tmp_path, caplog):
+        config = {
+            "step1": {"conformer_search": {"two_stage_enabled": False}, "crest": {}},
+            "theory": {
+                "optimization": {"nproc": 1, "mem": "1GB", "charge": 0, "multiplicity": 1},
+                "single_point": {"nproc": 1},
+            },
+            "thermo": {"temperature_k": 298.15},
+            "solvent": {"name": "acetone"},
+            "executables": {"isostat": {"path": "isostat"}, "shermo": {"path": "Shermo"}},
+        }
+        with patch("rph_core.steps.conformer_search.engine.CRESTInterface"):
+            engine = ConformerEngine(config=config, work_dir=tmp_path, molecule_name="product")
+
+        caplog.set_level("INFO")
+        engine._emit_s1_progress("unit_test", {"x": 1})
+
+        lines = [rec.message for rec in caplog.records if rec.message.startswith("S1_PROGRESS|")]
+        assert len(lines) == 1
+        payload = json.loads(lines[0].split("|", 1)[1])
+        assert payload["schema"] == "s1_progress_v1"
+        assert payload["event"] == "unit_test"
+        assert payload["molecule"] == "product"
+
+    def test_state_manager_persists_crest_status(self, tmp_path):
+        manager = ConformerStateManager(tmp_path / "product", "product")
+        manager.start_run("C1=CCCCC1", two_stage_enabled=True)
+        output = tmp_path / "product" / "xtb2" / "ensemble.xyz"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("3\nstate\nH 0 0 0\nH 0 0 1\nH 0 1 0\n")
+        manager.mark_crest_stage("final_ensemble", "completed", output)
+
+        reloaded = ConformerStateManager(tmp_path / "product", "product")
+        assert reloaded.get_crest_output("final_ensemble") is not None
+        assert reloaded.state.get("crest", {}).get("final_ensemble", {}).get("status") == "completed"
+
+    def test_dft_loop_skips_completed_conformer(self, tmp_path):
+        config = {
+            "step1": {"conformer_search": {"two_stage_enabled": False}, "crest": {}},
+            "theory": {
+                "optimization": {"nproc": 1, "mem": "1GB", "charge": 0, "multiplicity": 1},
+                "single_point": {"nproc": 1},
+            },
+            "thermo": {"temperature_k": 298.15},
+            "solvent": {"name": "acetone"},
+            "executables": {"isostat": {"path": "isostat"}, "shermo": {"path": "Shermo"}},
+        }
+
+        with patch("rph_core.steps.conformer_search.engine.CRESTInterface"):
+            engine = ConformerEngine(config=config, work_dir=tmp_path, molecule_name="product")
+
+        conf0 = engine.dft_dir / "conf_000.xyz"
+        conf1 = engine.dft_dir / "conf_001.xyz"
+        xyz_text = "3\nconf\nH 0 0 0\nH 0 0 1\nH 0 1 0\n"
+        conf0.write_text(xyz_text)
+        conf1.write_text(xyz_text)
+
+        cached_log = engine.dft_dir / "conf_000.log"
+        cached_log.write_text("cached")
+        engine.state_manager.mark_conformer_completed(
+            "conf_000",
+            {
+                "name": "conf_000",
+                "g_used": -10.0,
+                "g_sum": -10.0,
+                "g_conc": None,
+                "h_sum": -9.0,
+                "u_sum": -8.0,
+                "s_total": 1.0,
+                "sp_energy": -10.0,
+                "log_file": str(cached_log),
+            },
+        )
+
+        class _FakeThermo:
+            g_conc = None
+            g_sum = -11.0
+            h_sum = -10.0
+            u_sum = -9.0
+            s_total = 2.0
+
+        class _FakeGaussian:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def write_input_file(self, xyz_source, gjf_file, route, title):
+                Path(gjf_file).write_text("# fake")
+
+        with patch("rph_core.utils.qc_interface.GaussianInterface", _FakeGaussian), \
+             patch.object(engine, "_run_gaussian_opt", return_value=(True, None)) as mock_opt, \
+             patch.object(engine, "_run_orca_sp", return_value=-11.0), \
+             patch(
+                 "rph_core.steps.conformer_search.engine.LogParser.extract_last_converged_coords",
+                 return_value=(np.array([[0.0, 0.0, 0.0]]), ["H"], None),
+             ), \
+             patch("rph_core.steps.conformer_search.engine.run_shermo", return_value=_FakeThermo()):
+            best_log, best_sp = engine._step_dft_opt_sp_coupled([conf0, conf1])
+
+        assert mock_opt.call_count == 1
+        assert isinstance(best_log, Path)
+        assert best_sp is not None
+        assert engine.state_manager.is_conformer_completed("conf_001")

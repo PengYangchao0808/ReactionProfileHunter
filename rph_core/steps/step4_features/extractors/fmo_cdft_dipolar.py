@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 from .base import BaseExtractor
-from ..status import FeatureResultStatus
+from rph_core.utils.constants import HARTREE_TO_EV
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +31,6 @@ class FmoCdftDipolarParser(BaseExtractor):
     - Electrophilicity (omega, eV) = (HOMO² + LUMO²)/2
     """
 
-    HARTREE_TO_EV = 27.2114
-
     def get_plugin_name(self) -> str:
         """Return unique plugin name."""
         return "fmo_cdft_dipolar"
@@ -46,18 +44,10 @@ class FmoCdftDipolarParser(BaseExtractor):
 
     def get_required_inputs_for_context(self, context) -> list[str]:
         """Dynamic hook to determine required inputs based on available context."""
-        required = []
-
+        # Only require s3_dir; artifacts_index is optional (fallback scan is supported).
         if hasattr(context, 's3_dir'):
-            required.append('s3_dir')
-
-        if hasattr(context, 'artifacts_index'):
-            required.append('artifacts_index')
-
-        if not required:
-            return super().get_required_inputs_for_context(context)
-
-        return required
+            return ['s3_dir']
+        return super().get_required_inputs_for_context(context)
 
     def extract(self, context) -> Dict[str, Any]:
         """
@@ -70,69 +60,69 @@ class FmoCdftDipolarParser(BaseExtractor):
             Dictionary with fmo_cdft_dipolar_* features
         """
         trace = context.get_plugin_trace(self.get_plugin_name())
-        trace.missing_fields = []
-        trace.missing_paths = []
-        trace.errors = []
-        trace.warnings = []
-        extracted_features = {}
+        features: Dict[str, Any] = {}
 
         s3_dir = getattr(context, 's3_dir', None)
         artifacts_index = getattr(context, 'artifacts_index', None)
 
         if s3_dir is None:
-            trace.missing_fields.append('s3_dir')
-            trace.status = FeatureResultStatus.SKIPPED
-            trace.errors.append("s3_dir not provided")
-            return trace._extracted_features
+            # Should be gated by BaseExtractor.validate_inputs(), but keep a safe fallback.
+            trace.warnings.append("W_FMO_MISSING_S3_DIR")
+            features['fmo_cdft_dipolar.status'] = "skipped"
+            features['fmo_cdft_dipolar.missing_reason'] = "s3_dir_missing"
+            return features
 
-        if artifacts_index is None:
-            logger.warning("artifacts_index not provided, attempting fallback scan")
-            dipolar_output = self._scan_for_dipolar_output(s3_dir)
-        else:
+        dipolar_output: Optional[Path] = None
+        if isinstance(artifacts_index, dict):
             dipolar_output = self._resolve_dipolar_from_index(artifacts_index, s3_dir)
+        elif artifacts_index is not None:
+            logger.warning("artifacts_index is not a dict; attempting fallback scan")
 
         if dipolar_output is None:
-            trace.missing_fields.append('dipolar_output')
-            trace.status = FeatureResultStatus.SKIPPED
-            trace.warnings.append("No dipolar output found")
-            extracted_features['fmo_cdft_dipolar.status'] = "skipped"
-            extracted_features['fmo_cdft_dipolar.missing_reason'] = "dipolar_output_not_found"
-            return trace._extracted_features
+            dipolar_output = self._scan_for_dipolar_output(s3_dir)
+
+        if dipolar_output is None:
+            trace.warnings.append("W_FMO_DIPOLAR_OUTPUT_NOT_FOUND")
+            features['fmo_cdft_dipolar.status'] = "skipped"
+            features['fmo_cdft_dipolar.missing_reason'] = "dipolar_output_not_found"
+            return features
 
         try:
             homo_ev, lumo_ev, gap_ev, omega_ev = self._parse_dipolar_output(dipolar_output)
-
-            if homo_ev is not None and lumo_ev is not None:
-                trace._extracted_features['fmo_cdft_dipolar.homo_ev'] = homo_ev
-                trace._extracted_features['fmo_cdft_dipolar.lumo_ev'] = lumo_ev
-                trace._extracted_features['fmo_cdft_dipolar.gap_ev'] = gap_ev
-                trace._extracted_features['fmo_cdft_dipolar.omega_ev'] = omega_ev
-                trace._extracted_features['fmo_cdft_dipolar.status'] = "ok"
-                trace._extracted_features['fmo_cdft_dipolar.missing_reason'] = None
-
-                gap_valid = gap_ev > 0 if gap_ev is not None else False
-                omega_valid = omega_ev > 0 if omega_ev is not None else False
-
-                if not gap_valid:
-                    trace.warnings.append("Gap is not positive")
-                    trace._extracted_features['fmo_cdft_dipolar.gap_ev_is_invalid'] = True
-                    trace._extracted_features['fmo_cdft_dipolar.gap_is_invalid_reason'] = "gap_not_positive"
-
-                if not omega_valid:
-                    trace.warnings.append("Omega is not positive")
-                    trace._extracted_features['fmo_cdft_dipolar.omega_ev_is_invalid'] = True
-                    trace._extracted_features['fmo_cdft_dipolar.omega_is_invalid_reason'] = "omega_not_positive"
-            else:
-                trace.status = FeatureResultStatus.SKIPPED
-                trace.missing_fields.append('fmo_cdft_dipolar features')
-                trace.errors.append("Failed to parse HOMO/LUMO")
-
         except Exception as e:
             logger.error(f"Failed to parse dipolar output: {e}", exc_info=True)
-            trace.status = FeatureResultStatus.FAILED
             trace.errors.append(f"Exception: {str(e)}")
+            features['fmo_cdft_dipolar.status'] = "failed"
+            features['fmo_cdft_dipolar.missing_reason'] = "exception"
+            return features
 
-        return trace._extracted_features
+        if homo_ev is None or lumo_ev is None:
+            trace.warnings.append("W_FMO_PARSE_HOMO_LUMO_FAILED")
+            features['fmo_cdft_dipolar.status'] = "skipped"
+            features['fmo_cdft_dipolar.missing_reason'] = "homo_lumo_unavailable"
+            return features
+
+        features['fmo_cdft_dipolar.homo_ev'] = homo_ev
+        features['fmo_cdft_dipolar.lumo_ev'] = lumo_ev
+        features['fmo_cdft_dipolar.gap_ev'] = gap_ev
+        features['fmo_cdft_dipolar.omega_ev'] = omega_ev
+        features['fmo_cdft_dipolar.status'] = "ok"
+        features['fmo_cdft_dipolar.missing_reason'] = None
+
+        gap_valid = gap_ev is not None and gap_ev > 0
+        omega_valid = omega_ev is not None and omega_ev > 0
+
+        if not gap_valid:
+            trace.warnings.append("W_FMO_GAP_NOT_POSITIVE")
+            features['fmo_cdft_dipolar.gap_ev_is_invalid'] = True
+            features['fmo_cdft_dipolar.gap_is_invalid_reason'] = "gap_not_positive"
+
+        if not omega_valid:
+            trace.warnings.append("W_FMO_OMEGA_NOT_POSITIVE")
+            features['fmo_cdft_dipolar.omega_ev_is_invalid'] = True
+            features['fmo_cdft_dipolar.omega_is_invalid_reason'] = "omega_not_positive"
+
+        return features
 
     def _scan_for_dipolar_output(self, s3_dir: Path) -> Optional[Path]:
         """
@@ -144,11 +134,63 @@ class FmoCdftDipolarParser(BaseExtractor):
         Returns:
             Path to dipolar output, or None if not found
         """
-        dipolar_patterns = ['*dipolar*.log', '*dipolar*.out']
+        # Prefer ORCA single-point outputs under L2_SP, and prefer TS side over reactant.
+        candidates = []
 
-        for pattern in dipolar_patterns:
-            for output_path in sorted(s3_dir.glob(pattern)):
-                return output_path
+        # Direct dipolar-named files (legacy)
+        candidates.extend(s3_dir.rglob("*dipolar*.out"))
+        candidates.extend(s3_dir.rglob("*dipolar*.log"))
+
+        # Generic ORCA outputs (common in V6.x layouts)
+        candidates.extend(s3_dir.rglob("*.out"))
+
+        uniq = []
+        seen = set()
+        for p in candidates:
+            if p in seen:
+                continue
+            seen.add(p)
+            if p.is_file():
+                uniq.append(p)
+
+        def _score(path: Path) -> tuple[int, float, str]:
+            parts = [x.lower() for x in path.parts]
+            name = path.name.lower()
+            score = 0
+            if "l2_sp" in parts:
+                score += 100
+            if "ts_opt" in parts or "ts" in name:
+                score += 50
+            if "ts" in parts:
+                score += 25
+            if "reactant" in parts or "reactant" in name:
+                score -= 10
+            if "dipolar" in name:
+                score += 30
+            if name.endswith(".smd.out"):
+                score -= 50
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            return (score, mtime, str(path))
+
+        uniq.sort(key=_score, reverse=True)
+
+        for p in uniq:
+            suffix = p.suffix.lower()
+            if suffix == ".out":
+                try:
+                    txt = p.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    continue
+                if "ORBITAL ENERGIES" in txt:
+                    return p
+                # Still allow dipolar-named ORCA outputs even without the section.
+                if "dipolar" in p.name.lower():
+                    return p
+            elif suffix == ".log" and "dipolar" in p.name.lower():
+                return p
 
         return None
 
@@ -218,7 +260,9 @@ class FmoCdftDipolarParser(BaseExtractor):
 
     def _parse_gaussian_log(self, content: str) -> tuple[Optional[float], Optional[float]]:
         """
-        Parse Gaussian .log file for HOMO/LUMO.
+        Parse Gaussian .log file for HOMO/LUMO with enhanced robustness.
+
+        V6.2 Enhancement: More flexible regex patterns and better error diagnostics.
 
         Args:
             content: Gaussian log file content
@@ -226,49 +270,92 @@ class FmoCdftDipolarParser(BaseExtractor):
         Returns:
             (homo_ev, lumo_ev)
         """
-        H_TO_EV = 27.2114
+        # More flexible patterns that handle spacing variations
+        occ_pattern = r"Alpha\s+occ\.?\s+eigenvalues\s*[-—–:]+\s*(.+)"
+        vir_pattern = r"Alpha\s+virt\.?\s+eigenvalues\s*[-—–:]+\s*(.+)"
 
-        occ_matches = re.findall(r"Alpha\s+occ\.\s+eigenvalues\s+--\s+(.+)", content)
-        vir_matches = re.findall(r"Alpha\s+virt\.\s+eigenvalues\s+--\s+(.+)", content)
+        occ_matches = re.findall(occ_pattern, content, re.IGNORECASE)
+        vir_matches = re.findall(vir_pattern, content, re.IGNORECASE)
 
-        if not occ_matches or not vir_matches:
+        if not occ_matches:
+            logger.debug("Gaussian occ eigenvalues not found in log")
+            return None, None
+        if not vir_matches:
+            logger.debug("Gaussian virt eigenvalues not found in log")
             return None, None
 
-        last_occ = occ_matches[-1].split()
-        homo = float(last_occ[-1]) * self.HARTREE_TO_EV
+        # Collect all occupied eigenvalues (handle multi-line)
+        all_occ_values = []
+        for line in occ_matches:
+            values = line.split()
+            for v in values:
+                try:
+                    all_occ_values.append(float(v))
+                except ValueError:
+                    continue
 
-        first_virt = vir_matches[0].split()
-        lumo = float(first_virt[0]) * self.HARTREE_TO_EV
+        # Collect all virtual eigenvalues
+        all_vir_values = []
+        for line in vir_matches:
+            values = line.split()
+            for v in values:
+                try:
+                    all_vir_values.append(float(v))
+                except ValueError:
+                    continue
+
+        if not all_occ_values:
+            logger.debug("No valid occ eigenvalues parsed from Gaussian log")
+            return None, None
+        if not all_vir_values:
+            logger.debug("No valid virt eigenvalues parsed from Gaussian log")
+            return None, None
+
+        # HOMO = last occupied, LUMO = first virtual (both in Hartree, convert to eV)
+        homo = all_occ_values[-1] * HARTREE_TO_EV
+        lumo = all_vir_values[0] * HARTREE_TO_EV
 
         return homo, lumo
 
     def _parse_orca_out(self, content: str) -> tuple[Optional[float], Optional[float]]:
-        """
-        Parse ORCA .out file for HOMO/LUMO.
+        """Parse ORCA .out file for HOMO/LUMO from ORBITAL ENERGIES section."""
+        import re
 
-        Args:
-            content: ORCA out file content
+        orbital_section = re.search(
+            r'ORBITAL ENERGIES\s*-+\s*(.*?)(?:\n\s*-+\s*\n|\Z)',
+            content,
+            re.DOTALL | re.IGNORECASE
+        )
 
-        Returns:
-            (homo_ev, lumo_ev)
-        """
-        occ_pattern = r"ALPHA\s+EIGENVALUES\s*\(\s*(-?\d+\.\d+)\s*\)"
-
-        occ_match = re.search(occ_pattern, content, re.IGNORECASE)
-
-        if not occ_match:
+        if not orbital_section:
             return None, None
 
-        eigenvalues_str = occ_match.group(1)
-        eigenvalues = list(map(float, eigenvalues_str.split()))
+        section_content = orbital_section.group(1)
+        occ_values = []
+        virt_values = []
 
-        if not eigenvalues:
+        for line in section_content.split('\n'):
+            line = line.strip()
+            if not line or line.startswith('NO'):
+                continue
+
+            match = re.match(
+                r'\s*(\d+)\s+([\d\.]+)\s+(-?[\d\.]+)\s+(-?[\d\.]+)',
+                line
+            )
+            if match:
+                occ = float(match.group(2))
+                energy_ev = float(match.group(4))
+
+                if occ > 0.5:
+                    occ_values.append(energy_ev)
+                else:
+                    virt_values.append(energy_ev)
+
+        if not occ_values or not virt_values:
             return None, None
 
-        homo = max(eigenvalues)
-        lumo = min([e for e in eigenvalues if e > 0])
-
-        return homo * self.HARTREE_TO_EV, lumo * self.HARTREE_TO_EV
+        return max(occ_values), min(virt_values)
 
     @staticmethod
     def _compute_file_hash(file_path: Path) -> str:

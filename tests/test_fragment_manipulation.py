@@ -88,7 +88,7 @@ class TestGetFragmentCharges:
         )
 
         assert chargeA == 1
-        assert chargeB == 0
+        assert chargeB == -1  # total_charge(0) - dipole_charge(1) = -1
 
     def test_assigns_positive_charge_to_dipole_with_total(self):
         """Should handle total charge > 0."""
@@ -96,8 +96,8 @@ class TestGetFragmentCharges:
             total_charge=2, n_fragA=10, n_fragB=8, dipole_in_fragA=True
         )
 
-        assert chargeA == 3
-        assert chargeB == 0
+        assert chargeA == 1   # formal_dipole_charge is always 1
+        assert chargeB == 1   # total_charge(2) - 1 = 1
 
     def test_assigns_charge_to_other_fragment(self):
         """Should assign charge to fragment B when dipole is there."""
@@ -105,8 +105,8 @@ class TestGetFragmentCharges:
             total_charge=0, n_fragA=10, n_fragB=8, dipole_in_fragA=False
         )
 
-        assert chargeA == 0
-        assert chargeB == 1
+        assert chargeA == -1  # total_charge(0) - dipole_charge(1) = -1
+        assert chargeB == 1   # dipole is in fragB, so chargeB = 1
 
 
 class TestGetFragmentMultiplicities:

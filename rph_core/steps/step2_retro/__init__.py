@@ -6,5 +6,23 @@ Step 2: Retro Scanner
 """
 
 from rph_core.steps.step2_retro.retro_scanner import RetroScanner
+from rph_core.steps.step2_retro.kinematic_stretcher import (
+    KinematicStretcher,
+    KinematicParams,
+    kinematic_stretch,
+)
+from rph_core.steps.step2_retro.bond_stretcher import (
+    BondStretcher,
+    StretchingParams,
+    stretch_bonds,
+)
 
-__all__ = ["RetroScanner"]
+__all__ = [
+    "RetroScanner",
+    "KinematicStretcher",
+    "KinematicParams",
+    "kinematic_stretch",
+    "BondStretcher",
+    "StretchingParams",
+    "stretch_bonds",
+]

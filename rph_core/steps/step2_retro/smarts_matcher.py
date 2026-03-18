@@ -10,11 +10,12 @@ Date: 2026-01-13
 """
 
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
 from rdkit import Chem
+from rdkit.Chem import rdDetermineBonds
 from rdkit.Geometry import Point3D
 
 from rph_core.utils.log_manager import LoggerMixin
@@ -43,6 +44,84 @@ class SMARTSMatchResult:
     error_message: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class SMARTSTemplate:
+    reaction_type: str
+    name: str
+    smarts_pattern: Optional[str]
+    bond_position_indices: Tuple[Tuple[int, int], Tuple[int, int]]
+    core_atom_count: int
+    identify_func: str
+
+
+_TEMPLATES: Dict[str, SMARTSTemplate] = {
+    "[5+2]": SMARTSTemplate(
+        reaction_type="[5+2]",
+        name="topology_path_321",
+        smarts_pattern="[O]-[C]-[C]-[C]-[C]-[C]-[C]",
+        bond_position_indices=((0, 1), (0, 2)),
+        core_atom_count=5,
+        identify_func="_topological_core_identification",
+    ),
+    "5+2": SMARTSTemplate(
+        reaction_type="[5+2]",
+        name="topology_path_321",
+        smarts_pattern="[O]-[C]-[C]-[C]-[C]-[C]-[C]",
+        bond_position_indices=((0, 1), (0, 2)),
+        core_atom_count=5,
+        identify_func="_topological_core_identification",
+    ),
+    "[4+3]": SMARTSTemplate(
+        reaction_type="[4+3]",
+        name="topology_ring_43",
+        smarts_pattern="[O]1~[C]~[C]~[C]~[C]~[C]~[C]1",
+        bond_position_indices=((0, 1), (0, 2)),
+        core_atom_count=3,
+        identify_func="_topological_ring_identification_43",
+    ),
+    "4+3": SMARTSTemplate(
+        reaction_type="[4+3]",
+        name="topology_ring_43",
+        smarts_pattern="[O]1~[C]~[C]~[C]~[C]~[C]~[C]1",
+        bond_position_indices=((0, 1), (0, 2)),
+        core_atom_count=3,
+        identify_func="_topological_ring_identification_43",
+    ),
+    "[4+2]": SMARTSTemplate(
+        reaction_type="[4+2]",
+        name="topology_ring_42",
+        smarts_pattern="[C]1~[C]~[C]~[C]~[C]~[C]1",
+        bond_position_indices=((0, 1), (0, 2)),
+        core_atom_count=4,
+        identify_func="_topological_ring_identification_42",
+    ),
+    "4+2": SMARTSTemplate(
+        reaction_type="[4+2]",
+        name="topology_ring_42",
+        smarts_pattern="[C]1~[C]~[C]~[C]~[C]~[C]1",
+        bond_position_indices=((0, 1), (0, 2)),
+        core_atom_count=4,
+        identify_func="_topological_ring_identification_42",
+    ),
+    "[3+2]": SMARTSTemplate(
+        reaction_type="[3+2]",
+        name="topology_ring_32",
+        smarts_pattern="[#6,#7,#8]1~[#6,#7,#8]~[#6,#7,#8]~[#6,#7,#8]~[#6,#7,#8]1",
+        bond_position_indices=((0, 1), (0, 2)),
+        core_atom_count=3,
+        identify_func="_topological_ring_identification_32",
+    ),
+    "3+2": SMARTSTemplate(
+        reaction_type="[3+2]",
+        name="topology_ring_32",
+        smarts_pattern="[#6,#7,#8]1~[#6,#7,#8]~[#6,#7,#8]~[#6,#7,#8]~[#6,#7,#8]1",
+        bond_position_indices=((0, 1), (0, 2)),
+        core_atom_count=3,
+        identify_func="_topological_ring_identification_32",
+    ),
+}
+
+
 class SMARTSMatcher(LoggerMixin):
     """
     SMARTS 匹配引擎 (Step 2 组件)
@@ -56,7 +135,11 @@ class SMARTSMatcher(LoggerMixin):
     def __init__(self, config_path: Optional[Path] = None):
         self.logger.info("SMARTSMatcher (Topology Aware) 初始化完成")
 
-    def find_reactive_bonds(self, product_xyz: Path) -> SMARTSMatchResult:
+    def find_reactive_bonds(
+        self,
+        product_xyz: Path,
+        cleaner_data: Optional[Dict[str, Any]] = None,
+    ) -> SMARTSMatchResult:
         try:
             coords, symbols = read_xyz(product_xyz)
         except Exception as e:
@@ -67,9 +150,49 @@ class SMARTSMatcher(LoggerMixin):
         if mol is None:
              return SMARTSMatchResult(False, "mol_build_error", None, None, (), 0.0, "无法构建分子连接性")
 
-        # 2. 执行拓扑路径分析
-        self.logger.info("执行拓扑路径分析 (Topological Path Analysis)...")
-        topo_result = self._topological_core_identification(mol, coords)
+        cleaner_result = self._match_from_cleaner_data(cleaner_data, mol, coords)
+        if cleaner_result is not None and cleaner_result.matched:
+            self.logger.info("✓ 使用 cleaner 数据识别形成键")
+            return cleaner_result
+
+        reaction_type = self._normalize_reaction_type(cleaner_data)
+        template = self._select_template(reaction_type)
+        if template is None:
+            return SMARTSMatchResult(
+                matched=False,
+                pattern_name="template_not_found",
+                bond_1=None,
+                bond_2=None,
+                match_atoms=(),
+                confidence=0.0,
+                error_message=f"未找到反应类型模板: {reaction_type}",
+            )
+
+        identify = getattr(self, template.identify_func, None)
+        if not callable(identify):
+            return SMARTSMatchResult(
+                matched=False,
+                pattern_name="template_error",
+                bond_1=None,
+                bond_2=None,
+                match_atoms=(),
+                confidence=0.0,
+                error_message=f"模板识别函数不存在: {template.identify_func}",
+            )
+
+        self.logger.info("执行模板识别 (Template Registry)...")
+        topo_candidate = identify(mol, coords)
+        if not isinstance(topo_candidate, SMARTSMatchResult):
+            return SMARTSMatchResult(
+                matched=False,
+                pattern_name="template_error",
+                bond_1=None,
+                bond_2=None,
+                match_atoms=(),
+                confidence=0.0,
+                error_message=f"模板返回类型错误: {template.identify_func}",
+            )
+        topo_result = topo_candidate
         
         if topo_result.matched:
             self.logger.info(f"✓ 拓扑识别成功: {topo_result.pattern_name}")
@@ -82,42 +205,178 @@ class SMARTSMatcher(LoggerMixin):
             bond_2=None, 
             match_atoms=(), 
             confidence=0.0, 
-            error_message="未能识别 [3.2.1] 氧杂桥环拓扑特征"
+            error_message=f"未能识别 {template.reaction_type} 对应拓扑特征"
         )
 
+    def _normalize_reaction_type(self, cleaner_data: Optional[Dict[str, Any]]) -> str:
+        if not cleaner_data:
+            return "[5+2]"
+
+        candidate = cleaner_data.get("reaction_type") or cleaner_data.get("rxn_type")
+        if not candidate:
+            return "[5+2]"
+
+        text = str(candidate).strip()
+        return text if text else "[5+2]"
+
+    def _select_template(self, reaction_type: str) -> Optional[SMARTSTemplate]:
+        if reaction_type in _TEMPLATES:
+            return _TEMPLATES[reaction_type]
+
+        normalized = reaction_type.replace(" ", "")
+        return _TEMPLATES.get(normalized)
+
+    def _match_from_cleaner_data(
+        self,
+        cleaner_data: Optional[Dict[str, Any]],
+        mol: Chem.Mol,
+        coords: np.ndarray,
+    ) -> Optional[SMARTSMatchResult]:
+        if not cleaner_data:
+            return None
+
+        pairs = self._extract_cleaner_pairs(cleaner_data)
+        if len(pairs) < 2:
+            return None
+
+        (a1, a2), (b1, b2) = pairs[0], pairs[1]
+        atom_count = len(coords)
+        if min(a1, a2, b1, b2) < 0 or max(a1, a2, b1, b2) >= atom_count:
+            self.logger.warning("cleaner formed bond indices 超出范围，回退模板识别")
+            return None
+
+        return SMARTSMatchResult(
+            matched=True,
+            pattern_name="cleaner_formed_bond_indices",
+            bond_1=self._get_bond_info(mol, a1, a2, coords),
+            bond_2=self._get_bond_info(mol, b1, b2, coords),
+            match_atoms=(a1, a2, b1, b2),
+            confidence=1.0,
+        )
+
+    def _extract_cleaner_pairs(self, cleaner_data: Dict[str, Any]) -> List[Tuple[int, int]]:
+        if "formed_bond_index_pairs" in cleaner_data:
+            return self._parse_pair_payload(cleaner_data.get("formed_bond_index_pairs"))
+
+        raw = cleaner_data.get("raw")
+        if isinstance(raw, dict) and "formed_bond_index_pairs" in raw:
+            return self._parse_pair_payload(raw.get("formed_bond_index_pairs"))
+
+        return []
+
+    def _parse_pair_payload(self, payload: Any) -> List[Tuple[int, int]]:
+        if payload is None:
+            return []
+
+        parsed: List[Tuple[int, int]] = []
+
+        if isinstance(payload, str):
+            for chunk in payload.split(";"):
+                pair = self._parse_pair_chunk(chunk)
+                if pair is not None:
+                    parsed.append(pair)
+            return parsed
+
+        if isinstance(payload, (list, tuple)):
+            for item in payload:
+                if isinstance(item, (list, tuple)) and len(item) == 2:
+                    try:
+                        parsed.append((int(item[0]), int(item[1])))
+                    except (TypeError, ValueError):
+                        continue
+            return parsed
+
+        return []
+
+    def _parse_pair_chunk(self, chunk: str) -> Optional[Tuple[int, int]]:
+        piece = chunk.strip()
+        if not piece or "-" not in piece:
+            return None
+
+        left, right = piece.split("-", 1)
+        try:
+            return int(left.strip()), int(right.strip())
+        except ValueError:
+            return None
+
     def _xyz_to_mol_with_connectivity(self, coords: np.ndarray, symbols: List[str]) -> Optional[Chem.Mol]:
-        """将 XYZ 转换为带键的 RDKit Mol (保持不变)"""
+        mol = self._build_base_mol(coords, symbols)
+        if mol is None:
+            return None
+
+        if self._try_determine_bonds(mol):
+            return mol
+
+        self.logger.warning("rdDetermineBonds 失败，回退到距离阈值连通性推断")
+        return self._build_mol_with_distance_heuristic(coords, symbols)
+
+    def _build_base_mol(self, coords: np.ndarray, symbols: List[str]) -> Optional[Chem.Mol]:
         mol = Chem.RWMol()
         num_atoms = len(symbols)
         for s in symbols:
             mol.AddAtom(Chem.Atom(s))
-        
+
         conf = Chem.Conformer(num_atoms)
         for i, coord in enumerate(coords):
             conf.SetAtomPosition(i, Point3D(float(coord[0]), float(coord[1]), float(coord[2])))
         mol.AddConformer(conf)
 
-        dist_mat = np.zeros((num_atoms, num_atoms))
+        return mol.GetMol()
+
+    def _try_determine_bonds(self, mol: Chem.Mol) -> bool:
+        try:
+            rdDetermineBonds.DetermineBonds(mol, charge=0)
+        except Exception as exc:
+            self.logger.debug(f"DetermineBonds failed: {exc}")
+            try:
+                rdDetermineBonds.DetermineConnectivity(mol)
+            except Exception as connectivity_exc:
+                self.logger.debug(f"DetermineConnectivity failed: {connectivity_exc}")
+                return False
+
+        if mol.GetNumBonds() == 0:
+            self.logger.debug("rdDetermineBonds produced zero bonds")
+            return False
+
+        try:
+            Chem.SanitizeMol(mol)
+        except Exception as exc:
+            self.logger.debug(f"RDKit sanitize warning for inferred connectivity: {exc}")
+        return True
+
+    def _build_mol_with_distance_heuristic(self, coords: np.ndarray, symbols: List[str]) -> Optional[Chem.Mol]:
+        mol = Chem.RWMol()
+        num_atoms = len(symbols)
+        for s in symbols:
+            mol.AddAtom(Chem.Atom(s))
+
+        conf = Chem.Conformer(num_atoms)
+        for i, coord in enumerate(coords):
+            conf.SetAtomPosition(i, Point3D(float(coord[0]), float(coord[1]), float(coord[2])))
+        mol.AddConformer(conf)
+
         for i in range(num_atoms):
             for j in range(i + 1, num_atoms):
                 dist = np.linalg.norm(coords[i] - coords[j])
-                dist_mat[i, j] = dist_mat[j, i] = dist
                 s1, s2 = symbols[i], symbols[j]
-                
+
                 is_connected = False
                 if s1 == 'H' or s2 == 'H':
-                    if dist < 1.2: is_connected = True
+                    if dist < 1.2:
+                        is_connected = True
                 else:
-                    if dist < 1.75: is_connected = True # 稍微放宽以容纳张力键
-                
+                    if dist < 1.75:
+                        is_connected = True
+
                 if is_connected:
                     mol.AddBond(i, j, Chem.BondType.SINGLE)
-        
+
+        result = mol.GetMol()
         try:
-            Chem.SanitizeMol(mol)
-        except:
-            pass
-        return mol
+            Chem.SanitizeMol(result)
+        except Exception as exc:
+            self.logger.debug(f"RDKit sanitize warning for inferred connectivity: {exc}")
+        return result
 
     def _topological_core_identification(self, mol: Chem.Mol, coords: np.ndarray) -> SMARTSMatchResult:
         """
@@ -242,6 +501,112 @@ class SMARTSMatcher(LoggerMixin):
                     new_path = list(path)
                     new_path.append(n_idx)
                     queue.append(new_path)
+        return None
+
+    def _topological_ring_identification_43(self, mol: Chem.Mol, coords: np.ndarray) -> SMARTSMatchResult:
+        return self._topological_ring_core_identification(
+            mol=mol,
+            coords=coords,
+            ring_size=7,
+            core_atom_count=3,
+            pattern_name="topology_ring_43",
+            require_ring_oxygen_count=1,
+            require_oxygen_in_core=True,
+        )
+
+    def _topological_ring_identification_42(self, mol: Chem.Mol, coords: np.ndarray) -> SMARTSMatchResult:
+        return self._topological_ring_core_identification(
+            mol=mol,
+            coords=coords,
+            ring_size=6,
+            core_atom_count=4,
+            pattern_name="topology_ring_42",
+        )
+
+    def _topological_ring_identification_32(self, mol: Chem.Mol, coords: np.ndarray) -> SMARTSMatchResult:
+        return self._topological_ring_core_identification(
+            mol=mol,
+            coords=coords,
+            ring_size=5,
+            core_atom_count=3,
+            pattern_name="topology_ring_32",
+        )
+
+    def _topological_ring_core_identification(
+        self,
+        mol: Chem.Mol,
+        coords: np.ndarray,
+        ring_size: int,
+        core_atom_count: int,
+        pattern_name: str,
+        require_ring_oxygen_count: Optional[int] = None,
+        require_oxygen_in_core: bool = False,
+    ) -> SMARTSMatchResult:
+        ring_info = mol.GetRingInfo()
+        atom_rings = [list(ring) for ring in ring_info.AtomRings() if len(ring) == ring_size]
+        if not atom_rings:
+            return SMARTSMatchResult(False, f"no_{ring_size}_membered_ring", None, None, (), 0.0)
+
+        for ring in atom_rings:
+            ring_symbols = [mol.GetAtomWithIdx(idx).GetSymbol() for idx in ring]
+            if require_ring_oxygen_count is not None and ring_symbols.count("O") != require_ring_oxygen_count:
+                continue
+
+            cuts = self._find_cycloaddition_cut_edges(ring, core_atom_count, ring_symbols, require_oxygen_in_core)
+            if cuts is None:
+                continue
+
+            (edge_i_a, edge_i_b), (edge_j_a, edge_j_b), core_atoms = cuts
+            bond_1 = self._get_bond_info(mol, edge_i_a, edge_i_b, coords)
+            bond_2 = self._get_bond_info(mol, edge_j_a, edge_j_b, coords)
+
+            confidence = 0.90
+            if require_oxygen_in_core:
+                confidence = 0.93
+
+            return SMARTSMatchResult(
+                matched=True,
+                pattern_name=pattern_name,
+                bond_1=bond_1,
+                bond_2=bond_2,
+                match_atoms=tuple(core_atoms + [edge_i_a, edge_i_b, edge_j_a, edge_j_b]),
+                confidence=confidence,
+            )
+
+        return SMARTSMatchResult(False, "topology_mismatch", None, None, (), 0.0)
+
+    def _find_cycloaddition_cut_edges(
+        self,
+        ring: List[int],
+        core_atom_count: int,
+        ring_symbols: List[str],
+        require_oxygen_in_core: bool,
+    ) -> Optional[Tuple[Tuple[int, int], Tuple[int, int], List[int]]]:
+        ring_size = len(ring)
+        for i in range(ring_size):
+            for j in range(i + 1, ring_size):
+                if j == i + 1 or (i == 0 and j == ring_size - 1):
+                    continue
+
+                distance = j - i
+                if distance not in (core_atom_count, ring_size - core_atom_count):
+                    continue
+
+                segment_a = [ring[(i + step) % ring_size] for step in range(1, distance + 1)]
+                segment_b = [ring[(j + step) % ring_size] for step in range(1, ring_size - distance + 1)]
+
+                core_atoms = segment_a if len(segment_a) == core_atom_count else segment_b
+                if require_oxygen_in_core:
+                    oxygen_in_core = any(
+                        ring_symbols[ring.index(atom_idx)] == "O" for atom_idx in core_atoms
+                    )
+                    if not oxygen_in_core:
+                        continue
+
+                edge_1 = (ring[i], ring[(i + 1) % ring_size])
+                edge_2 = (ring[j], ring[(j + 1) % ring_size])
+                return edge_1, edge_2, core_atoms
+
         return None
 
     def _get_bond_info(self, mol, idx1, idx2, coords):

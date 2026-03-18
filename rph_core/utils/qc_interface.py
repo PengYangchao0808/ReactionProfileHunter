@@ -25,11 +25,12 @@ import tempfile
 import subprocess
 import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Match, Optional, Tuple
 from enum import Enum
 import logging
 
 import numpy as np
+from rph_core.utils.keyword_translator import KeywordTranslator
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,56 @@ def _normalize_nbo_keylist_block(raw: str) -> str:
     return "$NBO\n" + text + "\n$END\n"
 
 
+def _normalize_def2_basis_in_route(route_line: str) -> str:
+    def _repl(match: Match[str]) -> str:
+        token = match.group(0)
+        return token.replace("-", "").replace("_", "")
+
+    return re.sub(r"def2[-_]?[A-Za-z0-9]+", _repl, route_line, flags=re.IGNORECASE)
+
+
+def _append_modredundant_to_opt(route_line: str) -> str:
+    if "modredundant" in route_line.lower():
+        return route_line
+
+    def _inject_parenthesized(match: Match[str]) -> str:
+        body = match.group(1)
+        entries = [item.strip() for item in body.split(",") if item.strip()]
+        if any(item.lower() == "modredundant" for item in entries):
+            return f"Opt=({body})"
+        entries.append("ModRedundant")
+        return f"Opt=({','.join(entries)})"
+
+    if re.search(r"\bopt\s*=\s*\([^)]*\)", route_line, flags=re.IGNORECASE):
+        return re.sub(
+            r"\bopt\s*=\s*\(([^)]*)\)",
+            _inject_parenthesized,
+            route_line,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+    if re.search(r"\bopt\s*=\s*[^\s]+", route_line, flags=re.IGNORECASE):
+        return re.sub(
+            r"\bopt\s*=\s*([^\s]+)",
+            lambda match: f"Opt=({match.group(1)},ModRedundant)",
+            route_line,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+    if re.search(r"\bopt\b", route_line, flags=re.IGNORECASE):
+        return re.sub(
+            r"\bopt\b",
+            "Opt=ModRedundant",
+            route_line,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+    return f"Opt=ModRedundant {route_line}".strip()
+
+
 # =============================================================================
 # M3: QC Task Kind Enumeration
 # =============================================================================
@@ -115,6 +166,7 @@ class TaskKind(Enum):
     TS_OPTIMIZATION = "ts_optimization"
     IRC = "irc"
     NBO = "nbo"
+    SCAN = "scan"
 
 
 # M3-4-2: NBO output file whitelist (prevents picking up old files)
@@ -503,7 +555,7 @@ class LogParser:
     """
 
     @staticmethod
-    def extract_final_geometry(log_content: str) -> List[Dict[str, float]]:
+    def extract_final_geometry(log_content: str) -> List[Dict[str, Any]]:
         """
         Extract final geometry from Gaussian log file.
 
@@ -517,54 +569,68 @@ class LogParser:
             List of dicts with keys 'symbol', 'x', 'y', 'z'
             Returns empty list if parsing fails
         """
-        # Pattern for orientation blocks
-        # Matches both "Standard orientation" and "Input orientation"
-        orientation_pattern = re.compile(
-            r'(?:Standard orientation|Input orientation):.*?\n'
-            r'[-]+\s*\n'
-            r'\s+\d+\s+\d+\s+\d+\s+\d+\s+[\d\.\-]+\s+[\d\.\-]+\s+[\d\.\-]+\s+.*?\n'  # header
-            r'(.*?)'  # capture atoms
-            r'[-]+\s*\n',
-            re.DOTALL
-        )
+        lines = log_content.splitlines()
 
-        blocks = list(orientation_pattern.finditer(log_content))
+        def _find_last_orientation_start() -> Optional[int]:
+            last_idx = None
+            orientation_header = re.compile(r"^\s*(Standard|Input)\s+orientation:\s*$", re.IGNORECASE)
+            for idx, line in enumerate(lines):
+                if orientation_header.match(line):
+                    last_idx = idx
+            return last_idx
 
-        if not blocks:
+        def _to_float(token: str) -> Optional[float]:
+            try:
+                return float(token.replace("D", "E").replace("d", "e"))
+            except ValueError:
+                return None
+
+        start_idx = _find_last_orientation_start()
+        if start_idx is None:
             logger.warning("No orientation blocks found in log file")
             return []
 
-        # Get the LAST block
-        last_block = blocks[-1]
+        idx = start_idx + 1
+        while idx < len(lines) and not re.match(r"\s*-{5,}\s*$", lines[idx]):
+            idx += 1
+        if idx >= len(lines):
+            logger.warning("Orientation block header separator not found in log file")
+            return []
 
-        # Parse atomic coordinates
-        # Format: atomic_number, atomic_type, X, Y, Z, ...
-        atom_pattern = re.compile(
-            r'\s+\d+\s+\d+\s+\d+\s+\d+\s+([\d\.\-]+)\s+([\d\.\-]+)\s+([\d\.\-]+)\s+.*?\n'
-        )
+        idx += 1
+        while idx < len(lines) and not re.match(r"\s*-{5,}\s*$", lines[idx]):
+            idx += 1
+        if idx >= len(lines):
+            logger.warning("Orientation block column header separator not found in log file")
+            return []
 
-        atoms = []
-        for match in atom_pattern.finditer(last_block.group(1)):
-            x = float(match.group(1))
-            y = float(match.group(2))
-            z = float(match.group(3))
+        idx += 1
+        atoms: List[Dict[str, Any]] = []
+        while idx < len(lines):
+            line = lines[idx]
+            if re.match(r"\s*-{5,}\s*$", line):
+                break
 
-            # Convert atomic number to symbol (using periodic table)
-            # For now, use atomic number as symbol placeholder
-            # In a full implementation, you'd have a mapping
-            atomic_num_line = re.search(r'\s+(\d+)\s+\d+', match.group(0))
-            if atomic_num_line:
-                atomic_num = int(atomic_num_line.group(1))
-                symbol = LogParser._atomic_num_to_symbol(atomic_num)
-            else:
-                symbol = 'X'
+            parts = line.strip().split()
+            if len(parts) >= 6 and parts[0].isdigit():
+                atomic_num = None
+                try:
+                    atomic_num = int(parts[1])
+                except ValueError:
+                    atomic_num = None
 
-            atoms.append({
-                'symbol': symbol,
-                'x': x,
-                'y': y,
-                'z': z
-            })
+                x = _to_float(parts[3])
+                y = _to_float(parts[4])
+                z = _to_float(parts[5])
+                if x is not None and y is not None and z is not None:
+                    symbol = LogParser._atomic_num_to_symbol(atomic_num) if atomic_num is not None else "X"
+                    atoms.append({"symbol": symbol, "x": x, "y": y, "z": z})
+
+            idx += 1
+
+        if not atoms:
+            logger.warning("Orientation block found but no atomic coordinates parsed")
+            return []
 
         logger.debug(f"Extracted {len(atoms)} atoms from final orientation")
         return atoms
@@ -930,7 +996,7 @@ def run_gaussian_optimization(route, atoms, charge, mult, output_dir, config):
 
 
 # Re-export QCResult for backward compatibility
-from rph_core.utils.data_types import QCResult  # noqa: F401
+from rph_core.utils.data_types import QCResult, ScanResult, PathSearchResult  # noqa: F401
 
 # Additional imports for interface classes
 from rph_core.utils.file_io import read_energy_from_gaussian, read_xyz
@@ -946,7 +1012,7 @@ class XTBInterface:
         gfn_level: int = 2,
         solvent: Optional[str] = None,
         nproc: int = 1,
-        config: Optional[dict] = None
+        config: Optional[Dict[str, Any]] = None
     ):
         self.gfn_level = gfn_level
         self.solvent = solvent
@@ -959,7 +1025,9 @@ class XTBInterface:
         output_dir: Path,
         constraints: Optional[Dict[str, float]] = None,
         charge: int = 0,
-        spin: int = 1
+        spin: int = 1,
+        constraint_force_constant: float = 1.0,
+        keepaway_constraints: Optional[Dict[str, float]] = None
     ) -> QCResult:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -969,12 +1037,29 @@ class XTBInterface:
         config['resources']['nproc'] = self.nproc
 
         runner = XTBRunner(config=config, work_dir=output_dir)
+
+        normalized_constraints: Optional[Dict[str, float]] = None
+        if constraints:
+            normalized_constraints = {}
+            for atoms, distance in constraints.items():
+                atom1_raw, atom2_raw = map(int, str(atoms).split())
+                normalized_constraints[f"{atom1_raw + 1} {atom2_raw + 1}"] = float(distance)
+
+        normalized_keepaway: Optional[Dict[str, float]] = None
+        if keepaway_constraints:
+            normalized_keepaway = {}
+            for atoms, distance in keepaway_constraints.items():
+                atom1_raw, atom2_raw = map(int, str(atoms).split())
+                normalized_keepaway[f"{atom1_raw + 1} {atom2_raw + 1}"] = float(distance)
+
         result = runner.optimize(
             structure=xyz_file,
-            constraints=constraints,
+            constraints=normalized_constraints,
             solvent=self.solvent,
             charge=charge,
-            uhf=max(spin - 1, 0)
+            uhf=max(spin - 1, 0),
+            constraint_force_constant=constraint_force_constant,
+            keepaway_constraints=normalized_keepaway
         )
         if isinstance(result.coordinates, Path):
             result.output_file = result.coordinates
@@ -986,6 +1071,185 @@ class XTBInterface:
                 result.converged = False
                 result.success = False
         return result
+
+    def scan(
+        self,
+        xyz_file: Path,
+        output_dir: Path,
+        constraints: Dict[str, float],
+        scan_range: Tuple[float, float],
+        scan_steps: int,
+        scan_mode: str = "concerted",
+        scan_force_constant: float = 1.0,
+        charge: int = 0,
+        spin: int = 1
+    ) -> ScanResult:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        config = dict(self.config)
+        config.setdefault('resources', {})
+        config['resources']['nproc'] = self.nproc
+
+        use_sandbox = is_path_toxic(output_dir)
+        run_dir = output_dir
+        if use_sandbox:
+            logger.warning("XTB scan output path is toxic, using sandbox: %s", output_dir)
+            run_dir = Path(tempfile.mkdtemp(prefix="RPH_XTB_SCAN_", dir="/tmp"))
+
+        try:
+            step2_cfg = config.get("step2", {}) or {}
+            xtb_settings = step2_cfg.get("xtb_settings", {}) or {}
+
+            resolved_solvent = xtb_settings.get("solvent", self.solvent)
+            resolved_gfn_level = int(xtb_settings.get("gfn_level", self.gfn_level))
+            raw_etemp = xtb_settings.get("etemp")
+            resolved_etemp = float(raw_etemp) if raw_etemp is not None else None
+
+            runner = XTBRunner(config=config, work_dir=run_dir)
+            result = runner.run_scan(
+                input_xyz=xyz_file,
+                constraints=constraints,
+                scan_range=scan_range,
+                scan_steps=scan_steps,
+                scan_mode=scan_mode,
+                scan_force_constant=scan_force_constant,
+                solvent=resolved_solvent,
+                gfn_level=resolved_gfn_level,
+                etemp=resolved_etemp,
+                charge=charge,
+                uhf=max(spin - 1, 0)
+            )
+
+            if use_sandbox:
+                for item in run_dir.iterdir():
+                    target = output_dir / item.name
+                    if item.is_dir():
+                        if target.exists():
+                            shutil.rmtree(target)
+                        shutil.copytree(item, target)
+                    else:
+                        shutil.copy2(item, target)
+
+                def _remap_output_path(path_obj: Path) -> Path:
+                    path_obj = Path(path_obj)
+                    try:
+                        rel = path_obj.relative_to(run_dir)
+                        return output_dir / rel
+                    except ValueError:
+                        return output_dir / path_obj.name
+
+                if result.scan_log:
+                    result.scan_log = _remap_output_path(result.scan_log)
+                if result.ts_guess_xyz:
+                    result.ts_guess_xyz = _remap_output_path(result.ts_guess_xyz)
+                if isinstance(result.geometries, Path):
+                    result.geometries = _remap_output_path(result.geometries)
+                elif isinstance(result.geometries, list):
+                    result.geometries = [
+                        _remap_output_path(geom) if isinstance(geom, Path) else geom
+                        for geom in result.geometries
+                    ]
+
+            if result.success:
+                logger.info("XTB scan completed successfully: %s", output_dir)
+            else:
+                logger.warning("XTB scan failed: %s", output_dir)
+
+            return result
+        finally:
+            if use_sandbox and run_dir.exists():
+                shutil.rmtree(run_dir, ignore_errors=True)
+
+    def path(
+        self,
+        start_xyz: Path,
+        end_xyz: Path,
+        output_dir: Path,
+        nrun: int = 1,
+        npoint: int = 25,
+        anopt: int = 10,
+        kpush: float = 0.003,
+        kpull: float = -0.015,
+        ppull: float = 0.05,
+        alp: float = 1.2,
+        charge: int = 0,
+        spin: int = 1
+    ) -> PathSearchResult:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        config = dict(self.config)
+        config.setdefault('resources', {})
+        config['resources']['nproc'] = self.nproc
+
+        use_sandbox = is_path_toxic(output_dir)
+        run_dir = output_dir
+        if use_sandbox:
+            logger.warning("XTB path search output path is toxic, using sandbox: %s", output_dir)
+            run_dir = Path(tempfile.mkdtemp(prefix="RPH_XTB_PATH_", dir="/tmp"))
+
+        try:
+            step2_cfg = config.get("step2", {}) or {}
+            xtb_settings = step2_cfg.get("xtb_settings", {}) or {}
+
+            resolved_solvent = xtb_settings.get("solvent", self.solvent)
+            resolved_gfn_level = int(xtb_settings.get("gfn_level", self.gfn_level))
+
+            runner = XTBRunner(config=config, work_dir=run_dir)
+            result = runner.run_path(
+                start_xyz=start_xyz,
+                end_xyz=end_xyz,
+                nrun=nrun,
+                npoint=npoint,
+                anopt=anopt,
+                kpush=kpush,
+                kpull=kpull,
+                ppull=ppull,
+                alp=alp,
+                gfn_level=resolved_gfn_level,
+                solvent=resolved_solvent,
+                charge=charge,
+                uhf=max(spin - 1, 0),
+            )
+
+            if use_sandbox:
+                for item in run_dir.iterdir():
+                    target = output_dir / item.name
+                    if item.is_dir():
+                        if target.exists():
+                            shutil.rmtree(target)
+                        shutil.copytree(item, target)
+                    else:
+                        shutil.copy2(item, target)
+
+                def _remap_output_path(path_obj: Path) -> Path:
+                    path_obj = Path(path_obj)
+                    try:
+                        rel = path_obj.relative_to(run_dir)
+                        return output_dir / rel
+                    except ValueError:
+                        return output_dir / path_obj.name
+
+                if result.path_log:
+                    result.path_log = _remap_output_path(result.path_log)
+                if result.ts_guess_xyz:
+                    result.ts_guess_xyz = _remap_output_path(result.ts_guess_xyz)
+                if result.path_xyz_files:
+                    result.path_xyz_files = [
+                        _remap_output_path(f) if isinstance(f, Path) else f
+                        for f in result.path_xyz_files
+                    ]
+
+            if result.success:
+                logger.info("XTB path search completed successfully: %s", output_dir)
+            else:
+                logger.warning("XTB path search failed: %s", output_dir)
+
+            return result
+        finally:
+            if use_sandbox and run_dir.exists():
+                shutil.rmtree(run_dir, ignore_errors=True)
 
 
 class CRESTInterface:
@@ -999,7 +1263,7 @@ class CRESTInterface:
         gfn_level: int = 2,
         solvent: Optional[str] = None,
         nproc: int = 1,
-        config: Optional[dict] = None,
+        config: Optional[Dict[str, Any]] = None,
         additional_flags: Optional[str] = None
     ):
         self.gfn_level = gfn_level
@@ -1227,7 +1491,7 @@ class GaussianInterface:
         multiplicity: int = 1,
         nprocshared: int = 16,
         mem: str = "32GB",
-        config: Optional[dict] = None
+        config: Optional[Dict[str, Any]] = None
     ):
         self.charge = charge
         self.multiplicity = multiplicity
@@ -1296,8 +1560,28 @@ class GaussianInterface:
         if nbo_block:
             lines.append(nbo_block)
             lines.append("\n")
+        gjf_file.parent.mkdir(parents=True, exist_ok=True)
         gjf_file.write_text("".join(lines))
         return gjf_file
+
+    def _build_default_constrained_route(self) -> str:
+        theory_opt = self.config.get("theory", {}).get("optimization", {})
+        method = str(theory_opt.get("method", "B3LYP")).strip() or "B3LYP"
+        basis_raw = str(theory_opt.get("basis", "def2-SVP")).strip() or "def2-SVP"
+        basis = KeywordTranslator.to_gaussian_basis(basis_raw)
+
+        route_parts: List[str] = [f"{method}/{basis}"]
+
+        dispersion = KeywordTranslator.to_gaussian_dispersion(str(theory_opt.get("dispersion", "")))
+        if dispersion:
+            route_parts.append(dispersion)
+
+        solvent = KeywordTranslator.to_gaussian_solvent(str(theory_opt.get("solvent", "")))
+        if solvent:
+            route_parts.append(solvent.strip())
+
+        route_parts.append("Opt=CalcFC")
+        return " ".join(route_parts)
 
     def optimize(
         self,
@@ -1348,7 +1632,7 @@ class GaussianInterface:
                 try:
                     with open(log_file, 'r', errors='replace') as f:
                         lines = f.readlines()
-                        important_lines = [l.strip() for l in lines[-50:] if "Error" in l or "termination" in l]
+                        important_lines = [l.strip() for l in lines[-50:] if "Error" in l or "termination" in l or "galloc" in l or "allocation" in l]
                         if important_lines:
                             error_snippet = " | ".join(important_lines)
                         else:
@@ -1421,7 +1705,8 @@ class GaussianInterface:
         self,
         xyz_file: Path,
         output_dir: Path,
-        frozen_indices: List[int],
+        frozen_indices: Optional[List[int]] = None,
+        distance_constraints: Optional[List[Tuple[int, int]]] = None,
         charge: int = 0,
         spin: int = 1,
         route: Optional[str] = None,
@@ -1433,20 +1718,74 @@ class GaussianInterface:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         coords, symbols = read_xyz(xyz_file)
+        atom_count = len(symbols)
+
+        invalid_reasons: List[str] = []
+        normalized_frozen_indices: List[int] = []
+        for raw_idx in frozen_indices or []:
+            idx = int(raw_idx)
+            if idx < 0 or idx >= atom_count:
+                invalid_reasons.append(f"frozen index out of range: {idx} (atom_count={atom_count})")
+                continue
+            normalized_frozen_indices.append(idx)
+
+        normalized_distance_constraints: List[Tuple[int, int]] = []
+        for raw_bond in distance_constraints or []:
+            if len(raw_bond) != 2:
+                invalid_reasons.append(f"invalid bond constraint shape: {raw_bond}")
+                continue
+            i, j = int(raw_bond[0]), int(raw_bond[1])
+            if i == j:
+                invalid_reasons.append(f"invalid bond constraint with identical atoms: ({i}, {j})")
+                continue
+            if i < 0 or i >= atom_count or j < 0 or j >= atom_count:
+                invalid_reasons.append(f"bond constraint out of range: ({i}, {j}) (atom_count={atom_count})")
+                continue
+            normalized_distance_constraints.append((i, j))
+
+        if invalid_reasons:
+            return QCResult(
+                success=False,
+                converged=False,
+                error_message="; ".join(invalid_reasons),
+            )
 
         if route is None:
-            route = "#p opt b3lyp/def2-svp"
+            route = self._build_default_constrained_route()
 
-        mod_redundant_lines = [f"X  {idx + 1}  F" for idx in frozen_indices]
+        mod_redundant_lines: List[str] = []
+        for idx in normalized_frozen_indices:
+            mod_redundant_lines.append(f"X  {idx + 1}  F")
+        for bond in normalized_distance_constraints:
+            i, j = int(bond[0]), int(bond[1])
+            mod_redundant_lines.append(f"B  {i + 1}  {j + 1}  F")
+
+        if not mod_redundant_lines:
+            return QCResult(success=False, converged=False, error_message="No constrained terms provided")
+
         mod_redundant_block = "\n".join(mod_redundant_lines)
 
         route_line = route.strip().lstrip('#').strip()
         if route_line.lower().startswith('p '):
             route_line = route_line[1:].strip()
+        route_line = re.sub(r"\s+", " ", route_line).strip()
+        route_line = _normalize_def2_basis_in_route(route_line)
+
+        # Ensure ModRedundant is in route when constraints are present
+        if mod_redundant_lines and 'modredundant' not in route_line.lower():
+            route_line = _append_modredundant_to_opt(route_line)
+
+        use_sandbox = is_path_toxic(output_dir)
+        run_dir = output_dir
+        if use_sandbox:
+            logger.warning("Constrained Gaussian output path is toxic, using sandbox: %s", output_dir)
+            run_dir = Path(tempfile.mkdtemp(prefix="RPH_G16_CONSTR_", dir="/tmp"))
 
         chk_name = f"{xyz_file.stem}_constrained.chk"
-        gjf_file = output_dir / f"{xyz_file.stem}_constrained.gjf"
-        log_file = output_dir / f"{xyz_file.stem}_constrained.log"
+        log_name = f"{xyz_file.stem}_constrained.log"
+        gjf_name = f"{xyz_file.stem}_constrained.gjf"
+        gjf_file = run_dir / gjf_name
+        log_file = run_dir / log_name
 
         lines = [
             f"%chk={chk_name}\n",
@@ -1468,32 +1807,119 @@ class GaussianInterface:
             cmd = [self.gaussian_cmd, gjf_file.name, log_file.name] if self.use_wrapper else [self.gaussian_cmd, gjf_file.name]
             result = subprocess.run(
                 cmd,
-                cwd=str(output_dir),
+                cwd=str(run_dir),
                 capture_output=True,
                 text=True,
                 timeout=timeout
             )
-            if not log_file.exists():
-                return QCResult(success=False, converged=False, error_message="Gaussian log not created")
 
-            log_content = log_file.read_text()
-            converged = "Normal termination" in log_content
+            if use_sandbox:
+                for item in run_dir.iterdir():
+                    target = output_dir / item.name
+                    if item.is_dir():
+                        if target.exists():
+                            shutil.rmtree(target)
+                        shutil.copytree(item, target)
+                    else:
+                        shutil.copy2(item, target)
+
+            final_log_file = (output_dir / log_name) if use_sandbox else log_file
+
+            if not final_log_file.exists():
+                return QCResult(
+                    success=False,
+                    converged=False,
+                    error_message=(
+                        f"Gaussian log not created (returncode={result.returncode})"
+                    ),
+                )
+
+            log_content = final_log_file.read_text(errors="replace")
+            has_normal_termination = "Normal termination" in log_content
+            has_error_termination = "Error termination" in log_content
+
+            if result.returncode != 0:
+                error_lines = [
+                    line.strip()
+                    for line in log_content.splitlines()
+                    if (
+                        "Error termination" in line
+                        or "QPErr" in line
+                        or "Lnk1e" in line
+                        or "Cannot open" in line
+                        or "No such file" in line
+                        or "Error imposing constraints" in line
+                    )
+                ]
+                detail = error_lines[0] if error_lines else (result.stderr or "").strip()
+                detail = detail.splitlines()[-1] if detail else ""
+                message = f"Gaussian execution failed (returncode={result.returncode})"
+                if detail:
+                    message = f"{message}: {detail}"
+                return QCResult(
+                    success=False,
+                    converged=False,
+                    coordinates=None,
+                    output_file=final_log_file,
+                    error_message=message,
+                )
 
             atoms = LogParser.extract_final_geometry(log_content)
             result_coords = np.array([[a['x'], a['y'], a['z']] for a in atoms]) if atoms else None
+            error_lines = [
+                line.strip() for line in log_content.splitlines() if "Error termination" in line
+            ]
+
+            converged = has_normal_termination
+
+            if not converged:
+                if has_error_termination and error_lines:
+                    message = f"Gaussian did not converge: {error_lines[-1]}"
+                elif has_error_termination:
+                    message = "Gaussian did not converge: error termination detected"
+                else:
+                    message = "Gaussian did not converge: no normal termination marker"
+                return QCResult(
+                    success=False,
+                    converged=False,
+                    coordinates=result_coords,
+                    output_file=final_log_file,
+                    error_message=message,
+                )
+
+            if result_coords is None:
+                has_orientation_header = (
+                    "Standard orientation" in log_content or "Input orientation" in log_content
+                )
+                if has_orientation_header:
+                    message = (
+                        "Gaussian geometry parse failed: orientation sections found but no coordinates parsed"
+                    )
+                else:
+                    message = "Gaussian geometry parse failed: no orientation sections found in log"
+                return QCResult(
+                    success=False,
+                    converged=True,
+                    coordinates=None,
+                    output_file=final_log_file,
+                    error_message=message,
+                )
 
             return QCResult(
-                success=converged,
-                converged=converged,
+                success=True,
+                converged=True,
                 coordinates=result_coords,
-                output_file=log_file,
-                error_message=None if converged else "Gaussian did not converge"
+                output_file=final_log_file,
+                error_message=None,
             )
 
         except subprocess.TimeoutExpired:
             return QCResult(success=False, converged=False, error_message="Gaussian timed out")
         except Exception as e:
             return QCResult(success=False, converged=False, error_message=str(e))
+        finally:
+            if use_sandbox and run_dir.exists():
+                shutil.rmtree(run_dir, ignore_errors=True)
 
 
 class QCInterfaceFactory:

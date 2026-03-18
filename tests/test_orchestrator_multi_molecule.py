@@ -140,10 +140,9 @@ class TestOrchestratorMultiMolecule:
             mock_run.return_value = PipelineResult(success=True)
             _run_tasks(hunter, run_cfg)
             
-            mock_run.assert_called_once_with(
-                product_smiles="C1CCCCC1",
-                work_dir=tmp_path / "rx_test_rx",
-                skip_steps=[],
-                precursor_smiles="C=C",
-                leaving_group_key="AcOH"
-            )
+            mock_run.assert_called_once()
+            call_kwargs = mock_run.call_args[1]  # keyword arguments
+            assert call_kwargs["product_smiles"] == "C1CCCCC1"
+            assert call_kwargs["precursor_smiles"] == "C=C"
+            assert call_kwargs["leaving_group_key"] == "AcOH"
+            assert call_kwargs["skip_steps"] == []

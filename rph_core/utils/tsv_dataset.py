@@ -28,6 +28,10 @@ class ReactionRecord:
     ee: Optional[str] = None
     dr_major: Optional[str] = None
     dr_minor: Optional[str] = None
+    reaction_type: Optional[str] = None
+    forming_bonds: Optional[str] = None
+    breaking_bonds: Optional[str] = None
+    solvent_override: Optional[str] = None
 
     def __post_init__(self):
         object.__setattr__(self, 'raw', self.raw or {})
@@ -132,6 +136,10 @@ def load_tsv_records(
                     ee=_clean_str(row.get("ee")),
                     dr_major=_clean_str(row.get("dr_major")),
                     dr_minor=_clean_str(row.get("dr_minor")),
+                    reaction_type=_clean_str(row.get("reaction_type")),
+                    forming_bonds=_clean_str(row.get("forming_bonds")),
+                    breaking_bonds=_clean_str(row.get("breaking_bonds")),
+                    solvent_override=_clean_str(row.get("solvent_override")),
                     raw=raw_dict
                 )
 

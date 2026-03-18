@@ -10,7 +10,9 @@ Date: 2026-01-18
 
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Literal
+
+from rph_core.utils.data_types import MolIdx
 import time
 import json
 
@@ -89,24 +91,37 @@ class FeatureContext:
     reactant_qm_output: Optional[Path] = None
     product_qm_output: Optional[Path] = None
 
-    forming_bonds: Optional[Tuple[Tuple[int, int], ...]] = None
+    forming_bonds: Optional[Tuple[Tuple[MolIdx, MolIdx], ...]] = None
+    index_domain: Literal["mol_idx"] = "mol_idx"
     fragment_indices: Optional[Tuple[List[int], List[int]]] = None
 
     sp_report: Optional[Any] = None
 
-    # V6.2: S3 directory for accessing enrichment contract and dipolar artifacts
-    # Resolved in feature_miner before plugin execution
+    # V6.2: S1 path handles for Step1 activation features
+    s1_dir: Optional[Path] = None
+    s1_precursor_xyz: Optional[Path] = None
+    s1_small_molecules_dir: Optional[Path] = None
+    s1_hoac_thermo_file: Optional[Path] = None
+    s1_shermo_summary_file: Optional[Path] = None
+    s1_conformer_energies_file: Optional[Path] = None
+
+    # V6.2: S3 path handles for Step2 cyclization features
     s3_dir: Optional[Path] = None
+    s3_intermediate_fchk: Optional[Path] = None
+    s3_ts_fchk: Optional[Path] = None
+    s3_ts_log: Optional[Path] = None
+    s3_intermediate_log: Optional[Path] = None
+    s3_intermediate_g_kcal: Optional[float] = None
     artifacts_index: Optional[Dict[str, Any]] = None
 
     close_contacts_cutoff: float = 2.2
     temperature_K: float = 298.15
 
     ts_fingerprint: Optional[Dict[str, Any]] = None
-    reactant_fingerprint: Optional[Dict[str, Any]] = None
+    intermediate_fingerprint: Optional[Dict[str, Any]] = None
     product_fingerprint: Optional[Dict[str, Any]] = None
     ts_fchk_fingerprint: Optional[Dict[str, Any]] = None
-    reactant_fchk_fingerprint: Optional[Dict[str, Any]] = None
+    intermediate_fchk_fingerprint: Optional[Dict[str, Any]] = None
     product_fchk_fingerprint: Optional[Dict[str, Any]] = None
     ts_orca_out_fingerprint: Optional[Dict[str, Any]] = None
     sp_report_fingerprint: Optional[str] = None
@@ -195,6 +210,11 @@ class FeatureResult:
     job_run_policy: str = "disallow"
     nics_trigger_policy: NICSTriggerPolicy = NICSTriggerPolicy.GENERATE_ONLY
 
+    # V6.2: Config snapshot and provenance
+    config_snapshot: Optional[Dict[str, Any]] = None
+    provenance: Optional[Dict[str, Any]] = None
+    artifact_presence: Dict[str, bool] = field(default_factory=dict)
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert result to dictionary (excluding None/NaN from features).
 
@@ -208,7 +228,7 @@ class FeatureResult:
             if v is not None and not (isinstance(v, float) and np.isnan(v))
         }
 
-        result = {
+        result: Dict[str, Any] = {
             "meta": {
                 "schema_version": self.schema_version,
                 "schema_signature": self.schema_signature,
@@ -221,6 +241,9 @@ class FeatureResult:
                     "job_run_policy": self.job_run_policy,
                     "nics_trigger_policy": self.nics_trigger_policy.value,
                 },
+                "config_snapshot": self.config_snapshot or {},
+                "provenance": self.provenance or {},
+                "artifact_presence": self.artifact_presence,
             },
             "trace": {
                 "inputs_fingerprint": {},
@@ -228,6 +251,11 @@ class FeatureResult:
             },
             "warnings": self.warnings,
         }
+        result["features"] = filtered_features
+
+        trace_payload: Dict[str, Any] = result["trace"]
+        inputs_fingerprint: Dict[str, Any] = trace_payload["inputs_fingerprint"]
+        plugins_payload: Dict[str, Any] = trace_payload["plugins"]
 
         fingerprint_mapping = {
             "ts_xyz": self.ts_fingerprint,
@@ -241,13 +269,13 @@ class FeatureResult:
 
         for key, fp in fingerprint_mapping.items():
             if fp:
-                result["trace"]["inputs_fingerprint"][key] = fp
+                inputs_fingerprint[key] = fp
 
         if self.sp_report_fingerprint:
-            result["trace"]["inputs_fingerprint"]["sp_report_summary"] = self.sp_report_fingerprint
+            inputs_fingerprint["sp_report_summary"] = self.sp_report_fingerprint
 
         for plugin_name, trace in self.plugin_traces.items():
-            result["trace"]["plugins"][plugin_name] = {
+            plugins_payload[plugin_name] = {
                 "status": trace.status.value,
                 "runtime_ms": trace.runtime_ms,
                 "missing_fields": trace.missing_fields,

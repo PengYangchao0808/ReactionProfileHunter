@@ -50,8 +50,11 @@ class TestQCArtifactsCollection:
             assert 'nbo_outputs' in result
             assert result['nbo_outputs']['filename'] == 'qc_nbo.37'
             assert 'meta' in result['nbo_outputs']
-            assert 'source_paths' in result['nbo_outputs']['meta']
-            assert 'S3_TS/nbo_analysis/job_nbo.37' in result['nbo_outputs']['meta']['source_paths'][0]
+            assert 'candidates' in result['nbo_outputs']['meta']
+            assert 'picked' in result['nbo_outputs']['meta']
+            assert 'reason' in result['nbo_outputs']['meta']
+            picked = result['nbo_outputs']['meta']['picked']
+            assert 'rel_path' in picked
 
     def test_collect_copies_file_to_s4_root(self):
         """Collected artifact should exist in S4 directory."""

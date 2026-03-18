@@ -30,3 +30,6 @@ test_ui_verify/rx_manual/
 .vscode/
 .idea/
 .sisyphus/
+
+# 测试运行时临时目录
+test_tmpdir/

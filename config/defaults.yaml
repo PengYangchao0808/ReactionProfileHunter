@@ -1,4 +1,4 @@
-# ReactionProfileHunter v2.1 默认配置
+# ReactionProfileHunter v6.2 默认配置
 # =====================================
 
 # ==================== 路径配置 (Executables) ====================
@@ -6,28 +6,43 @@
 # 支持环境变量覆盖（如 export ORCA_PATH=/custom/path/orca）
 executables:
   orca:
-    path: "/root/orca/orca"  # 可执行文件的绝对路径，或命令名如 "orca"
-    ld_library_path: "/root/orca"  # ORCA 共享库路径（MPI 支持）
+    path: "/opt/software/orca/orca"  # 可执行文件的绝对路径，或命令名如 "orca"
+    ld_library_path: "/opt/openmpi418/lib:/opt/software/orca"  # OpenMPI 4.1.8 + ORCA 共享库路径
   gaussian:
-    path: "/root/g16/g16"
-    root: "/root/g16"
-    profile: "/root/g16/g16.profile"
+    path: "/opt/software/gaussian/g16/g16"
+    root: "/opt/software/gaussian/g16"
+    profile: "/opt/software/gaussian/g16/g16.profile"
     use_wrapper: true
     wrapper_path: "./scripts/run_g16_worker.sh"
   xtb:
-    path: "/root/XTB/bin/xtb"
+    path: "/opt/software/xtb/bin/xtb"
+    fallback_paths:
+      - "/opt/xtb/bin/xtb"
+      - "/usr/local/bin/xtb"
   crest:
-    path: "/root/crest/crest"
+    path: "/opt/software/crest/crest"
   isostat:
-    path: "/root/molclus/isostat"
+    path: "/opt/software/molclus/isostat"
+  shermo:
+    path: "Shermo"
+
+# ==================== 热力学配置 (Thermodynamics) ====================
+# Shermo 热力学校正参数，用于 S1 构象搜索和 S3 Gibbs 计算
+thermo:
+  temperature_k: 298.15
+  pressure_atm: 1.0
+  scl_zpe: 0.9905
+  ilowfreq: 2
+  imagreal: null
+  conc: null
 
 # ==================== 资源配置 (Resources) ====================
 # 内存配置格式："32GB", "16GB", "4096MB" 等
 resources:
-  mem: "64GB"  # 总内存
+  mem: "32GB"  # 总内存
   nproc: 16     # 并行核数
   # 派生值（maxcore 等）由代码根据 mem/nproc 自动计算
-  orca_maxcore_safety: 0.8  # ORCA maxcore 安全系数（避免内存溢出）
+  orca_maxcore_safety: 0.2  # ORCA maxcore 安全系数（避免内存溢出）
 
 # 全局理论水平配置 (Theory Levels)
 # ================================
@@ -35,34 +50,33 @@ resources:
 theory:
   # xTB 预优化级别 (用于避免原子重叠导致 Gaussian/ORCA 崩溃)
   # 策略: xTB 粗修 → B3LYP 精修 → 高精度 SP (Houk 建议)
+  # 注意: nproc 从 resources 配置中自动派生
   preoptimization:
     enabled: true  # 是否启用 xTB 预优化（建议开启）
     gfn_level: 2  # GFN-xTB 方法级别 (1 或 2, 推荐 2)
     solvent: acetone  # 与主计算保持一致
-    nproc: 16  # xTB 通常 4-8 核即可
     # 原子重叠检测阈值（Å）
     overlap_threshold: 1.0  # 若任意两原子距离 < 此值，触发预优化
     # 优化收敛标准
     opt_level: crude  # crude (快速) / normal (标准) / tight (严格)
 
   # 几何优化级别 (用于 S1 产物优化, S3 TS 优化, 受限优化)
+  # 注意: nproc 和 mem 从 resources 配置中自动派生
   optimization:
     method: B3LYP
     basis: def2-SVP
     dispersion: GD3BJ
     engine: gaussian  # 可选: gaussian, orca
-    nproc: 16
-    mem: 64GB
     solvent: acetone
 
   # 高精度单点能级别 (L2)
   # 用于 S1 产物精修, S3 TS/Reactant/Fragments 精修
+  # 注意: nproc 从 resources 配置中自动派生
   single_point:
-    method: wB97X-D3BJ  # 改用 wB97X-D3BJ (比 WB97M-V 更稳定)
+    method: wB97X-D4  # 改用 wB97X-D3BJ (比 WB97M-V 更稳定)
     basis: def2-TZVPP
     aux_basis: def2/J
     engine: orca  # 可选: orca, gaussian
-    nproc: 16
     maxcore: 1000
     solvent: acetone
     fallback_to_gaussian: false  # ORCA 失败时是否降级到 Gaussian
@@ -76,8 +90,8 @@ theory:
 optimization_control:
   # 超时设置
   timeout:
-    enabled: false  # QC 计算通常需要长时间，默认禁用超时
-    default_seconds: null  # null = 无限制
+    enabled: false
+    default_seconds: 21600
 
   # 振荡检测
   oscillation:
@@ -162,13 +176,124 @@ step1:
   enable_dft_opt: true  # 默认使用DFT精修产物构象
 
 # Step 2: Retro Scanner (逆向扫描)
+# ================================================
+# 职责:
+# 1. 从产物结构向外扫描生成 TS 初猜
+# 2. 使用 xTB  relaxed scan 探索反应坐标
+# 3. 拓扑守护验证扫描轨迹合理性
 step2:
-  ts_distance: 2.2  # ✅ 统一为 2.2 Å (PROMOTE.md 标准)
-  break_distance: 3.5  # Å, 断裂距离
+  forming_bonds_required: true
+  forming_bonds_index_base: auto
+  
+  # 扫描策略配置
+  scan:
+    # ===== 扫描策略选择 =====
+    # policy_c: 弱双约束 (harmonic, k=0.03) - 推荐，用于难收敛反应
+    # policy_a: 单侧自由 (仅约束键B)
+    # policy_b: 单侧自由 (仅约束键A, 镜像)
+    # concerted: 传统强双约束 (fixed, k=0.5)
+    scan_policy: policy_c
+    
+    # ===== 扫描距离参数 (单位: Angstrom) =====
+    # 扫描起点距离 - 通常设为产物形成键距离的1.2-1.5倍
+    scan_start_distance: 3.5
+    # 扫描终点距离 - 通常设为过渡态典型距离 (1.8-2.0)
+    scan_end_distance: 1.8
+    # 扫描步数 - 更多步数提高分辨率但增加计算时间
+    scan_steps: 20
+    
+    # ===== 扫描模式 =====
+    # concerted: 同时扫描所有形成键 (推荐)
+    # sequential: 依次扫描每个形成键
+    scan_mode: concerted
+    # 扫描约束力常数 - policy_c使用harmonic约束时有效
+    scan_force_constant: 0.5
+    
+    # ===== 拓扑守护配置 (防止扫描轨迹偏离反应路径) =====
+    # 启用拓扑守护 - 检测扫描过程中是否产生错误的化学键
+    topology_guard_enabled: true
+    # 拓扑图缩放因子 - 用于判断原子间距离是否形成新键
+    # 值越大判断越宽松 (1.25 = 典型共价键半径的1.25倍)
+    topology_graph_scale: 1.25
+    # 风险接触阈值 - 用于检测可能形成错误键的原子对
+    risk_contact_ratio_threshold: 0.85
+    risk_contact_abs_cutoff_A: 2.2
+    # 最小收缩比 - 用于检测原子是否过度靠近
+    min_shrink_ratio: 0.75
+    # 最大风险对数 - 最多检测多少个风险接触
+    keep_apart_max_pairs: 6
+    # 保持距离下限 - 风险接触的最小距离阈值
+    keep_apart_floor_A: 3.0
+    # 保持距离约束力常数
+    keep_apart_force_constant: 0.5
+    # 拓扑重试力常数 - 首次失败后重试时使用的力常数
+    keep_apart_retry_force_constant: 1.0
+    # 拓扑失败时是否重试一次
+    topology_retry_once: true
+    
+    # ===== 扫描质量控制 =====
+    # 有效点数阈值 - 扫描至少需要多少个有效点才能认为成功
+    min_valid_points: 5
+    
+    # ===== 边界处理 =====
+    # 是否拒绝边界最大能量点 (即能量最高点在扫描边界)
+    reject_boundary_maximum: true
+    # 边界最大时是否重试一次 (扩展扫描范围)
+    boundary_retry_once: true
+    # 边界重试的距离增量 (Angstrom)
+    boundary_retry_delta: 0.3
+    # 边界重试时额外增加的扫描步数
+    boundary_retry_extra_steps: 6
+    # 是否允许边界情况下降级处理 (不抛错, 仅记录warning)
+    allow_boundary_degradation: true
+    # 是否要求能量最高点必须是严格的局部峰值
+    # false: 接受能量最高点在边界的情况
+    require_local_peak: false
+  
+  # ===== xTB Path Finder 配置 (新模式) =====
+  # 使用 xTB 官方路径搜索替代 relaxed scan
+  # 官方文档: xtb start.xyz --path end.xyz --input path.inp
+  path_search:
+    # 是否启用 xTB 路径搜索 (true=使用 path search 精修 TS)
+    enabled: true
+    # 路径搜索优化轮数
+    nrun: 1
+    # 初始路径点数
+    npoint: 25
+    # 精细优化步数
+    anopt: 10
+    # 推力 - 从反应物出发的排斥势
+    kpush: 0.003
+    # 拉力 - 向产物的吸引势 (负值表示吸引)
+    kpull: -0.015
+    # 优化器拉力
+    ppull: 0.05
+    # 高斯宽度
+    alp: 1.2
+    # 是否写入兼容别名 (reactant_complex 作为 dipolar_intermediate 的别名)
+    write_legacy_reactant_alias: true
+  
+  # xTB 扫描引擎配置
   xtb_settings:
+    # GFN-xTB 级别: 0 = GFN0, 2 = GFN2 (推荐)
     gfn_level: 2
+    # 溶剂模型 (用于隐式溶剂化计算)
     solvent: acetone
+    # 并行核数
     nproc: 8
+    # 电子温度 (null 表示使用默认, 可设如 300)
+    etemp: null
+
+  # Gaussian+XTB 混合 TS 优化配置 (NEW)
+  # 使用 Gaussian 调用 XTB 进行梯度计算，实现更精确的 TS 优化
+  gau_xtb:
+    enabled: false  # 设置为 true 启用 Gau_XTB TS 优化
+    # Gau_XTB 脚本目录
+    scripts_dir: "scripts/Gau_XTB"
+    # 最大优化循环数
+    max_cycles: 50
+    # 最大尝试次数
+    max_attempts: 3
 
 # Step 3: Transition Analyzer (反应中心全分析)
 # ================================================
@@ -178,13 +303,13 @@ step2:
 # 3. 片段提取与处理 (Opt + SP)
 # 4. 生成完整能量报告
 step3:
-  # IRC 验证配置
-  verify_irc: false
-  irc_max_points: 50
-  irc_step_size: 10  # IRC 步长 (0.001 amu^1/2 bohr)
+  # [NEW] 中间体 DFT 计算配置
+  intermediate_opt:
+    enabled: true                  # 是否计算中间体 (reactant_complex)
+    charge: 0                      # 中间体电荷
+    multiplicity: 1                # 中间体自旋多重度
 
-  # Reactant 优化配置 (新增 v6.1+)
-  # Reactant 现在执行完整的 OPT + Freq + L2 SP 流程（而非仅 SP）
+  # Reactant 优化配置
   reactant_opt:
     enabled: true              # 启用 Reactant 优化（推荐保持 true）
     charge: 0                  # Reactant 电荷（通常为 0）
@@ -196,6 +321,9 @@ step3:
     berny: "Opt=(TS, CalcFC, NoEigenTest) Freq"
     qst2: "Opt=(QST2, CalcFC) Freq"
     irc: "IRC=(CalcFC, MaxPoints=50, StepSize=10)"
+  
+  # 严格禁用 QST2 救援策略（只使用 Berny）
+  disable_qst2_rescue: true
 
   # 片段处理配置
   fragments:
@@ -214,8 +342,9 @@ step4:
     - geometry
     - qc_checks
     - ts_quality
-    - asm_enrichment
-    - fmo_cdft_dipolar
+    - step1_activation
+    - step2_cyclization
+    - multiwfn_features
   features:
     - dG_activation
     - dG_reaction
@@ -237,13 +366,54 @@ step4:
       - geom.r_avg
       - geom.dr
       - geom.close_contacts_density
+      - ts.n_imag
       - ts.imag1_cm1_abs
-      - asm.distortion_total_kcal
-      - fmo_cdft_dipolar.omega_ev
+      - s1_dG_act
+      - s1_Keq_act
+      - s1_Nconf_eff
+      - s1_Sconf
+      - s1_E_avg_weighted
+      - s1_E_std
+      - s1_tau_CH_C_O
+      - s2_eps_homo
+      - s2_eps_lumo
+      - s2_mu
+      - s2_eta
+      - s2_omega
+      - s2_gedt_value
       - qc.sample_weight
   strict_qc:
     enabled: false
     sample_weight_policy: downweight
+
+  # V6.2 机理感知特征配置 (P0)
+  step4_features:
+    temperature_K: 298.15
+    units:
+      energy: "kcal/mol"
+      entropy: "cal/mol/K"
+    stage1:
+      small_molecule_name: "HOAc"
+      shermo_summary_filename: "shermo_summary.json"
+      conformer_energies_filename: "conformer_energies.json"
+    stage2:
+      fchk_preferred: true
+      cdft:
+        orbital_unit: "eV"
+        approx: "koopmans_orbital"
+      gedt:
+        sign_convention: "gedt_positive_if_electron_flows_nuc_to_elec"
+        charge_priority: ["NBO", "CM5", "MULLIKEN"]
+        fragment_rule: "forming_bonds_graph_cut_v1"
+    multiwfn:
+      enabled: false
+      cache_dir: ".cache/step4_multiwfn"
+      timeout_sec: 120
+      modules:
+        fukui: true
+        dual_descriptor: true
+        qtaim_bcp: false
+        nci: false
 
 # 运行模式配置 (Run Mode)
 # ========================
@@ -261,7 +431,7 @@ run:
   # dataset 模式配置 (当 source=dataset 时使用)
   dataset:
     format: "csv"       # 数据集格式: csv, tsv
-    path: "E:/Calculations/[5+2] Mechain learning/Scripts/ReactionProfileHunter/ReactionProfileHunter_20260121/reaxys_cleaned.csv"  # 数据集文件路径
+    path: "./data/reaxys_cleaned.csv"  # 数据集文件路径 (相对于项目根目录)
     product_smiles_col: "product_smiles_main"  # 产物SMILES列名
     delimiter: ","      # CSV分隔符
     id_col: "rx_id"     # 反应ID列名
@@ -269,7 +439,9 @@ run:
   # 通用运行选项
   output_root: ./rph_output  # 输出根目录 (会被global.work_dir_base覆盖)
   workdir_naming: "rx_{rx_id}"  # 工作目录命名模板
-  resume: true        # 是否启用断点续算
+  resume: true        # 是否启用断点续算 (Checkpoint/Resume)
+  resume_rehydrate: true # 当状态文件被删时，是否尝试从物理产物重建状态 (V6.3)
+  resume_rehydrate_policy: best_effort # 重建策略: strict (严格校验签名) / best_effort (兼容历史产物)
   dry_run: false      # 干运行模式（仅显示任务，不执行）
   max_tasks: 1        # 最大任务数 (0=无限制, 1=只读取第一行)
   filter_ids: []      # 过滤特定ID列表
@@ -285,6 +457,8 @@ global:
   checkpoint: true  # 是否启用断点续算
   # 程序查找顺序：配置文件 > 环境变量 > 系统 PATH
   enable_path_search: true  # 允许自动查找（如果配置文件中的路径不存在）
+  
+  small_molecule_cache_dir: null
 
 # ==================== Reference States (小分子参考态) ====================
 # 小分子离去基团目录，用于：
@@ -329,3 +503,45 @@ reference_states:
     #   smiles: "CC1=CC=C(C=C1)S(=O)(=O)O"
     #   charge: 0
     #   multiplicity: 1
+
+# ==================== Reaction Profiles (反应机理配置) ====================
+# 针对不同反应类型提供预置配置，key 以 "_" 开头表示内置模板
+# 使用方式: 在代码中根据反应类型选择对应 profile
+reaction_profiles:
+  # [5+2] 环加成反应默认配置
+  "[5+2]_default":
+    forming_bond_count: 2
+    # 扫描参数
+    scan:
+      scan_start_distance: 3.5
+      scan_end_distance: 2.0
+      scan_steps: 16
+      scan_mode: concerted
+      scan_force_constant: 0.8
+      min_valid_points: 6
+      reject_boundary_maximum: true
+
+  # [4+3] 环加成反应默认配置
+  "[4+3]_default":
+    forming_bond_count: 2
+    # 扫描参数
+    scan:
+      scan_start_distance: 3.5
+      scan_end_distance: 1.8
+      scan_steps: 20
+      scan_mode: concerted
+      scan_force_constant: 0.5
+      min_valid_points: 5
+      reject_boundary_maximum: true
+
+  # 通用兜底配置
+  "_universal":
+    forming_bond_count: 2
+    scan:
+      scan_start_distance: 3.5
+      scan_end_distance: 1.8
+      scan_steps: 20
+      scan_mode: concerted
+      scan_force_constant: 0.5
+      min_valid_points: 5
+      reject_boundary_maximum: true

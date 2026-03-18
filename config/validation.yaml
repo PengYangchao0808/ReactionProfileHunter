@@ -1,0 +1,175 @@
+# ReactionProfileHunter 验证配置
+# 基于 defaults.yaml 修改，降低计算成本以加速验证
+
+# ==================== 执行路径配置 ====================
+executables:
+  orca:
+    path: "/opt/software/orca/orca"
+    ld_library_path: "/opt/software/orca"
+  gaussian:
+    path: "/opt/software/gaussian/g16/g16"
+    root: "/opt/software/gaussian/g16"
+    profile: "/opt/software/gaussian/g16/g16.profile"
+    use_wrapper: false  # 验证时关闭wrapper简化流程
+  xtb:
+    path: "/opt/software/xtb/bin/xtb"
+    fallback_paths:
+      - "/opt/xtb/bin/xtb"
+      - "/usr/local/bin/xtb"
+  crest:
+    path: "/opt/software/crest/crest"
+  isostat:
+    path: "/root/molclus/isostat"
+  shermo:
+    path: "Shermo"
+
+# ==================== 热力学配置 ====================
+thermo:
+  temperature_k: 298.15
+  pressure_atm: 1.0
+  scl_zpe: 0.9905
+  ilowfreq: 2
+  imagreal: null
+  conc: null
+
+# ==================== 资源配置 ====================
+resources:
+  mem: "32GB"
+  nproc: 8
+  orca_maxcore_safety: 0.8
+
+# ==================== 理论水平配置 ====================
+theory:
+  # xTB预优化
+  preoptimization:
+    enabled: true
+    gfn_level: 2
+    solvent: acetone
+    nproc: 4
+    overlap_threshold: 1.0
+    opt_level: crude  # 快速模式
+
+  # 几何优化 - 使用ORCA避免Gaussian CPU兼容性问题
+  optimization:
+    method: B3LYP
+    basis: def2-SVP
+    dispersion: GD3BJ
+    engine: orca  # 改为orca避免Gaussian AVX指令集不兼容
+    nproc: 8
+    mem: 32GB
+    solvent: acetone
+
+  # 高精度单点能 - 验证时可先用较小基组
+  single_point:
+    method: wB97X-D3BJ
+    basis: def2-SVP  # 验证时临时降低，生产用def2-TZVPP
+    engine: orca
+    nproc: 8
+    maxcore: 1000
+    solvent: acetone
+    fallback_to_gaussian: true
+
+# ==================== 优化控制配置 ====================
+optimization_control:
+  timeout:
+    enabled: true
+    default_seconds: 3600  # 1小时超时
+  
+  oscillation:
+    window_size: 10
+    energy_tolerance: 0.0001
+    max_oscillation_count: 3
+  
+  hessian:
+    initial: calcfc
+    recalc_every: 10
+  
+  step:
+    max_step: 30
+    trust_radius: 0.3
+    adaptive: true
+  
+  convergence:
+    level: normal
+  
+  ts:
+    eigentest: false
+    follow_mode: 1
+    step_type: eigenvalue
+
+# ==================== Step1 构象搜索 ====================
+step1:
+  conformer_search:
+    two_stage_enabled: false  # 验证时关闭两阶段，加速
+    # 单阶段GFN2快速搜索
+    stage1_gfn0:
+      enabled: false
+    stage2_gfn2:
+      enabled: true
+      gfn_level: 2
+
+# ==================== Step3 反应物优化 ====================
+step3:
+  reactant_opt:
+    enable_nbo: false  # 验证时关闭NBO以加速
+    
+  ts_opt:
+    max_steps: 100
+    convergence: "normal"
+
+# ==================== Step4 特征提取 ====================
+step4:
+  enabled: true
+  enabled_plugins: null  # 启用所有插件
+
+# ==================== 运行配置 ====================
+run:
+  source: single
+  single:
+    product_smiles: "O=C1C[C@H]2C=C[C@]3(C[C@H]4COC(=O)N4[C@H]13)O2"
+    rx_id: "rx_9422028"
+    precursor_smiles: "C=C=CN1C(=O)OCC1Cc1ccco1"
+    leaving_group_key: null
+  
+  output_root: "./rph_output"
+  resume: false  # 验证时从头开始
+  resume_rehydrate: false
+  resume_rehydrate_policy: best_effort
+
+# ==================== 反应档案 ====================
+reaction_profiles:
+  "[4+3]_default":
+    forming_bond_count: 2
+    s2_strategy: forward_scan
+    scan:
+      scan_start_distance: 1.8
+      scan_end_distance: 3.2
+      scan_steps: 15  # 验证时减少步数
+      scan_mode: concerted
+      scan_force_constant: 0.5
+  
+  "[4+2]_default":
+    forming_bond_count: 2
+    s2_strategy: forward_scan
+    scan:
+      scan_start_distance: 2.0
+      scan_end_distance: 3.5
+      scan_steps: 15
+      scan_mode: concerted
+      scan_force_constant: 0.5
+  
+  "[5+2]_default":
+    forming_bond_count: 2
+    s2_strategy: retro_scan
+    scan:
+      scan_start_distance: 2.0
+      scan_end_distance: 3.5
+      scan_steps: 15
+      scan_mode: concerted
+      scan_force_constant: 0.5
+
+# ==================== 日志配置 ====================
+logging:
+  level: "INFO"
+  file: null  # 使用默认路径
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

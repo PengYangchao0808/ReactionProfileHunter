@@ -1,0 +1,90 @@
+Reaxys Data Cleaning Summary
+============================================================
+
+Total records: 74
+
+Quality Distribution:
+  GOOD: 25 (33.8%)
+  WARNING: 47 (63.5%)
+  ERROR: 2 (2.7%)
+
+Field Completeness:
+  precursor_smiles: 74/74 (100.0%)
+  product_smiles_main: 72/74 (97.3%)
+  product_smiles_all: 74/74 (100.0%)
+  is_multi_product: 74/74 (100.0%)
+  reactants_all: 74/74 (100.0%)
+  fragment_count: 74/74 (100.0%)
+  products_all: 74/74 (100.0%)
+  product_main_smiles: 72/74 (97.3%)
+  rxn_key: 72/74 (97.3%)
+  rxn_key_hash: 72/74 (97.3%)
+  rxn_smiles_mapped: 72/74 (97.3%)
+  map_status: 74/74 (100.0%)
+  map_fail_reason: 2/74 (2.7%)
+  mapping_confidence: 72/74 (97.3%)
+  precursor_type: 74/74 (100.0%)
+  precursor_subtype: 74/74 (100.0%)
+  core_atom_map: 64/74 (86.5%)
+  core_bond_changes: 64/74 (86.5%)
+  core_extraction_status: 74/74 (100.0%)
+  core_fail_reason: 10/74 (13.5%)
+  new_ring_size: 70/74 (94.6%)
+  reaction_type: 74/74 (100.0%)
+  reaction_type_confidence: 74/74 (100.0%)
+  reaction_evidence: 74/74 (100.0%)
+  topology: 74/74 (100.0%)
+  topology_evidence: 74/74 (100.0%)
+  cyclo_mode: 74/74 (100.0%)
+  cyclo_mode_reason: 74/74 (100.0%)
+  yield: 73/74 (98.6%)
+  yield_individual: 73/74 (98.6%)
+  yield_overall: 0/74 (0.0%)
+  yield_source: 74/74 (100.0%)
+  yield_amount: 73/74 (98.6%)
+  yield_unit: 73/74 (98.6%)
+  is_censored: 74/74 (100.0%)
+  is_upper_bound: 74/74 (100.0%)
+  is_interval: 74/74 (100.0%)
+  reactivity_label: 74/74 (100.0%)
+  de: 33/74 (44.6%)
+  ee: 28/74 (37.8%)
+  dr_major: 24/74 (32.4%)
+  dr_minor: 24/74 (32.4%)
+  stereo_source: 61/74 (82.4%)
+  temp_celsius: 69/74 (93.2%)
+  temp_kelvin: 69/74 (93.2%)
+  temp_min_c: 69/74 (93.2%)
+  temp_max_c: 69/74 (93.2%)
+  temp_profile_raw: 74/74 (100.0%)
+  solvent: 0/74 (0.0%)
+  base: 0/74 (0.0%)
+  time_total_h: 33/74 (44.6%)
+  n_stages_time: 74/74 (100.0%)
+  has_lewis_acid: 74/74 (100.0%)
+  has_metal_catalyst: 74/74 (100.0%)
+  n_solvents: 74/74 (100.0%)
+  n_reagents: 74/74 (100.0%)
+  n_catalysts: 74/74 (100.0%)
+  solvents_str: 0/74 (0.0%)
+  reagents_str: 0/74 (0.0%)
+  catalysts_str: 33/74 (44.6%)
+  leaving_group: 2/74 (2.7%)
+  mass_balance_status: 74/74 (100.0%)
+  mass_balance_ok: 74/74 (100.0%)
+  yield_status: 74/74 (100.0%)
+  has_stereo: 74/74 (100.0%)
+  stereo_consistency: 74/74 (100.0%)
+  quality_flag: 74/74 (100.0%)
+  notes: 50/74 (67.6%)
+
+Records with yield data: 73
+Average yield: 60.8%
+
+Records with de: 33
+Records with ee: 28
+
+Mass balance passed: 0/74
+
+Leaving Group Distribution:
+  UNKNOWN: 2

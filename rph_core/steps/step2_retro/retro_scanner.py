@@ -1,36 +1,44 @@
-"""
-Step 2: Retro Scanner
-======================
-
-逆向扫描模块 - 从产物逆向生成TS初猜和底物
-
-Author: QCcalc Team
-Date: 2026-01-09
-"""
-
 import json
 import logging
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple, Optional, Dict, Any
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from rph_core.utils.log_manager import LoggerMixin
 from rph_core.utils.file_io import read_xyz, write_xyz
-from rph_core.utils.geometry_tools import LogParser
-from rph_core.utils.xtb_runner import XTBRunner
+from rph_core.utils.geometry_tools import GeometryUtils, LogParser
+from rph_core.utils.log_manager import LoggerMixin
+from rph_core.utils.naming_compat import (
+    INTERMEDIATE_XYZ,
+    REACTANT_COMPLEX_XYZ,
+    create_intermediate_alias,
+)
+from rph_core.utils.qc_interface import XTBInterface
+from rph_core.utils.gau_xtb_interface import GauXTBOptimizer
+from rph_core.utils.scan_profile_plotter import (
+    find_ts_and_dipole_guess,
+    compute_scan_distances,
+)
 from rph_core.utils.tsv_dataset import ReactionRecord
-from .smarts_matcher import SMARTSMatcher
+from rph_core.utils.ui import get_progress_manager
+
 from .bond_stretcher import BondStretcher
+from .geometry_guard import (
+    compare_graph_topology,
+    check_scan_trajectory,
+    detect_risky_contacts,
+    generate_keepaway_constraints,
+    TopologyGuardResult,
+    RiskyContactResult,
+)
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class RetroScanResultV2:
-    """Result object for retro scanning with extended contract."""
     ts_guess_xyz: Optional[Path]
     reactant_xyz: Optional[Path]
     forming_bonds: Optional[Tuple[Tuple[int, int], Tuple[int, int]]]
@@ -39,296 +47,354 @@ class RetroScanResultV2:
 
 
 class RetroScanner(LoggerMixin):
-    """
-    逆向扫描引擎 (Step 2) - v3.0/v6.1
-
-    v2.1 核心创新: Product-First 策略
-    v3.0/v6.1 更新: 适配分子自治及扁平目录结构
-
-    职责:
-    1. 识别产物中的形成键 (SMARTS)
-    2. 路径 A: 生成 TS 初猜 (拉伸至 2.2Å + 受限优化)
-    3. 路径 B: 生成底物 (拉伸至 3.5Å + 无限制优化)
-
-    输入:
-    - product_xyz: 产物全局最低构象 (来自 Step 1，可能是文件或目录)
-
-    输出:
-    - ts_guess_xyz: TS 初猜结构
-    - reactant_xyz: 底物复合物结构
-    """
-
-    # 默认参数
-    DEFAULT_TS_DISTANCE = 2.2  # Å - TS 典型距离 (✅ PROMOTE.md 标准)
-    DEFAULT_BREAK_DISTANCE = 3.50  # Å - 断裂距离
+    DEFAULT_SCAN_START_DISTANCE = 3.5
+    DEFAULT_SCAN_END_DISTANCE = 1.8
+    DEFAULT_SCAN_STEPS = 20
+    DEFAULT_SCAN_MODE = "concerted"
+    DEFAULT_SCAN_FORCE_CONSTANT = 0.5
+    DEFAULT_MIN_VALID_POINTS = 5
+    DEFAULT_INTERMEDIATE_MIN_RMSD = 0.15
 
     def __init__(self, config: Dict[str, Any], molecule_name: Optional[str] = None):
-        """
-        初始化逆向扫描引擎 - v3.0/v6.1
-
-        Args:
-            config: 配置字典
-            molecule_name: 分子名称（用于定位 v3.0/v6.1 目录结构）
-        """
         self.config = config
-        self.ts_distance = config.get('ts_distance', self.DEFAULT_TS_DISTANCE)
-        self.break_distance = config.get('break_distance', self.DEFAULT_BREAK_DISTANCE)
+        self.step2_cfg = config.get("step2", {}) if isinstance(config, dict) else {}
         self.molecule_name = molecule_name
-
-        self.xtb_runner = XTBRunner(config)
-
-        # 初始化 SMARTS 匹配器
-        self.smarts_matcher = SMARTSMatcher()
-
-        # 初始化键拉伸器
         self.bond_stretcher = BondStretcher()
+        self._seed_guard_result: Optional[Dict[str, Any]] = None
+        self.logger.info("[S2] RetroScanner initialized (direct product scan)")
 
-        self.logger.info(f"RetroScanner v3.0/v6.1 初始化: TS距离={self.ts_distance}Å, 断裂距离={self.break_distance}Å")
-        if molecule_name:
-            self.logger.info(f"  目标分子: {molecule_name}")
+    def _update_ui_status(self, output_dir: Path, status_text: str) -> None:
+        pm = get_progress_manager()
+        pm.update_step("s2", description=status_text)
 
-    def run(self, product_xyz: Path, output_dir: Path, molecule_name: Optional[str] = None) -> Tuple[Path, Path, Tuple[Tuple[int, int], Tuple[int, int]]]:
-        """
-        执行逆向扫描 - v3.0/v6.1 (Legacy Path)
+        status_file = output_dir / ".rph_step_status.json"
+        try:
+            with open(status_file, "w") as f:
+                json.dump({"step": "s2", "description": status_text}, f)
+        except Exception as exc:
+            self.logger.warning(f"[S2] Failed to write status file: {exc}")
 
-        NOTE: This is the legacy run() method maintained for backward compatibility.
-        For new code requiring neutral precursor support, use run_with_precursor() instead.
+    def _resolve_product_file(self, product_xyz: Path) -> Path:
+        product_xyz = Path(product_xyz)
+        if not product_xyz.exists():
+            raise FileNotFoundError(f"S2 product input not found: {product_xyz}")
+        if product_xyz.is_file():
+            return product_xyz
 
-        Args:
-            product_xyz: 产物 XYZ 文件路径（v2.1）或 S1_ConfGeneration 目录（v3.0/v6.1）
-            output_dir: 输出目录
-            molecule_name: 分子名称（v3.0，用于定位分子自治目录，默认 "product"）
+        candidates = [
+            product_xyz / "product_min.xyz",
+            product_xyz / "product" / "product_global_min.xyz",
+            product_xyz / "product_global_min.xyz",
+            product_xyz / "product" / "global_min.xyz",
+            product_xyz / "global_min.xyz",
+        ]
+        resolved = next((p for p in candidates if p.exists()), None)
+        if resolved is None:
+            raise RuntimeError(
+                f"Cannot resolve product structure from {product_xyz}; tried: {[str(p) for p in candidates]}"
+            )
+        return resolved
 
-        Returns:
-            (ts_guess_xyz, reactant_xyz, forming_bonds) 元组
-            - forming_bonds: ((atom_idx1, atom_idx2), (atom_idx3, atom_idx4)) 形成键索引
-        """
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+    def _validate_forming_bonds(self, forming_bonds: Sequence[Tuple[int, int]]) -> Tuple[Tuple[int, int], ...]:
+        normalized: List[Tuple[int, int]] = []
+        for pair in forming_bonds:
+            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                continue
+            i, j = int(pair[0]), int(pair[1])
+            if i == j:
+                continue
+            normalized.append((i, j))
 
-        # v3.0/v6.1 目录适配逻辑
-        if product_xyz.is_dir():
-            # v3.0: product_xyz 是 S1_ConfGeneration 目录
-            self.logger.info(f"检测到 v3.0/v6.1 目录结构: {product_xyz}")
+        if not normalized:
+            raise RuntimeError("S2 requires non-empty forming_bonds; got empty/invalid input")
+        return tuple(normalized)
 
-            product_min_xyz = None
-            
-            # 1. 优先尝试直接在目录中查找 (v6.1 扁平结构)
-            direct_patterns = [
-                "product_min.xyz",
-                f"{molecule_name}_min.xyz" if molecule_name else None,
-                f"{self.molecule_name}_min.xyz" if self.molecule_name else None,
-            ]
-            for pattern in direct_patterns:
-                if pattern is not None:
-                    candidate = product_xyz.joinpath(pattern)
-                    if candidate.exists():
-                        product_min_xyz = candidate
-                        self.logger.info(f"直接在目录中找到产物文件: {product_min_xyz}")
-                        break
-
-            if product_min_xyz is None:
-                # 2. 回退到分子子目录结构 (v3.0 分子自治结构)
-                molecule_dir = None
-                # 尝试定位分子目录
-                if molecule_name is not None:
-                    molecule_dir = product_xyz.joinpath(molecule_name)
-                elif self.molecule_name is not None:
-                    molecule_dir = product_xyz.joinpath(self.molecule_name)
-                else:
-                    # 自动查找分子目录 (排除 . 开头的和 dft/crest 等工具目录)
-                    excluded = {'.', 'dft', 'crest', 'cluster', 'xtb2', 'S2_Retro', 'S3_TS', 'S4_Data'}
-                    molecule_dirs = [d for d in product_xyz.iterdir() if d.is_dir() and not d.name.startswith('.') and d.name not in excluded]
-                    if len(molecule_dirs) == 1:
-                        molecule_dir = molecule_dirs[0]
-                        self.logger.info(f"自动检测到分子子目录: {molecule_dir.name}")
-                    elif len(molecule_dirs) > 1:
-                        # 如果有多个，优先选择 'product'
-                        product_dir = product_xyz / "product"
-                        if product_dir.exists() and product_dir.is_dir():
-                            molecule_dir = product_dir
-                        else:
-                            raise RuntimeError(
-                                f"发现多个候选分子目录: {[d.name for d in molecule_dirs]}。"
-                                f"请显式指定 molecule_name 参数。"
-                            )
-                
-                if molecule_dir and molecule_dir.exists():
-                    # 查找全局最低构象文件
-                    global_min_patterns = [
-                        "product_min.xyz",
-                        f"{molecule_dir.name}_min.xyz",
-                        f"{molecule_dir.name}_global_min.xyz",
-                        "global_min.xyz",
-                    ]
-
-                    for pattern in global_min_patterns:
-                        candidate = molecule_dir.joinpath(pattern)
-                        if candidate.exists():
-                            product_min_xyz = candidate
-                            self.logger.info(f"在子目录中找到产物文件: {product_min_xyz}")
-                            break
-
-                    if product_min_xyz is None:
-                        # 回退：查找 dft 目录中的 SP 输出
-                        dft_dir = molecule_dir.joinpath("dft")
-                        if dft_dir.exists():
-                            sp_files = list(dft_dir.glob("*_SP.out"))
-                            if sp_files:
-                                product_min_xyz = sp_files[0]
-                                self.logger.info(f"使用 SP 输出文件: {product_min_xyz}")
-                else:
-                    # 既没直接找到文件，也没找到合适的子目录
-                    raise RuntimeError(
-                        f"在 {product_xyz} 中未找到产物文件 (product_min.xyz) 或分子子目录。"
-                    )
-
-            if product_min_xyz is None:
-                raise RuntimeError(
-                    f"无法在 {product_xyz} (或其子目录) 中找到产物结构文件。"
-                )
-        else:
-            # v2.1: product_xyz 直接是文件路径
-            self.logger.info("使用 v2.1 直接文件路径")
-            product_min_xyz = product_xyz
-
-        self.logger.info("Step 2 开始: 逆向扫描")
-        self.logger.info(f"输入产物: {product_min_xyz}")
-
-        # 使用 LogParser 提取坐标（确保兼容性）
-        coords, symbols, error = LogParser.extract_last_converged_coords(
-            product_min_xyz,
-            engine_type='auto'
-        )
-
-        if coords is None:
-            self.logger.warning(f"LogParser 失败: {error}，回退到常规 XYZ 读取")
-            coords, symbols = read_xyz(product_min_xyz)
-        else:
-            self.logger.info(f"使用 LogParser 成功提取 {len(coords)} 个原子坐标")
-            if symbols is None:
-                self.logger.warning("未提取到元素符号，回退到常规 XYZ 读取")
-                _, symbols = read_xyz(product_min_xyz)
-
-        # 1. 识别反应键位点 (SMARTS 匹配)
-        self.logger.info("识别反应键位点...")
-        match_result = self.smarts_matcher.find_reactive_bonds(product_min_xyz)
-
-        if not match_result.matched:
-            raise ValueError(f"SMARTS 匹配失败: {match_result.error_message}")
-
-        if match_result.bond_1 is None or match_result.bond_2 is None:
-            raise ValueError("SMARTS 匹配失败: 缺少形成键信息")
-
-        bond_1 = (match_result.bond_1.atom_idx_1, match_result.bond_1.atom_idx_2)
-        bond_2 = (match_result.bond_2.atom_idx_1, match_result.bond_2.atom_idx_2)
-        bond_1_length = match_result.bond_1.current_length
-        bond_2_length = match_result.bond_2.current_length
-
-        self.logger.info(f"  识别到形成键1: {bond_1} (当前 {bond_1_length:.2f}Å)")
-        self.logger.info(f"  识别到形成键2: {bond_2} (当前 {bond_2_length:.2f}Å)")
-        self.logger.info(f"  匹配模式: {match_result.pattern_name} (置信度 {match_result.confidence:.2f})")
-
-        # ==========================================
-        # 路径 A: 生成 TS 初猜 (拉伸至 TS 距离)
-        # ==========================================
-        self.logger.info(f"路径 A: 拉伸键至 {self.ts_distance}Å (TS 初猜)...")
-
-        ts_raw_coords = self.bond_stretcher.stretch_two_bonds(
-            coords.copy(), bond_1, bond_2, target_length=self.ts_distance
-        )
-
-        # 保存拉伸后的结构
-        ts_raw_xyz = output_dir / "ts_raw_stretched.xyz"
-        write_xyz(ts_raw_xyz, ts_raw_coords, symbols, title="TS Raw Stretched")
-
-        # 受限优化：保持键长固定
-        ts_constraints = {
-            f"{bond_1[0]+1} {bond_1[1]+1}": self.ts_distance,
-            f"{bond_2[0]+1} {bond_2[1]+1}": self.ts_distance
+    def _get_topology_guard_config(self) -> Dict[str, Any]:
+        """Get topology guard configuration with defaults."""
+        scan_cfg = dict(self.step2_cfg.get("scan", {}) or {})
+        return {
+            "enabled": scan_cfg.get("topology_guard_enabled", True),
+            "graph_scale": scan_cfg.get("topology_graph_scale", 1.25),
+            "near_bond_ratio": scan_cfg.get("risk_contact_ratio_threshold", 0.85),
+            "near_bond_max": scan_cfg.get("risk_contact_abs_cutoff_A", 2.2),
+            "min_shrink_ratio": scan_cfg.get("min_shrink_ratio", 0.75),
+            "max_risky_pairs": scan_cfg.get("keep_apart_max_pairs", 6),
+            "keep_apart_floor": scan_cfg.get("keep_apart_floor_A", 3.0),
+            "constraint_force": scan_cfg.get("keep_apart_force_constant", 0.5),
+            "retry_force": scan_cfg.get("keep_apart_retry_force_constant", 1.0),
+            "retry_once": scan_cfg.get("topology_retry_once", True),
         }
 
-        xtb_settings = self.config.get('step2', {}).get('xtb_settings', {})
-        solvent = xtb_settings.get('solvent', 'acetone')
-        charge = 0
-        uhf = 0
+    def _resolve_scan_params(self, scan_config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        scan_cfg = dict((self.step2_cfg.get("scan", {}) or {}))
+        if scan_config:
+            scan_cfg.update(scan_config)
 
-        ts_opt_dir = output_dir / "ts_opt"
-        ts_opt_dir.mkdir(parents=True, exist_ok=True)
-        self.xtb_runner.work_dir = ts_opt_dir
-        self.logger.info(f"运行 XTB 受限优化 (溶剂={solvent})...")
-        ts_result = self.xtb_runner.optimize(
-            structure=ts_raw_xyz,
-            constraints=ts_constraints,
-            solvent=solvent,
-            charge=charge,
-            uhf=uhf
-        )
+        start = float(scan_cfg.get("scan_start_distance", scan_cfg.get("start_distance", self.DEFAULT_SCAN_START_DISTANCE)))
+        end = float(scan_cfg.get("scan_end_distance", scan_cfg.get("end_distance", self.DEFAULT_SCAN_END_DISTANCE)))
+        steps = int(scan_cfg.get("scan_steps", scan_cfg.get("steps", self.DEFAULT_SCAN_STEPS)))
+        mode = str(scan_cfg.get("scan_mode", self.DEFAULT_SCAN_MODE))
+        force_constant = float(scan_cfg.get("scan_force_constant", self.DEFAULT_SCAN_FORCE_CONSTANT))
+        min_valid_points = int(scan_cfg.get("min_valid_points", self.DEFAULT_MIN_VALID_POINTS))
+        reject_boundary_maximum = bool(scan_cfg.get("reject_boundary_maximum", True))
+        require_local_peak = bool(scan_cfg.get("require_local_peak", False))
+        boundary_retry_once = bool(scan_cfg.get("boundary_retry_once", True))
+        boundary_retry_delta = float(scan_cfg.get("boundary_retry_delta", 0.3))
+        boundary_retry_extra_steps = int(scan_cfg.get("boundary_retry_extra_steps", 6))
+        allow_boundary_degradation = bool(scan_cfg.get("allow_boundary_degradation", True))
 
-        if ts_result.success:
-            ts_guess_xyz = output_dir / "ts_guess.xyz"
-            if ts_result.output_file is None:
-                ts_guess_xyz = ts_raw_xyz
-                self.logger.warning("TS 优化成功但缺少输出文件，回退到拉伸结构")
-            else:
-                ts_coordinates = Path(ts_result.output_file)
-                try:
-                    shutil.copy(ts_coordinates, ts_guess_xyz)
-                except shutil.SameFileError:
-                    pass
-                self.logger.info(f"TS 受限优化成功: {ts_guess_xyz}")
+        if start <= end:
+            raise RuntimeError(f"S2 inward scan requires start_distance > end_distance, got start={start}, end={end}")
+        if steps <= 1:
+            raise RuntimeError(f"S2 scan_steps must be > 1, got {steps}")
+
+        return {
+            "scan_start_distance": start,
+            "scan_end_distance": end,
+            "scan_steps": steps,
+            "scan_mode": mode,
+            "scan_force_constant": force_constant,
+            "min_valid_points": min_valid_points,
+            "reject_boundary_maximum": reject_boundary_maximum,
+            "require_local_peak": require_local_peak,
+            "boundary_retry_once": boundary_retry_once,
+            "boundary_retry_delta": boundary_retry_delta,
+            "boundary_retry_extra_steps": boundary_retry_extra_steps,
+            "allow_boundary_degradation": allow_boundary_degradation,
+            "scan_policy": scan_cfg.get("scan_policy", "policy_c"),
+        }
+
+    def _execute_scan(
+        self,
+        start_xyz: Path,
+        output_dir: Path,
+        bonds: Tuple[Tuple[int, int], ...],
+        params: Dict[str, Any],
+        direction: str,
+        charge: int = 0,
+        spin: int = 1,
+    ) -> Tuple[Any, List[float], int, bool, bool]:
+        """核心扫描执行 (V5.1) - with ScanPolicySelector"""
+        scan_policy_name = params.get("scan_policy", "policy_c")
+        from rph_core.steps.step2_retro.scan_policies import ScanPolicySelector
+        selector = ScanPolicySelector()
+
+        if direction == "inward":
+            start_dist = params["scan_start_distance"]
+            end_dist = params["scan_end_distance"]
+        elif direction == "outward":
+            start_dist = params["scan_end_distance"]
+            end_dist = params["scan_start_distance"]
         else:
-            ts_guess_xyz = ts_raw_xyz
-            self.logger.warning(f"TS 受限优化失败: {ts_result.error_message}, 使用拉伸后结构")
+            raise ValueError(f"Unknown direction: {direction}")
 
+        scan_constraints, force_constant = selector.select_policy(bonds, scan_policy_name, start_dist)
 
-        # ==========================================
-        # 路径 B: 生成底物 (拉伸至断裂距离 + 松弛)
-        # ==========================================
-        self.logger.info(f"路径 B: 拉伸键至 {self.break_distance}Å (底物)...")
+        xtb_settings = self.step2_cfg.get("xtb_settings", {}) or {}
+        solvent = str(xtb_settings.get("solvent", self.config.get("theory", {}).get("optimization", {}).get("solvent", "acetone")))
+        nproc = int(self.config.get("resources", {}).get("nproc", 1))
 
-        reactant_raw_coords = self.bond_stretcher.stretch_two_bonds(
-            coords.copy(), bond_1, bond_2, target_length=self.break_distance
-        )
-
-        reactant_raw_xyz = output_dir / "reactant_raw_stretched.xyz"
-        write_xyz(reactant_raw_xyz, reactant_raw_coords, symbols, title="Reactant Raw Stretched")
-
-        reactant_opt_dir = output_dir / "reactant_opt"
-        reactant_opt_dir.mkdir(parents=True, exist_ok=True)
-        self.xtb_runner.work_dir = reactant_opt_dir
-        self.logger.info(f"运行 XTB 无约束松弛优化 (溶剂={solvent})...")
-        reactant_result = self.xtb_runner.optimize(
-            structure=reactant_raw_xyz,
-            constraints=None,
-            solvent=solvent,
+        xtb = XTBInterface(solvent=solvent, nproc=nproc, config=self.config)
+        result = xtb.scan(
+            xyz_file=start_xyz,
+            output_dir=output_dir,
+            constraints=scan_constraints,
+            scan_range=(start_dist, end_dist),
+            scan_steps=params["scan_steps"],
+            scan_mode=params["scan_mode"],
+            scan_force_constant=force_constant,
             charge=charge,
-            uhf=uhf
+            spin=spin,
         )
 
-        if reactant_result.success:
-            reactant_xyz = output_dir / "reactant_complex.xyz"
-            if reactant_result.output_file is None:
-                reactant_xyz = reactant_raw_xyz
-                self.logger.warning("底物优化成功但缺少输出文件，回退到拉伸结构")
+        if not result.success or not result.energies:
+            raise RuntimeError(f"S2 {direction} scan failed or returned no energies")
+
+        energies_local = [float(e) for e in result.energies]
+        if len(energies_local) < params["min_valid_points"]:
+            raise RuntimeError(f"S2 {direction} scan returned too few valid points: {len(energies_local)} < {params['min_valid_points']}")
+
+        max_idx_local = max(range(len(energies_local)), key=energies_local.__getitem__)
+        boundary_local = max_idx_local in {0, len(energies_local) - 1}
+        local_peak_local = False
+        if 0 < max_idx_local < len(energies_local) - 1:
+            local_peak_local = (
+                energies_local[max_idx_local] > energies_local[max_idx_local - 1]
+                and energies_local[max_idx_local] > energies_local[max_idx_local + 1]
+            )
+        return result, energies_local, max_idx_local, boundary_local, local_peak_local
+
+    def _map_bonds(self, forming_bonds: Sequence[Tuple[int, int]], atom_map: Optional[Dict[int, int]]) -> Tuple[Tuple[int, int], ...]:
+        if not atom_map:
+            return self._validate_forming_bonds(forming_bonds)
+        mapped = []
+        for pair in forming_bonds:
+            if int(pair[0]) in atom_map and int(pair[1]) in atom_map:
+                mapped.append((atom_map[int(pair[0])], atom_map[int(pair[1])]))
             else:
-                reactant_coordinates = Path(reactant_result.output_file)
-                try:
-                    shutil.copy(reactant_coordinates, reactant_xyz)
-                except shutil.SameFileError:
-                    pass
-                self.logger.info(f"底物松弛优化成功: {reactant_xyz}")
+                self.logger.warning(f"Could not map MapId bond {pair} using atom_map. Falling back to using it as MolIdx.")
+                mapped.append((int(pair[0]), int(pair[1])))
+        return self._validate_forming_bonds(mapped)
+
+    def run_retro_scan(
+        self,
+        product_xyz: Path,
+        output_dir: Path,
+        forming_bonds: Sequence[Tuple[int, int]],
+        scan_config: Optional[Dict[str, Any]] = None,
+        atom_map: Optional[Dict[int, int]] = None,
+    ) -> Tuple[Path, Path, Path, Tuple[Tuple[int, int], ...], Path, str, str, Tuple[str, ...], Optional[Path]]:
+        """向外扫描 (V5.1 Product-Seeded Relaxed Scan)"""
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        bonds = self._map_bonds(forming_bonds, atom_map)
+        product_file = self._resolve_product_file(product_xyz)
+        params = self._resolve_scan_params(scan_config)
+
+        self.logger.info("[S2] Retro Scan (Product -> Reactant) started")
+        xtb_settings = self.step2_cfg.get("xtb_settings", {}) or {}
+        charge = int(xtb_settings.get("charge", 0))
+        spin = int(xtb_settings.get("multiplicity", 1))
+
+        # Direct outward scan from Product
+        scan_dir = output_dir / "retro_scan"
+        scan_result, energies, max_idx, boundary_max, peak_ok = self._execute_scan(
+            start_xyz=product_file,
+            output_dir=scan_dir,
+            bonds=bonds,
+            params=params,
+            direction="outward",
+            charge=charge,
+            spin=spin,
+        )
+
+        if scan_result.ts_guess_xyz is None or not Path(scan_result.ts_guess_xyz).exists():
+            raise RuntimeError("S2 retro scan did not provide ts_guess geometry")
+
+        scan_start = params["scan_start_distance"]
+        scan_end = params["scan_end_distance"]
+        scan_steps = params["scan_steps"]
+        distances = compute_scan_distances(scan_start, scan_end, scan_steps, direction="outward")
+        
+        ts_distance, dipole_distance = find_ts_and_dipole_guess(
+            distances, energies, energies_in_hartree=True
+        )
+        
+        ts_guess_idx = 0
+        dipole_idx = 0
+        if ts_distance is not None and len(distances) > 0:
+            ts_guess_idx = min(range(len(distances)), key=lambda i: abs(distances[i] - ts_distance))
+            self.logger.info(f"[S2] Knee point algorithm: TS guess at index {ts_guess_idx}, distance {distances[ts_guess_idx]:.3f} Å")
+        
+        if dipole_distance is not None and len(distances) > 0:
+            dipole_idx = min(range(len(distances)), key=lambda i: abs(distances[i] - dipole_distance))
+            self.logger.info(f"[S2] Knee point algorithm: Dipole at index {dipole_idx}, distance {distances[dipole_idx]:.3f} Å")
+
+        if isinstance(scan_result.geometries, list) and len(scan_result.geometries) > ts_guess_idx:
+            ts_guess_geom = scan_result.geometries[ts_guess_idx]
+            if ts_guess_geom and Path(ts_guess_geom).exists():
+                self.logger.info(f"[S2] Using knee point TS guess: {ts_guess_geom}")
+            else:
+                ts_guess_geom = scan_result.ts_guess_xyz
         else:
-            reactant_xyz = reactant_raw_xyz
-            self.logger.warning(f"底物松弛优化失败: {reactant_result.error_message}, 使用拉伸后结构")
+            ts_guess_geom = scan_result.ts_guess_xyz
+        
+        if isinstance(scan_result.geometries, list) and len(scan_result.geometries) > dipole_idx:
+            dipole_geom = scan_result.geometries[dipole_idx]
+            if dipole_geom and Path(dipole_geom).exists():
+                self.logger.info(f"[S2] Using knee point dipole: {dipole_geom}")
+            else:
+                dipole_geom = ts_guess_geom
+        else:
+            dipole_geom = ts_guess_geom
 
+        intermediate_xyz = output_dir / INTERMEDIATE_XYZ
+        shutil.copy2(Path(dipole_geom), intermediate_xyz)
+        create_intermediate_alias(Path(dipole_geom), output_dir)
+        self.logger.info(f"[S2] Intermediate structure: {intermediate_xyz}")
+        self.logger.info(f"[S2] Backward compatibility alias: {REACTANT_COMPLEX_XYZ}")
+        
+        # Backward compatibility: keep both variable names for existing code
+        reactant_complex_xyz = intermediate_xyz
 
-        self.logger.info(f"Step 2 完成:")
-        self.logger.info(f"  TS 初猜: {ts_guess_xyz}")
-        self.logger.info(f"  底物: {reactant_xyz}")
+        degraded_reasons: List[str] = []
+        status = "COMPLETE"
+        ts_guess_confidence = "high"
 
-        # 返回初猜路径和识别到的键指数
-        return (ts_guess_xyz, reactant_xyz, (bond_1, bond_2))
+        trajectory_check: Dict[str, Any] = {"checked": False, "off_path_count": 0}
+        guard_cfg = self._get_topology_guard_config()
+        if guard_cfg.get("enabled", True) and isinstance(scan_result.geometries, list):
+            coords, symbols, _ = LogParser.extract_last_converged_coords(product_file, engine_type="auto")
+            if coords is None or symbols is None:
+                coords, symbols = read_xyz(product_file)
+            assert symbols is not None, "symbols should not be None after fallback"
+            trajectory_check = check_scan_trajectory(
+                product_coords=coords,
+                symbols=symbols,
+                forming_bonds=list(bonds),
+                frame_paths=[g for g in scan_result.geometries if isinstance(g, Path)],
+                graph_scale=guard_cfg.get("graph_scale", 1.25),
+            )
+            if trajectory_check.get("off_path_count", 0) > 0:
+                degraded_reasons.append("scan_topology_drift_detected")
+                status = "DEGRADED"
+                ts_guess_confidence = "low"
+
+        scan_profile_json = output_dir / "scan_profile.json"
+        with open(scan_profile_json, "w") as f:
+            json.dump({
+                "generation_method": "retro_scan_from_product",
+                "product_xyz": str(product_file),
+                "intermediate_xyz": str(intermediate_xyz),
+                "reactant_complex_xyz": str(reactant_complex_xyz),
+                "forming_bonds": [list(pair) for pair in bonds],
+                "scan_parameters": params,
+                "knee_point_algorithm": {
+                    "ts_distance": ts_distance,
+                    "dipole_distance": dipole_distance,
+                    "ts_geometry_index": ts_guess_idx,
+                    "dipole_geometry_index": dipole_idx,
+                },
+                "scan_quality": {
+                    "max_energy_index": max_idx,
+                    "max_energy": energies[max_idx] if energies else 0,
+                    "boundary_maximum": boundary_max,
+                    "local_peak_ok": peak_ok,
+                    "status": status,
+                    "ts_guess_confidence": ts_guess_confidence,
+                    "degraded_reasons": degraded_reasons,
+                    "trajectory_check": trajectory_check,
+                },
+                "energies_hartree": energies,
+            }, f, indent=2)
+
+        ts_guess_xyz_final = output_dir / "ts_guess.xyz"
+        shutil.copy2(Path(ts_guess_geom), ts_guess_xyz_final)
+        shutil.copy2(Path(ts_guess_geom), output_dir / "ts_guess_s2.1.xyz")
+
+        # Gau_XTB TS optimization for S2.1
+        ts_guess_s2_1_gau_xtb = None
+        gau_xtb_energy = None
+        if self.step2_cfg.get("gau_xtb", {}).get("enabled", False):
+            self.logger.info("[S2.1] Running Gau_XTB TS optimization")
+            ts_guess_s2_1_gau_xtb, gau_xtb_energy = self._run_gau_xtb_optimization(
+                ts_guess_xyz=ts_guess_xyz_final,
+                output_dir=output_dir / "gau_xtb_s2.1",
+                task_name="TS-S2.1-001",
+                forming_bonds=list(bonds)
+            )
+        
+        return (
+            ts_guess_xyz_final,
+            reactant_complex_xyz,
+            reactant_complex_xyz,
+            bonds,
+            scan_profile_json,
+            status,
+            ts_guess_confidence,
+            tuple(degraded_reasons),
+            ts_guess_s2_1_gau_xtb
+        )
 
     def run_with_precursor(
         self,
@@ -337,92 +403,69 @@ class RetroScanner(LoggerMixin):
         output_dir: Path,
         enabled: Optional[bool] = None,
         strategy: str = "reactant_complex",
-        output_meta: bool = False
+        output_meta: bool = False,
     ) -> RetroScanResultV2:
-        """
-        Run retro scan with neutral precursor support (V5.2-M1 contract).
-
-        Args:
-            reactant_complex_xyz: Path to reactant_complex.xyz (from run() method)
-            record: Reaction record containing precursor_smiles
-            output_dir: Output directory for neutral_precursor.xyz and meta.json
-            enabled: Override neutral_precursor.enabled (None = use config default)
-            strategy: Strategy for neutral precursor generation ("reactant_complex" only supported)
-            output_meta: Whether to write meta.json
-
-        Returns:
-            RetroScanResultV2 with:
-            - ts_guess_xyz, reactant_xyz, forming_bonds: None (not generated by this method)
-            - neutral_precursor_xyz: Path to neutral precursor (or None if disabled/error)
-            - meta_json_path: Path to meta.json (or None if not written)
-
-        Note:
-            This method should be called after run() generates reactant_complex.xyz.
-            For "reactant_complex" strategy, neutral precursor = reactant complex (direct copy).
-        """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
         check_enabled = enabled
         if check_enabled is None:
-            check_enabled = self.config.get('step2', {}).get('neutral_precursor', {}).get('enabled', False)
+            check_enabled = self.config.get("step2", {}).get("neutral_precursor", {}).get("enabled", False)
 
         if not check_enabled:
-            self.logger.info("Neutral precursor generation disabled (enabled=False)")
+            self.logger.info("[S2] Neutral precursor generation disabled (enabled=False)")
             return RetroScanResultV2(
                 ts_guess_xyz=None,
                 reactant_xyz=None,
                 forming_bonds=None,
                 neutral_precursor_xyz=None,
-                meta_json_path=None
+                meta_json_path=None,
             )
 
-        self.logger.info(f"Neutral precursor generation enabled with strategy: {strategy}")
-
+        self.logger.info(f"[S2] Neutral precursor generation enabled with strategy: {strategy}")
         if strategy != "reactant_complex":
-            self.logger.warning(f"Unsupported strategy: {strategy}, defaulting to reactant_complex")
+            self.logger.warning(f"[S2] Unsupported strategy: {strategy}, defaulting to reactant_complex")
             strategy = "reactant_complex"
 
         reactant_complex_xyz = Path(reactant_complex_xyz)
         if not reactant_complex_xyz.exists():
-            self.logger.error(f"Reactant complex file not found: {reactant_complex_xyz}")
+            self.logger.error(f"[S2] Reactant complex file not found: {reactant_complex_xyz}")
             return RetroScanResultV2(
                 ts_guess_xyz=None,
                 reactant_xyz=None,
                 forming_bonds=None,
                 neutral_precursor_xyz=None,
-                meta_json_path=None
+                meta_json_path=None,
             )
 
         neutral_precursor_xyz = output_dir / "neutral_precursor.xyz"
         try:
             shutil.copy(reactant_complex_xyz, neutral_precursor_xyz)
-            self.logger.info(f"Neutral precursor created: {neutral_precursor_xyz}")
-        except Exception as e:
-            self.logger.error(f"Failed to copy reactant complex to neutral precursor: {e}")
+            self.logger.info(f"[S2] Neutral precursor created: {neutral_precursor_xyz}")
+        except Exception as exc:
+            self.logger.error(f"[S2] Failed to copy reactant complex to neutral precursor: {exc}")
             return RetroScanResultV2(
                 ts_guess_xyz=None,
                 reactant_xyz=None,
                 forming_bonds=None,
                 neutral_precursor_xyz=None,
-                meta_json_path=None
+                meta_json_path=None,
             )
 
         meta_json_path = None
         if output_meta:
             meta_json_path = output_dir / "meta.json"
             meta_data = {
-                'precursor_smiles': record.precursor_smiles,
-                'leaving_small_molecule_key': record.get_leaving_small_molecule_key(),
-                'strategy': strategy,
-                'source_reactant_complex': str(reactant_complex_xyz)
+                "precursor_smiles": record.precursor_smiles,
+                "leaving_small_molecule_key": record.get_leaving_small_molecule_key(),
+                "strategy": strategy,
+                "source_reactant_complex": str(reactant_complex_xyz),
             }
             try:
-                import json
                 meta_json_path.write_text(json.dumps(meta_data, indent=2))
-                self.logger.info(f"Meta JSON written: {meta_json_path}")
-            except Exception as e:
-                self.logger.warning(f"Failed to write meta.json: {e}")
+                self.logger.info(f"[S2] Meta JSON written: {meta_json_path}")
+            except Exception as exc:
+                self.logger.warning(f"[S2] Failed to write meta.json: {exc}")
                 meta_json_path = None
 
         return RetroScanResultV2(
@@ -430,25 +473,195 @@ class RetroScanner(LoggerMixin):
             reactant_xyz=None,
             forming_bonds=None,
             neutral_precursor_xyz=neutral_precursor_xyz,
-            meta_json_path=meta_json_path
+            meta_json_path=meta_json_path,
         )
 
     def _generate_constraints(self, bond_1: Tuple[int, int], bond_2: Tuple[int, int], target_dist: float) -> str:
-        """
-        生成 XTB 约束文件内容
-
-        Args:
-            bond_1: 第一个键 (i, j)
-            bond_2: 第二个键 (k, l)
-            target_dist: 目标距离
-
-        Returns:
-            约束文件内容字符串
-        """
-        # XTB 使用 1-indexed
         return f"""$constrain
   force constant=0.5
   distance: {bond_1[0]+1}, {bond_1[1]+1}, {target_dist:.3f}
   distance: {bond_2[0]+1}, {bond_2[1]+1}, {target_dist:.3f}
 $end
 """
+
+    def run_path_search(
+        self,
+        start_xyz: Path,
+        end_xyz: Path,
+        output_dir: Path,
+        forming_bonds: Optional[Sequence[Tuple[int, int]]] = None,
+    ) -> Tuple[Path, Path, Path, Tuple[Tuple[int, int], ...], Path, str, str, Tuple[str, ...], Optional[Path]]:
+        from rph_core.utils.qc_interface import XTBInterface
+        from rph_core.utils.data_types import PathSearchResult
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        path_cfg = self.step2_cfg.get("path_search", {}) or {}
+        if not path_cfg.get("enabled", False):
+            raise ValueError("path_search is not enabled in config")
+
+        self.logger.info("[S2] Path Search (xTB --path) started")
+
+        xtb_settings = self.step2_cfg.get("xtb_settings", {}) or {}
+        charge = int(xtb_settings.get("charge", 0))
+        spin = int(xtb_settings.get("multiplicity", 1))
+
+        path_dir = output_dir / "path_search"
+        path_dir.mkdir(parents=True, exist_ok=True)
+
+        xtb = XTBInterface(
+            solvent=xtb_settings.get("solvent", "acetone"),
+            nproc=int(self.config.get("resources", {}).get("nproc", 1)),
+            config=self.config
+        )
+
+        result: PathSearchResult = xtb.path(
+            start_xyz=start_xyz,
+            end_xyz=end_xyz,
+            output_dir=path_dir,
+            nrun=path_cfg.get("nrun", 1),
+            npoint=path_cfg.get("npoint", 25),
+            anopt=path_cfg.get("anopt", 10),
+            kpush=path_cfg.get("kpush", 0.003),
+            kpull=path_cfg.get("kpull", -0.015),
+            ppull=path_cfg.get("ppull", 0.05),
+            alp=path_cfg.get("alp", 1.2),
+            charge=charge,
+            spin=spin,
+        )
+
+        if not result.success:
+            raise RuntimeError(f"S2 path search failed: {result.error_message}")
+
+        if result.ts_guess_xyz is None or not result.ts_guess_xyz.exists():
+            raise RuntimeError("S2 path search did not produce ts_guess")
+
+        ts_guess_xyz = output_dir / "ts_guess.xyz"
+        shutil.copy2(result.ts_guess_xyz, ts_guess_xyz)
+
+        reactant_complex_xyz = output_dir / "reactant_complex.xyz"
+        if Path(start_xyz).resolve() != Path(reactant_complex_xyz).resolve():
+            shutil.copy2(start_xyz, reactant_complex_xyz)
+
+        degraded_reasons: List[str] = []
+        status = "COMPLETE"
+        ts_guess_confidence = "high"
+
+        if result.gradient_norm_at_ts is not None and result.gradient_norm_at_ts > 0.05:
+            degraded_reasons.append("high_gradient_norm_at_ts")
+            ts_guess_confidence = "medium"
+
+        path_profile_json = output_dir / "scan_profile.json"
+        with open(path_profile_json, "w") as f:
+            json.dump({
+                "generation_method": "xtb_path_search",
+                "start_xyz": str(start_xyz),
+                "end_xyz": str(end_xyz),
+                "reactant_complex_xyz": str(reactant_complex_xyz),
+                "ts_guess_xyz": str(ts_guess_xyz),
+                "forming_bonds": [list(pair) for pair in (forming_bonds or [])],
+                "path_parameters": {
+                    "nrun": path_cfg.get("nrun", 1),
+                    "npoint": path_cfg.get("npoint", 25),
+                    "anopt": path_cfg.get("anopt", 10),
+                    "kpush": path_cfg.get("kpush", 0.003),
+                    "kpull": path_cfg.get("kpull", -0.015),
+                },
+                "energies": {
+                    "barrier_forward_kcal": result.barrier_forward_kcal,
+                    "barrier_backward_kcal": result.barrier_backward_kcal,
+                    "reaction_energy_kcal": result.reaction_energy_kcal,
+                },
+                "ts_quality": {
+                    "estimated_ts_point": result.estimated_ts_point,
+                    "gradient_norm_at_ts": result.gradient_norm_at_ts,
+                    "status": status,
+                    "ts_guess_confidence": ts_guess_confidence,
+                    "degraded_reasons": degraded_reasons,
+                },
+            }, f, indent=2)
+
+        bonds = tuple(forming_bonds) if forming_bonds else tuple()
+
+        # Gau_XTB TS optimization for S2.2
+        ts_guess_s2_2_gau_xtb = None
+        gau_xtb2_distance = None
+        if self.step2_cfg.get("gau_xtb", {}).get("enabled", False):
+            self.logger.info("[S2.2] Running Gau_XTB TS optimization")
+            ts_guess_s2_2_gau_xtb, gau_xtb2_energy = self._run_gau_xtb_optimization(
+                ts_guess_xyz=ts_guess_xyz,
+                output_dir=output_dir / "gau_xtb_s2.2",
+                task_name="TS-S2.2-001",
+                forming_bonds=list(forming_bonds) if forming_bonds else []
+            )
+            
+            if ts_guess_s2_2_gau_xtb and gau_xtb2_energy is not None and forming_bonds:
+                coords, symbols = read_xyz(ts_guess_s2_2_gau_xtb)
+                bond_pair = forming_bonds[0]
+                atom_i, atom_j = bond_pair  # type: ignore
+                dist = float(np.linalg.norm(np.array(coords[atom_i]) - np.array(coords[atom_j])))
+                gau_xtb2_distance = dist
+
+        return (
+            ts_guess_xyz,
+            reactant_complex_xyz,
+            reactant_complex_xyz,
+            bonds,
+            path_profile_json,
+            status,
+            ts_guess_confidence,
+            tuple(degraded_reasons),
+            ts_guess_s2_2_gau_xtb
+        )
+
+    def _run_gau_xtb_optimization(
+        self,
+        ts_guess_xyz: Path,
+        output_dir: Path,
+        task_name: str,
+        forming_bonds: List[Tuple[int, int]]
+    ) -> Tuple[Optional[Path], Optional[float]]:
+        """Run Gau_XTB TS optimization on a TS guess.
+        
+        Returns:
+            Tuple of (optimized_xyz_path, energy_hartree)
+        """
+        gau_xtb_cfg = self.step2_cfg.get("gau_xtb", {})
+        
+        nproc = self.config.get("resources", {}).get("nproc", 1)
+        
+        optimizer = GauXTBOptimizer(
+            config=self.config,
+            nproc=nproc
+        )
+        
+        try:
+            opt_xyz, confidence, imag_freq = optimizer.optimize(
+                ts_guess_xyz=ts_guess_xyz,
+                output_dir=output_dir,
+                task_name=task_name,
+                forming_bonds=forming_bonds,
+                max_attempts=gau_xtb_cfg.get("max_attempts", 3)
+            )
+            
+            output_name = f"ts_guess_{task_name.lower().replace('-', '_')}_gau_xtb.xyz"
+            final_xyz = output_dir / output_name
+            shutil.copy2(opt_xyz, final_xyz)
+            
+            energy_hartree = None
+            if optimizer.interface is not None:
+                log_path = opt_xyz.parent / "input.log"
+                if log_path.exists():
+                    energy_hartree = optimizer.interface._parse_energy(log_path)
+            
+            self.logger.info(
+                f"[S2] Gau_XTB TS optimization complete: {final_xyz} "
+                f"(confidence: {confidence}, imag_freq: {imag_freq})"
+            )
+            
+            return final_xyz, energy_hartree
+            
+        except Exception as e:
+            self.logger.error(f"[S2] Gau_XTB TS optimization failed: {e}")
+            return None, None

@@ -45,12 +45,63 @@ def _count_within_window(log_file: Path, energy_window: float) -> Optional[int]:
     return count if count > 0 else None
 
 
+def _as_wsl_unix_path(raw_path: str) -> str:
+    normalized = raw_path.strip().strip('"').strip("'")
+    if not normalized:
+        return ""
+
+    normalized = normalized.replace("\\", "/")
+
+    prefixes = ("//wsl.localhost/", "//wsl$/")
+    if normalized.startswith(prefixes):
+        parts = [part for part in normalized.split("/") if part]
+        if len(parts) >= 3 and parts[0] in {"wsl.localhost", "wsl$"}:
+            return "/" + "/".join(parts[2:])
+
+    return normalized
+
+
+def _iter_isostat_candidates(isostat_bin: Path):
+    raw_from_cfg = str(isostat_bin)
+    normalized = _as_wsl_unix_path(raw_from_cfg)
+
+    if normalized:
+        yield Path(normalized)
+    yield isostat_bin
+
+    env_isostat = os.environ.get("ISOSTAT_PATH")
+    if env_isostat:
+        env_norm = _as_wsl_unix_path(env_isostat)
+        if env_norm:
+            yield Path(env_norm)
+
+    molclus_home = os.environ.get("MOLCLUS_HOME")
+    if molclus_home:
+        home_norm = _as_wsl_unix_path(molclus_home)
+        if home_norm:
+            yield Path(home_norm) / "isostat"
+
+    normalized_name = Path(normalized).name if normalized else ""
+    for bin_name in [normalized_name, isostat_bin.name, "isostat"]:
+        if not bin_name:
+            continue
+        which_path = shutil.which(bin_name)
+        if which_path:
+            yield Path(which_path)
+
+    for candidate in (
+        "/opt/software/molclus/isostat",
+        "/opt/molclus/isostat",
+        "/usr/local/bin/isostat",
+        "/usr/bin/isostat",
+    ):
+        yield Path(candidate)
+
+
 def _resolve_isostat_path(isostat_bin: Path) -> Optional[Path]:
-    if isostat_bin.exists() and isostat_bin.is_file() and os.access(str(isostat_bin), os.X_OK):
-        return isostat_bin
-    which_path = shutil.which(str(isostat_bin))
-    if which_path:
-        return Path(which_path)
+    for candidate in _iter_isostat_candidates(isostat_bin):
+        if candidate.exists() and candidate.is_file() and os.access(str(candidate), os.X_OK):
+            return candidate
     return None
 
 

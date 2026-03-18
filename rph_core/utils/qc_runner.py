@@ -10,6 +10,7 @@ Purpose: 替代旧版 Bash 脚本中的错误处理逻辑
 
 import logging
 import time
+import os
 import signal
 import subprocess
 from pathlib import Path
@@ -119,7 +120,7 @@ class RetryConfig:
         return min(backoff, self.max_backoff)
 
 
-def with_retry(config: Optional[RetryConfig] = None, cleanup: Optional[Callable] = None):
+def with_retry(config: Optional[RetryConfig] = None, cleanup: Optional[Callable[[], None]] = None):
     """
     重试装饰器
 
@@ -176,13 +177,37 @@ def with_retry(config: Optional[RetryConfig] = None, cleanup: Optional[Callable]
     return decorator
 
 
+def _terminate_process_group(process: subprocess.Popen[str], grace_seconds: int = 8) -> None:
+    if process.poll() is not None:
+        return
+
+    try:
+        pgid = os.getpgid(process.pid)
+    except ProcessLookupError:
+        return
+
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+        process.wait(timeout=grace_seconds)
+        return
+    except ProcessLookupError:
+        return
+    except subprocess.TimeoutExpired:
+        logger.warning("进程组未在宽限期内退出，升级为 SIGKILL")
+
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+
+
 def run_with_timeout(
-    cmd: list,
+    cmd: list[str],
     timeout: int,
     cwd: Optional[Path] = None,
     env: Optional[Dict[str, str]] = None,
     log_file: Optional[Path] = None
-) -> subprocess.CompletedProcess:
+) -> subprocess.CompletedProcess[str]:
     """
     带超时的子进程执行
 
@@ -209,7 +234,8 @@ def run_with_timeout(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        bufsize=1
+        bufsize=1,
+        start_new_session=True
     ) as process:
         try:
             stdout, _ = process.communicate(timeout=timeout)
@@ -239,8 +265,12 @@ def run_with_timeout(
             )
 
         except subprocess.TimeoutExpired:
-            process.kill()
-            stdout, _ = process.communicate()
+            _terminate_process_group(process)
+            try:
+                stdout, _ = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                logger.warning("超时后子进程仍未完成输出回收，继续抛出超时异常")
+                stdout = ""
 
             if log_file:
                 log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -266,7 +296,7 @@ class QCJob:
     def __init__(
         self,
         job_id: str,
-        cmd: list,
+        cmd: list[str],
         work_dir: Path,
         timeout: int = 3600,
         config: Optional[Dict[str, Any]] = None
@@ -277,11 +307,11 @@ class QCJob:
         self.timeout = timeout
         self.config = config or {}
         self.status = QCJobStatus.PENDING
-        self.result: Optional[subprocess.CompletedProcess] = None
+        self.result: Optional[subprocess.CompletedProcess[str]] = None
         self.error: Optional[Exception] = None
         self.log_file = self.work_dir / f"{job_id}.log"
 
-    def run(self) -> subprocess.CompletedProcess:
+    def run(self) -> subprocess.CompletedProcess[str]:
         """执行任务"""
         self.status = QCJobStatus.RUNNING
         logger.info(f"开始任务 {self.job_id}")

@@ -8,13 +8,18 @@ Logging Manager
 import logging
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any, cast
+
+from rph_core.utils.shared_console import get_console
 
 try:
     from rich.logging import RichHandler
-    HAS_RICH = True
+    _has_rich = True
 except ImportError:
-    HAS_RICH = False
+    _has_rich = False
+    RichHandler = None  # type: ignore
+
+HAS_RICH = _has_rich
 
 def setup_logger(
     name: str = "ReactionProfileHunter",
@@ -42,7 +47,11 @@ def setup_logger(
 
     # 控制台输出 (优先使用 Rich)
     if HAS_RICH:
-        console_handler = RichHandler(
+        if RichHandler is None:
+            raise RuntimeError("RichHandler unavailable while HAS_RICH is True")
+        rich_handler_cls = cast(Any, RichHandler)
+        console_handler = rich_handler_cls(
+            console=get_console(),
             rich_tracebacks=True,
             show_time=True,
             show_path=False,
@@ -70,6 +79,12 @@ def setup_logger(
         file_formatter = logging.Formatter(format_string)
         file_handler.setFormatter(file_formatter)
         logger.addHandler(file_handler)
+
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        root_logger.setLevel(level)
+        for handler in logger.handlers:
+            root_logger.addHandler(handler)
 
     return logger
 
