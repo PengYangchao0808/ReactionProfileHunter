@@ -21,6 +21,7 @@ def run_step2(
     forming_bonds = hunter._resolve_forming_bonds_for_s2(
         cleaner_data=cleaner_data,
         product_xyz_file=product_xyz_file,
+        work_dir=work_dir,
     )
     hunter.logger.info(f"[S2] Using MolIdx forming_bonds: {forming_bonds}")
 
@@ -263,7 +264,7 @@ def run_step2(
         substrate_xyz=substrate_xyz,
         intermediate_xyz=intermediate_xyz,
         forming_bonds=tuple(returned_forming_bonds),
-        forming_bonds_map=forming_bonds_map,
+        forming_bonds_map=None,
         generation_method=generation_method,
         status=status,
         ts_guess_confidence=ts_guess_confidence,
@@ -288,7 +289,7 @@ def run_step3(
         ts_guess=ts_guess_xyz,
         intermediate=intermediate_xyz,
         product=product_xyz,
-        output_dir=work_dir / "S3_TransitionAnalysis",
+        output_dir=work_dir / "S3_TS",
         e_product_l2=e_product_l2,
         product_thermo=product_thermo,
         forming_bonds=forming_bonds,

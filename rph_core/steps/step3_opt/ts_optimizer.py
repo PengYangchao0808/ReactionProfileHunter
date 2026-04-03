@@ -854,7 +854,7 @@ class TSOptimizer(LoggerMixin):
         # 构建报告
         report = SPMatrixReport(
             e_product=e_product_l2,
-            e_reactant=e_reactant_l2,
+            e_reactant=e_intermediate_l2,
             e_ts_final=e_ts_l2,
             e_frag_a_ts=e_frag_a_l2,
             e_frag_b_ts=e_frag_b_l2,

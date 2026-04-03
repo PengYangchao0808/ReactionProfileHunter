@@ -1,11 +1,14 @@
 import json
 import re
+import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Any
 
 from rph_core.utils.constants import HARTREE_TO_KCAL
+from rph_core.utils.path_compat import is_toxic_path
 
 
 @dataclass
@@ -101,16 +104,41 @@ def run_shermo(
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
-    result = subprocess.run(
-        args,
-        capture_output=True,
-        text=True
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"Shermo 运行失败: {result.stderr}")
+    freq_output_str = str(freq_output)
+    if is_toxic_path(Path(freq_output_str)):
+        temp_dir = Path(tempfile.mkdtemp(prefix="RPH_Shermo_", dir="/tmp"))
+        try:
+            safe_freq_name = "freq.log"
+            temp_freq = temp_dir / safe_freq_name
+            shutil.copy2(freq_output, temp_freq)
+            args[1] = str(temp_freq)
+            result = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                cwd=str(temp_dir)
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Shermo 运行失败: {result.stderr}")
+            output_file.write_text(result.stdout)
+            if "Error:" in result.stdout:
+                raise RuntimeError(f"Shermo 执行异常: {result.stdout[:500]}")
+            return _parse_sum_file(output_file)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+    else:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Shermo 运行失败: {result.stderr}")
 
-    output_file.write_text(result.stdout)
-    return _parse_sum_file(output_file)
+        output_file.write_text(result.stdout)
+        if "Error:" in result.stdout:
+            raise RuntimeError(f"Shermo 执行异常: {result.stdout[:500]}")
+        return _parse_sum_file(output_file)
 
 
 def derive_shermo_summary_from_sum(

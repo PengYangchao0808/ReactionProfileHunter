@@ -1,0 +1,176 @@
+# Mechanism Templates Configuration
+# =================================
+#
+# 定义不同环加成反应的机理模板
+#
+# Author: RPH Team
+# Date: 2026-03-18
+
+mechanisms:
+  # [4+3] 氧化吡啶嗡环加成
+  "[4+3]":
+    name: "[4+3] Oxidopyrylium Cycloaddition"
+    full_name: "氧化吡啶嗡 [4+3] 环加成反应"
+    intermediate: "oxidopyrylium"
+    intermediate_name: "氧化吡啶嗡 (Oxidopyrylium)"
+    steps: 2
+    
+    # 反应步骤描述
+    steps_description:
+      - name: "Step 1: 中间体生成"
+        description: "DMDO 氧化烯丙基醇生成氧化吡啶嗡偶极子"
+        method: "DMDO_oxidation"
+      - name: "Step 2: 环加成"
+        description: "氧化吡啶嗡与亲二烯体发生 [4+3] 环加成"
+        method: "cycloaddition"
+    
+    # 节点定义
+    nodes:
+      reactants:
+        role: "reactants"
+        state: "reactant"
+        description: "反应物复合物 (烯丙基醇 + 亲二烯体)"
+      intermediate:
+        role: "oxidopyrylium"
+        state: "intermediate"
+        description: "氧化吡啶嗡偶极子中间体"
+      product:
+        role: "product"
+        state: "product"
+        description: "七元环产物"
+    
+    # SMARTS 模板 (用于 RDChiral)
+    templates:
+      oxidation: "[#6:1]=[#6:2]-[#8:3]>>[#6:1]1=[#6:2]-[#8:3]1"
+    
+    # S2 扫描参数 (可被 reaction_profiles 覆盖)
+    scan:
+      scan_start_distance: 3.5
+      scan_end_distance: 1.8
+      scan_steps: 20
+      scan_force_constant: 0.5
+      scan_mode: "concerted"
+    
+    # 立体化学选项
+    stereochemistry:
+      - id: "endo"
+        description: "endo 选择性"
+      - id: "exo"
+        description: "exo 选择性"
+  
+  # [5+2] 1,3-偶极子环加成
+  "[5+2]":
+    name: "[5+2] 1,3-Dipole Cycloaddition"
+    full_name: "1,3-偶极子 [5+2] 环加成反应"
+    intermediate: "1,3_dipole"
+    intermediate_name: "1,3-偶极子 (1,3-Dipole)"
+    steps: 2
+    
+    steps_description:
+      - name: "Step 1: 中间体生成"
+        description: "离去基团离去或烯醇化生成 1,3-偶极子"
+        method: "leaving_group_departure"  # 或 "enolization"
+      - name: "Step 2: 环加成"
+        description: "1,3-偶极子与亲偶极体发生 [5+2] 环加成"
+        method: "cycloaddition"
+    
+    nodes:
+      reactants:
+        role: "reactants"
+        state: "reactant"
+      intermediate:
+        role: "1,3_dipole"
+        state: "intermediate"
+      product:
+        role: "product"
+        state: "product"
+    
+    scan:
+      scan_start_distance: 3.5
+      scan_end_distance: 2.0
+      scan_steps: 16
+      scan_force_constant: 0.8
+      scan_mode: "concerted"
+  
+  # [4+2] Diels-Alder
+  "[4+2]":
+    name: "[4+2] Diels-Alder"
+    full_name: "Diels-Alder [4+2] 环加成反应"
+    intermediate: null
+    steps: 1
+    
+    steps_description:
+      - name: "环加成"
+        description: "二烯与亲二烯体发生 [4+2] 环加成"
+        method: "concerted_cycloaddition"
+    
+    nodes:
+      reactants:
+        role: "reactants"
+        state: "reactant"
+      product:
+        role: "product"
+        state: "product"
+    
+    scan:
+      scan_start_distance: 3.5
+      scan_end_distance: 2.0
+      scan_steps: 16
+      scan_force_constant: 0.5
+      scan_mode: "concerted"
+  
+  # [3+2] 1,3-偶极环加成
+  "[3+2]":
+    name: "[3+2] 1,3-Dipole Cycloaddition"
+    full_name: "1,3-偶极子 [3+2] 环加成反应"
+    intermediate: null
+    steps: 1
+    
+    steps_description:
+      - name: "环加成"
+        description: "1,3-偶极子与亲偶极体发生 [3+2] 环加成"
+        method: "concerted_cycloaddition"
+    
+    nodes:
+      reactants:
+        role: "reactants"
+        state: "reactant"
+      product:
+        role: "product"
+        state: "product"
+    
+    scan:
+      scan_start_distance: 3.0
+      scan_end_distance: 1.8
+      scan_steps: 14
+      scan_force_constant: 0.5
+      scan_mode: "concerted"
+
+# 全局默认配置
+defaults:
+  # 默认反应类型
+  default_mechanism: "[4+3]"
+  
+  # 是否启用 dr 路径枚举
+  enable_dr_paths: false
+  
+  # 是否生成中间体 SMILES
+  generate_intermediates: false
+  
+  # 前体类型定义
+  precursor_types:
+    allenamide:
+      description: "烯丙基酰胺"
+      pattern: "C=C=CN"
+    ylide:
+      description: "叶立德"
+      pattern: "[CH2]=[CH]"
+    vinyl_azide:
+      description: "乙烯基叠氮"
+      pattern: "N=[N+]=[N-]"
+    diene:
+      description: "二烯"
+      pattern: "C=C-C=C"
+    dienophile:
+      description: "亲二烯体"
+      pattern: "C=C"

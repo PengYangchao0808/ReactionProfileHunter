@@ -18,6 +18,7 @@ from datetime import datetime
 from rph_core.utils.log_manager import LoggerMixin
 from rph_core.utils.ui import get_progress_manager
 from rph_core.utils.forming_bonds_resolver import resolve_forming_bonds
+from rph_core.utils.data_types import MolIdx
 from rph_core.steps.step4_features.mech_packager import resolve_mechanism_context
 from .status import FeatureStatus, aggregate_plugin_status
 from .schema import FeatureSchema, DEPLOYABLE_COLUMNS_V1, COMPUTATIONAL_FEATURES, QA_METADATA_FEATURES, validate_feature_layer
@@ -122,9 +123,9 @@ class FeatureMiner(LoggerMixin):
         pm = get_progress_manager()
 
         work_dir = output_dir.parent
-        s3_dir = (work_dir / "S3_TransitionAnalysis" if (work_dir / "S3_TransitionAnalysis").exists()
-                  else work_dir / "S3_TS" if (work_dir / "S3_TS").exists()
-                  else None)
+        s3_dir = work_dir / "S3_TS"
+        if not s3_dir.exists():
+            s3_dir = None
 
         artifacts_index = None
         if s3_dir is not None:
@@ -160,6 +161,12 @@ class FeatureMiner(LoggerMixin):
                 for w in resolved.warnings:
                     self.logger.warning(f"Forming bonds resolver: {w}")
 
+        typed_forming_bonds = None
+        if forming_bonds is not None:
+            typed_forming_bonds = tuple(
+                (MolIdx(int(pair[0])), MolIdx(int(pair[1]))) for pair in forming_bonds
+            )
+
         context = FeatureContext(
             ts_xyz=ts_final,
             reactant_xyz=reactant,
@@ -170,15 +177,13 @@ class FeatureMiner(LoggerMixin):
             ts_orca_out=ts_orca_out,
             s3_dir=s3_dir,
             artifacts_index=artifacts_index,
-            forming_bonds=forming_bonds,
+            forming_bonds=typed_forming_bonds,
             fragment_indices=fragment_indices,
             sp_report=sp_matrix_report,
             job_run_policy="disallow",
             # V6.2 P0: Inject S3 path handles with s3_ prefix for extractors
             s3_ts_fchk=ts_fchk,
-            s3_reactant_fchk=reactant_fchk,
             s3_ts_log=ts_log,
-            s3_reactant_g_kcal=(getattr(sp_matrix_report, "g_reactant", None) if sp_matrix_report else None),
             # V6.2 P0: Inject log file handles
             ts_log=ts_log,
             reactant_log=reactant_log,

@@ -24,7 +24,6 @@ from rph_core.utils.task_builder import build_tasks_from_run_config, sanitize_rx
 from rph_core.utils.config_loader import load_config
 from rph_core.utils.small_molecule_catalog import SmallMoleculeCatalog
 from rph_core.utils.checkpoint_manager import CheckpointManager
-from rph_core.utils.checkpoint_manager import PipelineState
 from rph_core.utils.optimization_config import normalize_qc_config
 from rph_core.utils.forming_bonds_resolver import resolve_forming_bonds, write_mechanism_meta
 from rph_core.utils.file_io import read_xyz
@@ -34,6 +33,7 @@ from rph_core.utils import ui, notify
 from rph_core.utils.ui import get_progress_manager
 from rph_core.utils.constants import HARTREE_TO_KCAL
 from rph_core.steps.runners import run_step2, run_step3, run_step4
+from rph_core.utils.layout_contract import resolve_step_dir
 
 
 @dataclass
@@ -84,8 +84,10 @@ class PipelineResult:
 
 
 class ReactionProfileHunter:
-    """
-    Reaction Profile Hunter v3.0 (分子自治架构)
+    _header_printed: bool = False
+    _init_log_printed: bool = False
+
+    """Reaction Profile Hunter v3.0 (分子自治架构)
 
     设计模式:
     - Orchestrator 只是"调度员"，不是"工人"
@@ -132,18 +134,37 @@ class ReactionProfileHunter:
                     f"QC config fix [{fix['field']}]: {fix['original']} -> {fix['updated']}"
                 )
 
-        ui.print_pipeline_header(__version__)
-        self.logger.info(f"Reaction Profile Hunter v{__version__} 初始化 (含 S3.5)")
+        if not ReactionProfileHunter._header_printed:
+            ui.print_pipeline_header(__version__)
+            ReactionProfileHunter._header_printed = True
+        if not ReactionProfileHunter._init_log_printed:
+            self.logger.info(f"Reaction Profile Hunter v{__version__} 初始化 (含 S3.5)")
+            ReactionProfileHunter._init_log_printed = True
         
         # Initialize small molecule catalog
         self.small_mol_catalog = SmallMoleculeCatalog(self.config)
 
         # 延迟初始化各步骤引擎（懒加载）
+        self._s0_engine = None  # S0: 机理分类
         self._s1_engine = None
         self._s1_engine_type = "ProductAnchor"  # 默认类型
         self._s2_engine = None
         self._s3_engine = None
         self._s4_engine = None
+
+    @property
+    def s0_engine(self):
+        """Step 0 引擎 (懒加载) - 机理分类"""
+        if self._s0_engine is None:
+            try:
+                from rph_core.steps.mechanism_classifier import MechanismClassifier
+                s0_config = self.config.get("s0", {})
+                self._s0_engine = MechanismClassifier(s0_config)
+                self.logger.debug("✓ Step 0 (MechanismClassifier) 已初始化")
+            except ImportError as e:
+                self.logger.warning(f"S0 机理分类模块不可用: {e}")
+                self._s0_engine = None
+        return self._s0_engine
 
     @property
     def s1_engine(self):
@@ -313,10 +334,6 @@ class ReactionProfileHunter:
 
         candidates = [
             product_xyz / "product_min.xyz",
-            product_xyz / "product" / "product_global_min.xyz",
-            product_xyz / "product_global_min.xyz",
-            product_xyz / "product" / "global_min.xyz",
-            product_xyz / "global_min.xyz",
         ]
         resolved = next((p for p in candidates if p.exists()), None)
         if resolved is None:
@@ -451,6 +468,7 @@ class ReactionProfileHunter:
         self,
         cleaner_data: Optional[Dict[str, Any]] = None,
         product_xyz_file: Optional[Path] = None,
+        work_dir: Optional[Path] = None,
     ) -> Tuple[Tuple[int, int], ...]:
         step2_cfg = self.config.get("step2", {}) or {}
         cleaner_cfg = self.config.get("cleaner", {}) or {}
@@ -462,6 +480,28 @@ class ReactionProfileHunter:
                 atom_count = int(len(coords))
             except Exception as exc:
                 self.logger.warning(f"[S2] Failed to read atom_count from {product_xyz_file}: {exc}")
+
+        # Source 0: Load from S0 mechanism_summary.json (highest priority - S0 has already computed this)
+        if work_dir is not None:
+            s0_summary_path = work_dir / "S0_Mechanism" / "mechanism_summary.json"
+            if s0_summary_path.exists():
+                try:
+                    import json
+                    with open(s0_summary_path, encoding="utf-8") as f:
+                        s0_data = json.load(f)
+                    s0_bonds_raw = s0_data.get("forming_bonds")
+                    if s0_bonds_raw:  # [] is falsy, so we skip empty list (S0 didn't find bonds)
+                        s0_bonds = self._normalize_forming_bonds(
+                            s0_bonds_raw,
+                            atom_count=atom_count,
+                            index_base=0,  # S0 outputs 0-based indices
+                            require_exact_two=True,
+                        )
+                        if s0_bonds:
+                            self.logger.info(f"[S2] Using forming_bonds from S0 mechanism summary: {s0_bonds}")
+                            return s0_bonds
+                except Exception as exc:
+                    self.logger.debug(f"[S2] Failed to load S0 mechanism summary: {exc}")
 
         cleaner_raw = ((cleaner_data or {}).get("raw", {}) or {}) if cleaner_data else {}
 
@@ -556,7 +596,29 @@ class ReactionProfileHunter:
             self.logger.info(f"[S2] Using configured forming_bonds: {configured_bonds}")
             return configured_bonds
 
-        raise RuntimeError("S2 requires forming_bonds from cleaner/config/dataset; SMARTS fallback has been removed")
+        # Source 4: SMARTS auto-detection (fallback for single-reaction mode when S0 is skipped)
+        if product_xyz_file is not None and Path(product_xyz_file).exists():
+            try:
+                from rph_core.steps.step2_retro.smarts_matcher import SMARTSMatcher
+                matcher = SMARTSMatcher()
+                smarts_result = matcher.find_reactive_bonds(
+                    product_xyz=Path(product_xyz_file),
+                    cleaner_data=cleaner_data,
+                )
+                if smarts_result.matched and smarts_result.bond_1 and smarts_result.bond_2:
+                    auto_bonds = (
+                        (smarts_result.bond_1.atom_idx_1, smarts_result.bond_1.atom_idx_2),
+                        (smarts_result.bond_2.atom_idx_1, smarts_result.bond_2.atom_idx_2),
+                    )
+                    self.logger.info(f"[S2] Using SMARTS-derived forming_bonds: {auto_bonds}")
+                    return auto_bonds
+            except Exception as exc:
+                self.logger.debug(f"[S2] SMARTS auto-detection failed: {exc}")
+
+        raise RuntimeError(
+            "S2 requires forming_bonds from cleaner/config/dataset/S0/SMARTS; "
+            "all sources failed (S0 skipped or no bonds found, SMARTS detection failed)"
+        )
 
     def _build_step2_signature(
         self,
@@ -575,6 +637,186 @@ class ReactionProfileHunter:
             reaction_profile=reaction_profile,
             scan_config=scan_config,
         )
+
+    def _run_s0(
+        self,
+        *,
+        work_dir: Path,
+        product_smiles: str,
+        cleaner_data: Optional[Dict[str, Any]],
+        checkpoint_mgr: CheckpointManager,
+        resume_enabled: bool,
+        pm: Any = None,
+    ) -> Optional[Dict[str, Any]]:
+        s0_cfg = self.config.get("s0", {}) or {}
+        s0_dir = resolve_step_dir(work_dir, "s0")
+        s0_dir.mkdir(parents=True, exist_ok=True)
+
+        ui.print_step_header("Step 0", "Mechanism Classifier", "Building reaction graph from cleaner data")
+
+        def _write_status(
+            status: str,
+            reason: Optional[str] = None,
+            extra: Optional[Dict[str, Any]] = None,
+        ) -> None:
+            artifact: Dict[str, Any] = {
+                "status": status,
+                "reason": reason,
+                "timestamp": datetime.now().isoformat(),
+            }
+            if extra:
+                artifact.update(extra)
+            status_path = s0_dir / "s0_status.json"
+            try:
+                with open(status_path, "w", encoding="utf-8") as f:
+                    json.dump(artifact, f, indent=2)
+            except Exception as exc:
+                self.logger.debug(f"[S0] Failed to write s0_status.json: {exc}")
+
+        if not bool(s0_cfg.get("enabled", True)):
+            _write_status("skipped", "disabled_by_config")
+            return {"status": "skipped", "reason": "disabled_by_config"}
+        if pm:
+            pm.update_step("s0", completed=10, description="Validating cleaner data...")
+        if not cleaner_data:
+            self.logger.info("[S0] cleaner_data unavailable; skip")
+            _write_status("skipped", "cleaner_data_unavailable")
+            return {"status": "skipped", "reason": "cleaner_data_unavailable"}
+        if self.s0_engine is None:
+            self.logger.warning("[S0] MechanismClassifier unavailable; skip")
+            _write_status("skipped", "engine_unavailable")
+            return {"status": "skipped", "reason": "engine_unavailable"}
+
+        if resume_enabled and checkpoint_mgr.is_step_completed("s0"):
+            graph_path = checkpoint_mgr.get_step_output("s0", "mechanism_graph_json")
+            if graph_path and Path(graph_path).exists():
+                self.logger.info("✅ Resume: Step0 already complete")
+                result = {
+                    "status": "complete",
+                    "resume_reused": True,
+                    "mechanism_graph_json": graph_path,
+                }
+                _write_status("complete", extra={"resume_reused": True, "mechanism_graph_json": graph_path})
+                return result
+
+        checkpoint_mgr.mark_step_in_progress("s0", phase="classifying")
+        if pm:
+            pm.update_step("s0", completed=30, description="Classifying reaction mechanism...")
+        cleaner_row = dict(cleaner_data)
+        if not cleaner_row.get("rxn_key_hash"):
+            fallback_rxn_id = (
+                cleaner_row.get("reaction_id")
+                or cleaner_row.get("rx_id")
+                or cleaner_row.get("id")
+                or "manual"
+            )
+            cleaner_row["rxn_key_hash"] = str(fallback_rxn_id)
+
+        graph = self.s0_engine.classify_from_dict(cleaner_row)
+        if graph is None:
+            from rph_core.steps.mechanism_classifier.models import create_simple_graph
+
+            precursor = str(
+                cleaner_row.get("precursor_smiles")
+                or cleaner_row.get("ylide_smiles")
+                or cleaner_row.get("reactant_smiles")
+                or ""
+            ).strip()
+            reaction_type = str(cleaner_row.get("reaction_type") or cleaner_row.get("rxn_type") or "unknown")
+            reaction_id = str(cleaner_row.get("rxn_key_hash") or "manual")
+            raw_forming = (
+                cleaner_row.get("forming_bonds")
+                or cleaner_row.get("formed_bond_index_pairs")
+                or ((cleaner_row.get("raw", {}) or {}).get("formed_bond_index_pairs"))
+            )
+            try:
+                normalized = self._normalize_forming_bonds(
+                    raw_forming,
+                    atom_count=None,
+                    index_base=cleaner_row.get("forming_bonds_index_base") or cleaner_row.get("index_base") or "auto",
+                    require_exact_two=False,
+                )
+            except Exception:
+                normalized = tuple()
+
+            if precursor and normalized:
+                graph = create_simple_graph(
+                    reaction_id=reaction_id,
+                    reaction_type=reaction_type,
+                    precursor_smiles=precursor,
+                    product_smiles=product_smiles,
+                    forming_bonds=list(normalized),
+                )
+            else:
+                _write_status("skipped", "insufficient_cleaner_fields")
+                return {"status": "skipped", "reason": "insufficient_cleaner_fields"}
+        if graph is None:
+            _write_status("skipped", "classification_failed")
+            return {"status": "skipped", "reason": "classification_failed"}
+
+        if pm:
+            pm.update_step("s0", completed=60, description="Extracting forming bonds...")
+
+        graph_path = s0_dir / "mechanism_graph.json"
+        summary_path = s0_dir / "mechanism_summary.json"
+        graph_payload = graph.model_dump(mode="json")
+        if pm:
+            pm.update_step("s0", completed=80, description="Saving mechanism graph...")
+
+        with open(graph_path, "w", encoding="utf-8") as f:
+            json.dump(graph_payload, f, indent=2)
+
+        pathway_edges = graph.get_edges_for_pathway("primary")
+        forming_bonds = tuple()
+        if pathway_edges:
+            all_pairs = []
+            for edge in pathway_edges:
+                all_pairs.extend(edge.forming_bonds)
+            forming_bonds = tuple(
+                sorted(
+                    (min(int(pair[0]), int(pair[1])), max(int(pair[0]), int(pair[1])))
+                    for pair in all_pairs
+                )
+            )
+
+        summary = {
+            "reaction_id": graph.reaction_id,
+            "reaction_type": graph.reaction_type,
+            "cyclo_mode": getattr(graph.cyclo_mode, "value", graph.cyclo_mode),
+            "topology": getattr(graph.topology, "value", graph.topology),
+            "forming_bonds": [list(pair) for pair in forming_bonds],
+        }
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+
+        _write_status(
+            "complete",
+            extra={
+                "mechanism_graph_json": str(graph_path),
+                "mechanism_summary_json": str(summary_path),
+                "forming_bonds": [list(pair) for pair in forming_bonds],
+                "reaction_type": summary.get("reaction_type"),
+            },
+        )
+        if resume_enabled:
+            checkpoint_mgr.mark_step_completed(
+                "s0",
+                output_files={
+                    "mechanism_graph_json": str(graph_path),
+                    "mechanism_summary_json": str(summary_path),
+                },
+                metadata=summary,
+            )
+        summary["status"] = "complete"
+
+        self.logger.info("[S0] Classification complete:")
+        self.logger.info(f"      Reaction Type: {graph.reaction_type}")
+        self.logger.info(f"      Cyclo Mode: {getattr(graph.cyclo_mode, 'value', graph.cyclo_mode)}")
+        self.logger.info(f"      Topology: {getattr(graph.topology, 'value', graph.topology)}")
+        self.logger.info(f"      Forming Bonds: {forming_bonds}")
+        self.logger.info(f"      Nodes: {len(graph.nodes)} | Edges: {len(graph.edges)}")
+
+        return summary
 
     def run_pipeline(
         self,
@@ -631,6 +873,7 @@ class ReactionProfileHunter:
 
         pm = get_progress_manager()
         pm.start(f"RPH Pipeline: {product_smiles}")
+        pm.add_step("s0", "Step 0: Mechanism")
         pm.add_step("s1", "Step 1: Anchor")
         pm.add_step("s2", "Step 2: Guess Builder")
         pm.add_step("s3", "Step 3: Analyzer")
@@ -653,15 +896,47 @@ class ReactionProfileHunter:
                         )
 
                     if state is None:
-                        state = PipelineState(
-                            product_smiles=product_smiles,
-                            work_dir=str(work_dir),
-                            start_time=datetime.now().isoformat(),
-                            last_update=datetime.now().isoformat(),
-                            steps={},
-                            config_snapshot={},
-                        )
-                    checkpoint_mgr.save_state(state)
+                        checkpoint_mgr.initialize_state(product_smiles=product_smiles, config=self.config)
+                        state = checkpoint_mgr.load_state()
+                    if state is not None:
+                        checkpoint_mgr.save_state(state)
+
+            effective_cleaner_data = dict(cleaner_data) if cleaner_data else None
+            if 's0' not in skip_steps:
+                pm.update_step("s0", description="Running mechanism classification...")
+                try:
+                    s0_summary = self._run_s0(
+                        work_dir=work_dir,
+                        product_smiles=product_smiles,
+                        cleaner_data=effective_cleaner_data,
+                        checkpoint_mgr=checkpoint_mgr,
+                        resume_enabled=resume_enabled,
+                        pm=pm,
+                    )
+                    if s0_summary and effective_cleaner_data is not None:
+                        # Use explicit None check to preserve empty list [] (S0 found no bonds)
+                        _fb = s0_summary.get("forming_bonds")
+                        if _fb is not None:
+                            effective_cleaner_data["forming_bonds"] = _fb
+                            effective_cleaner_data["forming_bonds_index_base"] = 0
+                        if s0_summary.get("reaction_type") and not effective_cleaner_data.get("reaction_type"):
+                            effective_cleaner_data["reaction_type"] = s0_summary["reaction_type"]
+                    s0_status = str((s0_summary or {}).get("status") or "").lower()
+                    s0_reason = str((s0_summary or {}).get("reason") or "").strip()
+                    if s0_status == "skipped":
+                        reason_suffix = f": {s0_reason}" if s0_reason else ""
+                        pm.update_step("s0", completed=100, description=f"Step 0: Mechanism [SKIPPED{reason_suffix}]")
+                    elif s0_status == "degraded":
+                        pm.update_step("s0", completed=100, description="Step 0: Mechanism [DEGRADED]")
+                    else:
+                        pm.update_step("s0", completed=100, description="Step 0: Mechanism [OK]")
+                except Exception as exc:
+                    if resume_enabled:
+                        checkpoint_mgr.mark_step_failed_partial("s0", phase="classifying", error_message=str(exc))
+                    self.logger.warning(f"[S0] mechanism classification failed: {exc}")
+                    pm.update_step("s0", completed=100, description="Step 0: Mechanism [DEGRADED]")
+            else:
+                pm.update_step("s0", completed=100, description="Step 0: Mechanism [SKIPPED]")
 
             current_step2_signature: Optional[Dict[str, Any]] = None
 
@@ -697,18 +972,19 @@ class ReactionProfileHunter:
                 can_reuse_step2 = False
                 profile_key = self._resolve_profile_key(
                     reaction_profile=reaction_profile,
-                    cleaner_data=cleaner_data,
+                    cleaner_data=effective_cleaner_data,
                 )
                 try:
                     if result.product_xyz is not None:
                         product_xyz_file = self._resolve_product_xyz_for_s2(result.product_xyz)
                         resolved_forming_bonds = self._resolve_forming_bonds_for_s2(
-                            cleaner_data=cleaner_data,
+                            cleaner_data=effective_cleaner_data,
                             product_xyz_file=product_xyz_file,
+                            work_dir=work_dir,
                         )
                         expected_scan_cfg = self._resolve_forward_scan_config(
                             reaction_profile=profile_key,
-                            cleaner_data=cleaner_data,
+                            cleaner_data=effective_cleaner_data,
                         )
                         expected_scan_cfg["output_dir"] = work_dir / "S2_Retro"
                         current_step2_signature = self._build_step2_signature(
@@ -754,7 +1030,7 @@ class ReactionProfileHunter:
                         skip_steps.append('s2')
                         pm.update_step("s2", completed=100, description="Step 2: Guess Builder [REUSED]")
 
-            s3_dir = work_dir / "S3_TransitionAnalysis"
+            s3_dir = resolve_step_dir(work_dir, "s3")
             if resume_enabled and 's3' not in skip_steps:
                 input_hashes: Dict[str, str] | None = None
                 if result.ts_guess_xyz and result.substrate_xyz and result.product_xyz:
@@ -847,6 +1123,8 @@ class ReactionProfileHunter:
                 try:
                     ui.print_step_header("Step 1", "Product Anchor", "Global Minimum Search (v3.0)")
                     self.logger.info(">>> Step 1: 寻找产物全局最低构象 (v3.0 OPT-SP 耦合)...")
+                    if resume_enabled:
+                        checkpoint_mgr.mark_step_in_progress("s1", phase="anchor")
 
                     # v3.0: 使用 AnchorPhase 处理产物
                     s1_work_dir = work_dir / "S1_ConfGeneration"
@@ -957,6 +1235,8 @@ class ReactionProfileHunter:
                         )
 
                 except Exception as e:
+                    if resume_enabled:
+                        checkpoint_mgr.mark_step_failed_partial("s1", phase="anchor", error_message=str(e))
                     result.error_step = "Step1_ProductAnchor_v3"
                     result.error_message = str(e)
                     self.logger.error(f"Step 1 v3.0 失败: {e}", exc_info=True)
@@ -965,24 +1245,17 @@ class ReactionProfileHunter:
             else:
                 self.logger.warning("⚠️  跳过 Step 1")
                 pm.update_step("s1", completed=100, description="Step 1: Anchor [SKIPPED]")
-                s1_candidates = [
-                    work_dir / "S1_ConfGeneration",
-                    work_dir.parent / "S1_test" / "S1_ConfGeneration",
-                    work_dir.parent / "S1_ConfGeneration",
-                    work_dir / "S1_Product",
-                    work_dir.parent / "S1_test" / "S1_Product",
-                    work_dir.parent / "S1_Product"
-                ]
-                for candidate in s1_candidates:
-                    if candidate.exists():
-                        result.product_xyz = candidate
-                        self.logger.info(f"    ✓ 复用 S1 输出目录: {candidate}")
-                        break
+                candidate = resolve_step_dir(work_dir, "s1")
+                if candidate.exists():
+                    result.product_xyz = candidate
+                    self.logger.info(f"    ✓ 复用 S1 输出目录: {candidate}")
 
             if 's2' not in skip_steps and result.product_xyz:
                 try:
                     ui.print_step_header("Step 2", "TS Guess Builder", "Intermediate Optimization + Inward Scan")
                     self.logger.info(">>> Step 2: 生成中间体并通过 inward scan 构建 TS 初猜...")
+                    if resume_enabled:
+                        checkpoint_mgr.mark_step_in_progress("s2", phase="scan")
 
                     pm.update_step("s2", description="Scanning bond coordinates (xTB)...")
                     step2_artifacts = run_step2(
@@ -990,7 +1263,7 @@ class ReactionProfileHunter:
                         product_xyz=result.product_xyz,
                         work_dir=work_dir,
                         reaction_profile=reaction_profile,
-                        cleaner_data=cleaner_data,
+                        cleaner_data=effective_cleaner_data,
                     )
 
                     pm.update_step("s2", completed=100, description="Step 2: Guess Builder [OK]")
@@ -1023,6 +1296,8 @@ class ReactionProfileHunter:
                             },
                         )
                 except Exception as e:
+                    if resume_enabled:
+                        checkpoint_mgr.mark_step_failed_partial("s2", phase="scan", error_message=str(e))
                     result.error_step = "Step2_TSGuessBuilder"
                     result.error_message = str(e)
                     self.logger.error(f"Step 2 失败: {e}", exc_info=True)
@@ -1037,6 +1312,8 @@ class ReactionProfileHunter:
                 try:
                     ui.print_step_header("Step 3", "Transition Analyzer", "TS Optimization & Verification")
                     self.logger.info(">>> Step 3: 反应中心全分析 (TS优化 + Reactant/Fragments SP)...")
+                    if resume_enabled:
+                        checkpoint_mgr.mark_step_in_progress("s3", phase="optimize")
 
                     # 传递S1的checkpoint以复用轨道
                     old_checkpoint = result.product_checkpoint
@@ -1047,10 +1324,6 @@ class ReactionProfileHunter:
                         product_dir = result.product_xyz
                         candidates = [
                             product_dir / "product_min.xyz",
-                            product_dir / "product" / "product_global_min.xyz",
-                            product_dir / "product_global_min.xyz",
-                            product_dir / "product" / "global_min.xyz",
-                            product_dir / "global_min.xyz"
                         ]
                         product_file = next((p for p in candidates if p.exists()), None)
                         if product_file is None:
@@ -1063,13 +1336,17 @@ class ReactionProfileHunter:
 
                     if result.substrate_xyz is None or result.product_xyz is None:
                         raise RuntimeError("Step3 输入缺失: substrate 或 product 为 None")
+                    if result.intermediate_xyz is None:
+                        raise RuntimeError("Step3 输入缺失: intermediate 为 None")
+                    step3_intermediate_xyz = result.intermediate_xyz
+                    step3_product_xyz = result.product_xyz
 
                     pm.update_step("s3", description="Optimizing Transition State (Berny/QST2)...")
                     step3_artifacts = run_step3(
                         hunter=self,
                         ts_guess_xyz=result.ts_guess_xyz,
-                        intermediate_xyz=result.intermediate_xyz,
-                        product_xyz=result.product_xyz,
+                        intermediate_xyz=step3_intermediate_xyz,
+                        product_xyz=step3_product_xyz,
                         work_dir=work_dir,
                         e_product_l2=result.e_product_l2,
                         product_thermo=result.product_thermo,
@@ -1174,6 +1451,8 @@ class ReactionProfileHunter:
                     else:
                         self.logger.info("      ΔG_rxn = N/A")
                 except Exception as e:
+                    if resume_enabled:
+                        checkpoint_mgr.mark_step_failed_partial("s3", phase="optimize", error_message=str(e))
                     result.error_step = "Step3_TransitionAnalyzer"
                     result.error_message = str(e)
                     self.logger.error(f"Step 3 失败: {e}", exc_info=True)
@@ -1188,6 +1467,8 @@ class ReactionProfileHunter:
                 try:
                     ui.print_step_header("Step 4", "Feature Miner", "Extracting Features (Extract-Only)")
                     self.logger.info(">>> Step 4: 提取物理有机特征...")
+                    if resume_enabled:
+                        checkpoint_mgr.mark_step_in_progress("s4", phase="extract")
 
                     # Check S3 artifacts for S4 and warn if missing
                     if result.ts_fchk is None:
@@ -1244,7 +1525,17 @@ class ReactionProfileHunter:
                     pm.update_step("s4", completed=100, description="Step 4: Features [OK]")
                     result.features_csv = step4_artifacts.features_csv
                     self.logger.info(f"    ✓ 特征提取完成: {step4_artifacts.features_csv}")
+                    if resume_enabled:
+                        checkpoint_mgr.mark_step_completed(
+                            "s4",
+                            output_files={
+                                "features_raw_csv": str(step4_artifacts.features_csv),
+                            },
+                            metadata={},
+                        )
                 except Exception as e:
+                    if resume_enabled:
+                        checkpoint_mgr.mark_step_failed_partial("s4", phase="extract", error_message=str(e))
                     result.error_step = "Step4_FeatureMiner"
                     result.error_message = str(e)
                     self.logger.error(f"Step 4 失败: {e}", exc_info=True)
@@ -1362,14 +1653,7 @@ class ReactionProfileHunter:
         }
 
         # Find S1 directory
-        s1_candidates = [
-            work_dir / "S1_ConfGeneration",
-            work_dir.parent / "S1_test" / "S1_ConfGeneration",
-            work_dir.parent / "S1_ConfGeneration",
-            work_dir / "S1_Product",
-            work_dir.parent / "S1_test" / "S1_Product",
-            work_dir.parent / "S1_Product"
-        ]
+        s1_candidates = [resolve_step_dir(work_dir, "s1")]
         s1_dir = None
         for candidate in s1_candidates:
             if candidate.exists():

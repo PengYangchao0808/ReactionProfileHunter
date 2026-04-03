@@ -50,7 +50,7 @@ def convert_cleaner_row_to_record(
     row_index: int,
     reaction_profiles: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Optional[ReactionRecord]:
-    rx_id = _first_nonempty(row, "rx_id", "reaction_id", "id") or f"cleaner_{row_index:06d}"
+    rx_id = _first_nonempty(row, "rx_id", "reaction_id", "record_id", "id") or f"cleaner_{row_index:06d}"
 
     precursor_smiles = _first_nonempty(
         row,
@@ -104,7 +104,7 @@ def convert_cleaner_row_to_record(
         formed_index_pairs = map_pairs_to_internal_indices(index_source_smiles, formed_map_pairs)
         bond_source = "smarts_fallback"
 
-    reaction_type = _first_nonempty(row, "reaction_type", "rxn_type")
+    reaction_type = _first_nonempty(row, "reaction_type", "rxn_type", "reaction_family")
     profile_key = match_reaction_profile_key(reaction_type, reaction_profiles or {})
 
     raw = {k: str(v) for k, v in row.items() if v is not None and str(v).strip()}
@@ -425,6 +425,15 @@ def match_reaction_profile_key(
         bracketed = f"[{normalized}]"
         _add(bracketed)
         _add(f"{bracketed}_default")
+
+    bracket_match = re.match(r"\s*(\[[^\]]+\])", rt)
+    if bracket_match:
+        bracket_part = bracket_match.group(1)
+        bracket_normalized = bracket_part.replace(" ", "")
+        _add(bracket_normalized)
+        _add(f"{bracket_normalized}_default")
+        inner = bracket_normalized[1:-1] if bracket_normalized.startswith("[") else bracket_normalized
+        _add(f"[{inner}]_default")
 
     for key in candidates:
         if key in reaction_profiles:

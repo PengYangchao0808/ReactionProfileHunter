@@ -87,17 +87,17 @@ def _resolve_new_mode(
 ) -> S3InputPaths:
     logger.info("Resolving S3 inputs: new mode (xtb_path_search)")
     
-    start_role = metadata.get("start_structure_role", "reactant_complex")
+    start_role = metadata.get("start_structure_role", "intermediate")
     
     ts_guess = s2_dir / "ts_guess.xyz"
     if not ts_guess.exists():
         raise FileNotFoundError(f"ts_guess.xyz not found in {s2_dir}")
     
-    reactant_path = s2_dir / "reactant_complex.xyz"
-    is_alias = metadata.get("reactant_complex_is_alias", False)
+    reactant_path = s2_dir / "intermediate.xyz"
+    is_alias = False
     
     if is_alias:
-        logger.info("Using reactant_complex as reactant")
+        logger.info("Using intermediate as reactant")
     
     product_path = Path(product_xyz)
     if not product_path.exists():
@@ -108,7 +108,7 @@ def _resolve_new_mode(
         reactant=reactant_path,
         product=product_path,
         source_ts_guess=S3ArtifactSource.TS_GUESS,
-        source_reactant=f"reactant_complex_alias" if is_alias else "reactant_complex",
+        source_reactant="intermediate",
         source_product=S3ArtifactSource.PRODUCT,
         metadata={
             "generation_method": metadata.get("generation_method"),
@@ -130,7 +130,7 @@ def _resolve_legacy_mode(
         raise FileNotFoundError(f"ts_guess.xyz not found in {s2_dir}")
     
     reactant_candidates = [
-        s2_dir / "reactant_complex.xyz",
+        s2_dir / "intermediate.xyz",
     ]
     
     reactant = None
@@ -166,6 +166,6 @@ def check_s2_artifacts(s2_dir: Path) -> Dict[str, bool]:
     
     return {
         "ts_guess_exists": (s2_dir / "ts_guess.xyz").exists(),
-        "reactant_complex_exists": (s2_dir / "reactant_complex.xyz").exists(),
+        "intermediate_exists": (s2_dir / "intermediate.xyz").exists(),
         "scan_profile_exists": (s2_dir / "scan_profile.json").exists(),
     }

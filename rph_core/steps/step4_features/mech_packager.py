@@ -39,9 +39,9 @@ logger = logging.getLogger(__name__)
 # Constants
 # ============================================================================
 
-S3_DIR_ALIASES = ["S3_TS", "S3_TransitionAnalysis"]
-S2_DIR_ALIASES = ["S2_GuessGeneration", "S2_Retro"]
-S1_DIR_ALIASES = ["S1_ConfGeneration", "S1_Product"]
+S3_DIR_ALIASES = ["S3_TS"]
+S2_DIR_ALIASES = ["S2_Retro"]
+S1_DIR_ALIASES = ["S1_ConfGeneration"]
 
 # ============================================================================
 # Dataclasses
@@ -240,21 +240,19 @@ def _find_s3_dir(work_dir: Path, max_recursion_depth: int) -> Optional[Path]:
     Returns:
         Resolved S3 directory path or None if not found
     """
-    for alias in S3_DIR_ALIASES:
-        s3_path = work_dir / alias
-        if s3_path.exists():
-            logger.debug(f"Found S3 directory via alias: {alias}")
-            return s3_path
-
-    logger.warning(f"S3 directory not found, tried aliases: {S3_DIR_ALIASES}")
+    s3_path = work_dir / "S3_TS"
+    if s3_path.exists():
+        return s3_path
+    logger.warning("S3 directory not found: S3_TS")
     return None
 
 
 def _find_step_dir(work_dir: Path, aliases: List[str]) -> Optional[Path]:
-    for alias in aliases:
-        candidate = work_dir / alias
-        if candidate.exists():
-            return candidate
+    if not aliases:
+        return None
+    candidate = work_dir / aliases[0]
+    if candidate.exists():
+        return candidate
     return None
 
 
@@ -305,8 +303,6 @@ def _resolve_s1_product(s1_dir: Optional[Path]) -> Optional[Path]:
     # Search in order of preference
     candidates = [
         s1_dir / "product_min.xyz",
-        s1_dir / "product_global_min.xyz",
-        s1_dir / "global_min.xyz"
     ]
 
     return _first_existing(candidates)
@@ -428,21 +424,14 @@ def _resolve_dipole_source(s3_intermediate: Optional[Path], s2_reactant: Optiona
 
 
 def _resolve_s2_assets(s2_dir: Optional[Path]) -> Tuple[Optional[Path], Optional[Path]]:
-    """Resolve S2 assets (ts_guess and reactant_complex).
-
-    Args:
-        s2_dir: S2_Retro directory path
-
-    Returns:
-        Tuple of (ts_guess_path, reactant_complex_path)
-    """
+    """Resolve S2 assets (ts_guess and intermediate)."""
     if s2_dir is None or not s2_dir.exists():
         return None, None
 
     ts_guess = _first_existing([s2_dir / "ts_guess.xyz"])
-    reactant_complex = _first_existing([s2_dir / "reactant_complex.xyz"])
+    intermediate = _first_existing([s2_dir / "intermediate.xyz"])
 
-    return ts_guess, reactant_complex
+    return ts_guess, intermediate
 
 
 def _resolve_s3_assets(s3_dir: Optional[Path]) -> Tuple[Optional[Path], Optional[Path]]:
@@ -487,11 +476,11 @@ def _resolve_s1_precursor(
     """
     M2-B2: Resolve S1 precursor state with enhanced fallback chain.
 
-    Priority: S1 precursor → S2 neutral_precursor → S2 reactant_complex
+    Priority: S1 precursor → S2 neutral_precursor → S2 intermediate
 
     Priority order controlled by config.precursor_source_priority:
-    - Default: ["S1_precursor", "S2_neutral_precursor", "S2_reactant_complex"]
-    - Respects Step2 contract: reactant_complex.xyz must be available as fallback
+    - Default: ["S1_precursor", "S2_neutral_precursor", "S2_intermediate"]
+    - Respects Step2 contract: intermediate.xyz is canonical fallback
 
     Args:
         s1_dir: S1_ConfGeneration directory path (MUST be a directory, not a file)
@@ -514,7 +503,7 @@ def _resolve_s1_precursor(
 
     # M2-B2: Use priority list from config
     if priority is None:
-        priority = ["S1_precursor", "S2_neutral_precursor", "S2_reactant_complex"]
+        priority = ["S1_precursor", "S2_neutral_precursor", "S2_intermediate"]
 
     # M2-B2: Iterate through priority list and return first valid source
     for label in priority:
@@ -534,11 +523,11 @@ def _resolve_s1_precursor(
                 if s2_precursor is not None:
                     return s2_precursor, "S2_neutral_precursor"
         
-        elif label == "S2_reactant_complex":
+        elif label == "S2_intermediate":
             if s2_dir is not None and s2_dir.exists():
-                s2_reactant = _first_existing([s2_dir / "reactant_complex.xyz"])
+                s2_reactant = _first_existing([s2_dir / "intermediate.xyz"])
                 if s2_reactant is not None:
-                    return s2_reactant, "S2_reactant_complex"
+                    return s2_reactant, "S2_intermediate"
 
     return None, "none"
 
@@ -1534,7 +1523,7 @@ def pack_mechanism_assets(
     pipeline_root = out_dir.parent
 
     # Derive s3_dir from context, or fallback to pipeline_root/S3_TS
-    s3_dir = context.s3_dir if context.s3_dir else (pipeline_root / "S3_TS" if (pipeline_root / "S3_TS").exists() else pipeline_root / "S3_TransitionAnalysis")
+    s3_dir = context.s3_dir if context.s3_dir else (pipeline_root / "S3_TS")
     qc_artifacts = _collect_qc_artifacts(
         s3_dir=s3_dir,
         pipeline_root=pipeline_root,

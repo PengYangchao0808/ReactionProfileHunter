@@ -429,22 +429,22 @@ run:
     input_file: ""      # 输入CSV文件路径
     smiles_column: "product_smiles"  # SMILES列名
   # dataset 模式配置 (当 source=dataset 时使用)
+  # JSON 文件会被自动识别 (通过 .json 后缀检测)
   dataset:
-    format: "csv"       # 数据集格式: csv, tsv
-    path: "./data/reaxys_cleaned.csv"  # 数据集文件路径 (相对于项目根目录)
-    product_smiles_col: "product_smiles_main"  # 产物SMILES列名
-    delimiter: ","      # CSV分隔符
-    id_col: "rx_id"     # 反应ID列名
-    precursor_smiles_col: "precursor_smiles"  # 前体SMILES列名
+    path: "E:\\Calculations\\AI4S_ML_Studys\\[4+3] Mechain learning\\ReactionProfileHunter\\xiong_2003_gold_manul_Check.json"  # JSON 数据集文件路径
+    product_smiles_col: "product_smiles"  # 产物SMILES列名 (JSON 中为 product_smiles)
+    precursor_smiles_col: "substrate_smiles"  # 前体SMILES列名 (JSON 中为 substrate_smiles)
   # 通用运行选项
   output_root: ./rph_output  # 输出根目录 (会被global.work_dir_base覆盖)
   workdir_naming: "rx_{rx_id}"  # 工作目录命名模板
   resume: true        # 是否启用断点续算 (Checkpoint/Resume)
   resume_rehydrate: true # 当状态文件被删时，是否尝试从物理产物重建状态 (V6.3)
-  resume_rehydrate_policy: best_effort # 重建策略: strict (严格校验签名) / best_effort (兼容历史产物)
+  resume_rehydrate_policy: best_effort
+  resume_partial_enabled: true
   dry_run: false      # 干运行模式（仅显示任务，不执行）
   max_tasks: 1        # 最大任务数 (0=无限制, 1=只读取第一行)
-  filter_ids: []      # 过滤特定ID列表
+  filter_ids: ["X2003-Sch2-1A"]  # 精确指定第一条数据记录
+
   max_workers: 1      # 并行工作进程数
   notify:
     enabled: true
@@ -459,6 +459,13 @@ global:
   enable_path_search: true  # 允许自动查找（如果配置文件中的路径不存在）
   
   small_molecule_cache_dir: null
+
+s0:
+  enabled: true
+  persist_graph: true
+  fail_policy: degrade
+  generate_intermediates: false
+  enable_dr_paths: false
 
 # ==================== Reference States (小分子参考态) ====================
 # 小分子离去基团目录，用于：

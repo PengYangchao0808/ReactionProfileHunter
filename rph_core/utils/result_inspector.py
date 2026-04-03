@@ -1,12 +1,11 @@
 import hashlib
-import hashlib
 import json
 import logging
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from rph_core.utils.file_io import write_xyz
 from rph_core.utils.geometry_tools import LogParser
@@ -22,7 +21,7 @@ class InspectionResult:
 
 
 class ResultInspector:
-    def __init__(self, work_dir: Path, config: dict, context: Optional[Dict[str, str]] = None, strict_mode: bool = True):
+    def __init__(self, work_dir: Path, config: Dict[str, Any], context: Optional[Dict[str, str]] = None, strict_mode: bool = True):
         self.work_dir = Path(work_dir)
         self.config = config
         self.context = context or {}
@@ -68,7 +67,7 @@ class ResultInspector:
             return env_value.lower() in {"1", "true", "yes"}
         return bool(self.config.get(name, False))
 
-    def _signature_payload(self, step_name: str) -> Dict[str, Optional[str]]:
+    def _signature_payload(self, step_name: str) -> Dict[str, Any]:
         theory_opt = self.config.get("theory", {}).get("optimization", {})
         theory_sp = self.config.get("theory", {}).get("single_point", {})
         payload = {
@@ -128,10 +127,7 @@ class ResultInspector:
 
     def _select_global_min_xyz(self) -> Optional[Path]:
         candidates = [
-            self.work_dir / "S1_ConfGeneration" / "product" / "product_global_min.xyz",
-            self.work_dir / "S1_ConfGeneration" / "product_global_min.xyz",
-            self.work_dir / "S1_Product" / "product" / "product_global_min.xyz",
-            self.work_dir / "S1_Product" / "product_global_min.xyz"
+            self.work_dir / "S1_ConfGeneration" / "product_min.xyz",
         ]
         for candidate in candidates:
             if candidate.exists() and candidate.stat().st_size > 0:
@@ -140,10 +136,7 @@ class ResultInspector:
 
     def _global_min_target(self) -> Path:
         candidates = [
-            self.work_dir / "S1_ConfGeneration" / "product" / "product_global_min.xyz",
-            self.work_dir / "S1_ConfGeneration" / "product_global_min.xyz",
-            self.work_dir / "S1_Product" / "product" / "product_global_min.xyz",
-            self.work_dir / "S1_Product" / "product_global_min.xyz"
+            self.work_dir / "S1_ConfGeneration" / "product_min.xyz",
         ]
         for candidate in candidates:
             if candidate.parent.exists():
@@ -153,9 +146,6 @@ class ResultInspector:
     def _select_sp_dir(self) -> Optional[Path]:
         candidates = [
             self.work_dir / "S1_ConfGeneration" / "product" / "dft",
-            self.work_dir / "S1_ConfGeneration" / "dft",
-            self.work_dir / "S1_Product" / "product" / "dft",
-            self.work_dir / "S1_Product" / "dft"
         ]
         for candidate in candidates:
             if candidate.exists():
@@ -195,8 +185,8 @@ class ResultInspector:
         return InspectionResult(True, "s1_complete", [path for path in [global_min, best_sp] if path])
 
     def _check_s2(self) -> InspectionResult:
-        s2_dir = self.work_dir / "S2_ReactionPath"
-        reactant = s2_dir / "reactant_complex.xyz"
+        s2_dir = self.work_dir / "S2_Retro"
+        reactant = s2_dir / "intermediate.xyz"
         ts_guess = s2_dir / "ts_guess.xyz"
         if reactant.exists() and reactant.stat().st_size > 0 and ts_guess.exists() and ts_guess.stat().st_size > 0:
             return InspectionResult(True, "s2_complete", [reactant, ts_guess])
@@ -239,9 +229,8 @@ class ResultInspector:
             if s4_complete:
                 return InspectionResult(True, "s4_complete", [])
 
-        # Fallback to原始逻辑（如果 is_step4_complete 失败）
         candidates = [
-            self.work_dir / "features_raw.csv",
+            self.work_dir / "S4_Data" / "features_raw.csv",
         ]
         for csv_path in candidates:
             if csv_path.exists() and csv_path.stat().st_size > 100:

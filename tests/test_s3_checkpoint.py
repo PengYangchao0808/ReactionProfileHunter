@@ -71,7 +71,7 @@ class TestS3Checkpoint:
         mgr = CheckpointManager(tmp_path)
         mgr.initialize_state(product_smiles="C", config=mock_config)
         
-        s3_dir = tmp_path / "S3_TransitionAnalysis"
+        s3_dir = tmp_path / "S3_TS"
         s3_dir.mkdir(parents=True, exist_ok=True)
         
         assert mgr.is_step3_complete(s3_dir, mock_config) is False
@@ -80,7 +80,7 @@ class TestS3Checkpoint:
         mgr = CheckpointManager(tmp_path)
         mgr.initialize_state(product_smiles="C", config=mock_config)
         
-        s3_dir = tmp_path / "S3_TransitionAnalysis"
+        s3_dir = tmp_path / "S3_TS"
         s3_dir.mkdir(parents=True, exist_ok=True)
         
         ts_final = s3_dir / "ts_final.xyz"
@@ -101,7 +101,7 @@ class TestS3Checkpoint:
                 "step3_signature": step3_sig,
                 "input_hashes": {
                     "ts_guess": "abc123",
-                    "reactant": "def456",
+                    "intermediate": "def456",
                     "product": "ghi789",
                 }
             }
@@ -113,7 +113,7 @@ class TestS3Checkpoint:
             check_signature=True,
             input_hashes={
                 "ts_guess": "abc123",
-                "reactant": "def456",
+                "intermediate": "def456",
                 "product": "ghi789",
             }
         ) is True
@@ -122,7 +122,7 @@ class TestS3Checkpoint:
         mgr = CheckpointManager(tmp_path)
         mgr.initialize_state(product_smiles="C", config=mock_config)
         
-        s3_dir = tmp_path / "S3_TransitionAnalysis"
+        s3_dir = tmp_path / "S3_TS"
         s3_dir.mkdir(parents=True, exist_ok=True)
         
         ts_final = s3_dir / "ts_final.xyz"
@@ -153,7 +153,7 @@ class TestS3Checkpoint:
         mgr = CheckpointManager(tmp_path)
         mgr.initialize_state(product_smiles="C", config=mock_config)
         
-        s3_dir = tmp_path / "S3_TransitionAnalysis"
+        s3_dir = tmp_path / "S3_TS"
         s3_dir.mkdir(parents=True, exist_ok=True)
         
         ts_final = s3_dir / "ts_final.xyz"
@@ -174,7 +174,7 @@ class TestS3Checkpoint:
                 "step3_signature": step3_sig,
                 "input_hashes": {
                     "ts_guess": "abc123",
-                    "reactant": "def456",
+                    "intermediate": "def456",
                     "product": "ghi789",
                 }
             }
@@ -186,7 +186,7 @@ class TestS3Checkpoint:
             check_signature=True,
             input_hashes={
                 "ts_guess": "different_hash",
-                "reactant": "def456",
+                "intermediate": "def456",
                 "product": "ghi789",
             }
         ) is False
@@ -195,7 +195,7 @@ class TestS3Checkpoint:
         mgr = CheckpointManager(tmp_path)
         mgr.initialize_state(product_smiles="C", config=mock_config)
         
-        s3_dir = tmp_path / "S3_TransitionAnalysis"
+        s3_dir = tmp_path / "S3_TS"
         s3_dir.mkdir(parents=True, exist_ok=True)
         
         sp_meta = s3_dir / "sp_matrix_metadata.json"
@@ -216,7 +216,7 @@ class TestS3Checkpoint:
         mgr = CheckpointManager(tmp_path)
         mgr.initialize_state(product_smiles="C", config=mock_config)
         
-        s3_dir = tmp_path / "S3_TransitionAnalysis"
+        s3_dir = tmp_path / "S3_TS"
         s3_dir.mkdir(parents=True, exist_ok=True)
         
         ts_final = s3_dir / "ts_final.xyz"
@@ -296,7 +296,7 @@ class TestS3Checkpoint:
         mgr = CheckpointManager(tmp_path)
         mgr.initialize_state(product_smiles="C", config=mock_config)
 
-        s3_dir = tmp_path / "S3_TransitionAnalysis"
+        s3_dir = tmp_path / "S3_TS"
         s3_dir.mkdir(parents=True, exist_ok=True)
 
         ts_final = s3_dir / "ts_final.xyz"
@@ -316,7 +316,7 @@ class TestS3Checkpoint:
                 "step3_signature": step3_sig,
                 "input_hashes": {
                     "ts_guess": "abc123",
-                    "reactant": "def456",
+                    "intermediate": "def456",
                     "product": "ghi789",
                 },
                 "upstream_step2_signature": {"k": "v1"},
@@ -327,7 +327,7 @@ class TestS3Checkpoint:
             s3_dir,
             mock_config,
             check_signature=True,
-            input_hashes={"ts_guess": "abc123", "reactant": "def456", "product": "ghi789"},
+            input_hashes={"ts_guess": "abc123", "intermediate": "def456", "product": "ghi789"},
             upstream_step2_signature={"k": "v2"},
         ) is False
 

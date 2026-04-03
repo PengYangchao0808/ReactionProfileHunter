@@ -15,6 +15,15 @@ from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 
+from rph_core.utils.layout_contract import (
+    canonical_output_files,
+    check_step_minimal_complete,
+    iter_step_ids,
+    resolve_required_files,
+    resolve_step_dir,
+    seed_steps_template,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -89,6 +98,18 @@ class CheckpointManager:
 
         self.logger = logging.getLogger(f"{__name__}[{work_dir.name}]")
 
+    def _ensure_seeded_steps(self, state: PipelineState) -> None:
+        seeded = seed_steps_template()
+        for key, value in seeded.items():
+            if key not in state.steps:
+                state.steps[key] = StepCheckpoint(
+                    step_name=value["step_name"],
+                    completed=value["completed"],
+                    timestamp=value["timestamp"],
+                    output_files=value["output_files"],
+                    metadata=value["metadata"],
+                )
+
     def save_state(self, state: PipelineState):
         """
         保存pipeline状态
@@ -101,7 +122,7 @@ class CheckpointManager:
         with open(self.state_file, 'w', encoding='utf-8') as f:
             json.dump(state.to_dict(), f, indent=2, ensure_ascii=False)
 
-        self.logger.info(f"✓ 状态已保存: {self.state_file}")
+        self.logger.debug(f"✓ 状态已保存: {self.state_file}")
 
     def load_state(self) -> Optional[PipelineState]:
         """
@@ -119,11 +140,12 @@ class CheckpointManager:
                 data = json.load(f)
 
             state = PipelineState.from_dict(data)
-            self.logger.info(f"✓ 状态已加载: {self.state_file}")
+            self._ensure_seeded_steps(state)
+            self.logger.debug(f"✓ 状态已加载: {self.state_file}")
 
             # 打印已完成步骤
             completed_steps = [k for k, v in state.steps.items() if v.completed]
-            self.logger.info(f"  已完成步骤: {completed_steps}")
+            self.logger.debug(f"  已完成步骤: {completed_steps}")
 
             return state
 
@@ -247,7 +269,7 @@ class CheckpointManager:
         包含字段：
         - theory.optimization: engine, method, basis, dispersion, route, rescue_route, nproc, mem
         - theory.single_point: engine, method, basis, aux_basis, solvent, nproc, maxcore
-        - step3.intermediate_opt: charge, multiplicity, enable_nbo
+        - step3.reactant_opt: charge, multiplicity, enable_nbo (TSOptimizer 实际使用的配置)
         - version: rph_core version
         """
         from rph_core.version import __version__
@@ -255,7 +277,8 @@ class CheckpointManager:
         theory_opt = config.get('theory', {}).get('optimization', {})
         theory_sp = config.get('theory', {}).get('single_point', {})
         step3_cfg = config.get('step3', {})
-        intermediate_opt = step3_cfg.get('intermediate_opt', {})
+        # FIX: 使用 reactant_opt 而非 intermediate_opt (TSOptimizer 实际读取的配置)
+        reactant_opt = step3_cfg.get('reactant_opt', {})
 
         return {
             'version': __version__,
@@ -278,10 +301,11 @@ class CheckpointManager:
                 'nproc': theory_sp.get('nproc', 16),
                 'maxcore': theory_sp.get('maxcore', 4000),
             },
-            'step3_intermediate_opt': {
-                'charge': intermediate_opt.get('charge', 0),
-                'multiplicity': intermediate_opt.get('multiplicity', 1),
-                'enable_nbo': intermediate_opt.get('enable_nbo', False),
+            # FIX: 改用 reactant_opt (TSOptimizer 实际使用)
+            'step3_reactant_opt': {
+                'charge': reactant_opt.get('charge', 0),
+                'multiplicity': reactant_opt.get('multiplicity', 1),
+                'enable_nbo': reactant_opt.get('enable_nbo', False),
             }
         }
 
@@ -301,12 +325,17 @@ class CheckpointManager:
         if scan_config:
             scan_cfg.update(scan_config)
 
+        path_search_cfg = step2_cfg.get("path_search", {})
+        reaction_profiles = config.get("reaction_profiles", {}) or {}
+        profile_cfg = reaction_profiles.get(str(reaction_profile), {}) if reaction_profile else {}
+
         canonical_bonds = sorted((min(i, j), max(i, j)) for i, j in forming_bonds)
         product_hash = self.compute_file_hash(product_xyz) or ""
 
         return {
             "version": __version__,
             "reaction_profile": reaction_profile or "",
+            "s2_strategy": profile_cfg.get("s2_strategy", "retro_scan"),
             "product_xyz_hash": product_hash,
             "forming_bonds": [list(pair) for pair in canonical_bonds],
             "scan": {
@@ -318,6 +347,9 @@ class CheckpointManager:
                 "min_valid_points": scan_cfg.get("min_valid_points"),
                 "reject_boundary_maximum": scan_cfg.get("reject_boundary_maximum"),
                 "require_local_peak": scan_cfg.get("require_local_peak"),
+            },
+            "path_search": {
+                "enabled": path_search_cfg.get("enabled", False),
             },
         }
 
@@ -362,178 +394,76 @@ class CheckpointManager:
             steps={},
             config_snapshot=config
         )
+        self._ensure_seeded_steps(state)
 
-        s1_dir = self.work_dir / "S1_ConfGeneration"
-        product_min = s1_dir / "product_min.xyz"
-        if product_min.exists():
-            s1_files = {"product_xyz": str(product_min)}
-            chk = s1_dir / "product" / "dft" / "conf_000.chk"
-            if chk.exists(): s1_files["product_checkpoint"] = str(chk)
-            fchk = s1_dir / "product" / "dft" / "conf_000.fchk"
-            if fchk.exists(): s1_files["product_fchk"] = str(fchk)
-            log = s1_dir / "product" / "dft" / "conf_000.log"
-            if log.exists(): s1_files["product_log"] = str(log)
-            thermo = s1_dir / "product" / "dft" / "conformer_thermo.csv"
-            if thermo.exists(): s1_files["product_thermo"] = str(thermo)
+        now = datetime.now().isoformat()
+        completed_any = False
+        for step_id in iter_step_ids():
+            step_key = f"step_{step_id}"
+            if check_step_minimal_complete(self.work_dir, step_id, config):
+                outputs = canonical_output_files(self.work_dir, step_id)
+                metadata: Dict[str, Any] = {}
+                if step_id == "s2":
+                    scan_profile = resolve_step_dir(self.work_dir, "s2") / "scan_profile.json"
+                    if scan_profile.exists():
+                        metadata["scan_profile_json"] = str(scan_profile)
+                        try:
+                            with open(scan_profile, "r", encoding="utf-8") as f:
+                                scan_data = json.load(f)
+                            raw_bonds = scan_data.get("forming_bonds") or []
+                            parsed_bonds = []
+                            for pair in raw_bonds:
+                                if isinstance(pair, list) and len(pair) == 2:
+                                    parsed_bonds.append((int(pair[0]), int(pair[1])))
+                            if parsed_bonds:
+                                metadata["forming_bonds"] = [list(pair) for pair in parsed_bonds]
+                                product_xyz = resolve_required_files(self.work_dir, "s1").get("product_xyz")
+                                if product_xyz and product_xyz.exists():
+                                    metadata["step2_signature"] = self.compute_step2_signature(
+                                        config=config,
+                                        product_xyz=product_xyz,
+                                        forming_bonds=tuple(parsed_bonds),
+                                        reaction_profile=None,
+                                        scan_config=None,
+                                    )
+                        except Exception as exc:
+                            self.logger.debug(f"Failed reading S2 scan_profile during rehydrate: {exc}")
+                if step_id == "s3":
+                    metadata["step3_signature"] = self._compute_step3_signature(config)
+                state.steps[step_key] = StepCheckpoint(
+                    step_name=step_id,
+                    completed=True,
+                    timestamp=now,
+                    output_files=outputs,
+                    metadata=metadata,
+                )
+                completed_any = True
+                self.logger.info(f"  ✓ 回填 Step {step_id.upper()}")
 
-            state.steps["step_s1"] = StepCheckpoint(
-                step_name="s1", completed=True, timestamp=datetime.now().isoformat(),
-                output_files=s1_files, metadata={}
-            )
-            self.logger.info("  ✓ 回填 Step 1")
-
-        s2_candidates = [
-            self.work_dir / "S2_GuessGeneration",
-            self.work_dir / "S2_Retro",
-        ]
-        s2_dir = next((d for d in s2_candidates if d.exists() and d.is_dir()), self.work_dir / "S2_Retro")
-        ts_guess = s2_dir / "ts_guess.xyz"
-        intermediate = s2_dir / "reactant_complex.xyz"
-        scan_profile = s2_dir / "scan_profile.json"
-        if ts_guess.exists() and intermediate.exists():
-            output_files = {
-                "ts_guess_xyz": str(ts_guess),
-                "reactant_xyz": str(intermediate),
-                "reactant_complex_xyz": str(intermediate),
-            }
-
-            metadata: Dict[str, Any] = {
-                "status": "COMPLETE",
-                "ts_guess_confidence": "high",
-                "degraded_reasons": [],
-                "scan_profile_json": str(scan_profile) if scan_profile.exists() else "",
-            }
-
-            forming_bonds_for_sig: Tuple[Tuple[int, int], ...] = tuple()
-            if scan_profile.exists():
+        for step_id in iter_step_ids():
+            step_key = f"step_{step_id}"
+            if state.steps.get(step_key, StepCheckpoint(step_id, False, "", {})).completed:
+                continue
+            status_file = resolve_step_dir(self.work_dir, step_id) / ".rph_step_status.json"
+            if status_file.exists():
                 try:
-                    with open(scan_profile, 'r') as f:
-                        scan_data = json.load(f)
-                    
-                    generation_method = scan_data.get("generation_method", "")
-                    metadata["generation_method"] = generation_method
-                    
-                    if generation_method == "xtb_path_search":
-                        ts_quality = scan_data.get("ts_quality", {}) or {}
-                        metadata["status"] = str(ts_quality.get("status", "COMPLETE"))
-                        metadata["ts_guess_confidence"] = str(ts_quality.get("ts_guess_confidence", "high"))
-                        metadata["degraded_reasons"] = list(ts_quality.get("degraded_reasons", []))
-                    else:
-                        quality = scan_data.get("scan_quality", {}) or {}
-                        metadata["status"] = str(quality.get("status", "COMPLETE"))
-                        metadata["ts_guess_confidence"] = str(quality.get("ts_guess_confidence", "high"))
-                        metadata["degraded_reasons"] = list(quality.get("degraded_reasons", []))
-                    
-                    raw_bonds = scan_data.get("forming_bonds") or []
-                    parsed_bonds = []
-                    for pair in raw_bonds:
-                        if isinstance(pair, list) and len(pair) == 2:
-                            parsed_bonds.append((int(pair[0]), int(pair[1])))
-                    if parsed_bonds:
-                        forming_bonds_for_sig = tuple(parsed_bonds)
-                        metadata["forming_bonds"] = [list(b) for b in parsed_bonds]
-                except Exception as exc:
-                    self.logger.debug(f"Failed to read S2 scan_profile during rehydrate: {exc}")
-
-            if product_min.exists() and forming_bonds_for_sig:
-                try:
-                    metadata["step2_signature"] = self.compute_step2_signature(
-                        config=config,
-                        product_xyz=product_min,
-                        forming_bonds=forming_bonds_for_sig,
-                        reaction_profile=None,
-                        scan_config=None,
-                    )
-                except Exception as exc:
-                    self.logger.debug(f"Failed to compute Step2 signature during rehydrate: {exc}")
-
-            state.steps["step_s2"] = StepCheckpoint(
-                step_name="s2", completed=True, timestamp=datetime.now().isoformat(),
-                output_files=output_files,
-                metadata=metadata,
-            )
-            self.logger.info("  ✓ 回填 Step 2")
-
-        s3_dir = self.work_dir / "S3_TransitionAnalysis"
-        sp_meta_path = s3_dir / "sp_matrix_metadata.json"
-
-        if sp_meta_path.exists():
-            ts_final: Optional[Path] = s3_dir / "ts_final.xyz"
-            if not ts_final.exists():
-                resume_file = s3_dir / "s3_resume.json"
-                if resume_file.exists():
-                    try:
-                        with open(resume_file, 'r') as f:
-                            r_data = json.load(f)
-                            resume_path = r_data.get("ts_opt", {}).get("optimized_xyz")
-                            ts_final = Path(resume_path) if resume_path else None
-                    except (json.JSONDecodeError, OSError):
-                        ts_final = None
-
-            if ts_final is not None and ts_final.exists():
-                signature_file = s3_dir / "step3_signature.json"
-                can_rehydrate_s3 = False
-                sig_data = {}
-                
-                if signature_file.exists():
-                    try:
-                        with open(signature_file, 'r') as f:
-                            sig_data = json.load(f)
-                        cached_sig = sig_data.get("step3_signature")
-                        if cached_sig == self._compute_step3_signature(config):
-                            can_rehydrate_s3 = True
-                        else:
-                            self.logger.warning("  ! Step 3 签名不匹配，不执行回填")
-                    except (json.JSONDecodeError, OSError, TypeError) as e:
-                        self.logger.warning(f"  ! 读取签名文件失败: {e}")
-                elif policy == "best_effort":
-                    self.logger.info("  ! Step 3 缺失签名文件，基于 best_effort 强制回填")
-                    can_rehydrate_s3 = True
-                
-                if can_rehydrate_s3:
-                    s3_files = {
-                        "ts_final_xyz": str(ts_final),
-                        "sp_matrix_metadata_json": str(sp_meta_path)
+                    with open(status_file, "r", encoding="utf-8") as f:
+                        status_data = json.load(f)
+                    metadata = {
+                        "phase": status_data.get("description") or status_data.get("phase") or "in_progress",
+                        "status_file": str(status_file),
                     }
-                    def _find_file(patterns: List[str], base: Path) -> Optional[str]:
-                        for p in patterns:
-                            matches = list(base.glob(p))
-                            if matches: return str(matches[0])
-                        return None
-
-                    s3_files["ts_fchk"] = _find_file(["ts_opt/**/*.fchk", "ts_opt/*.fchk"], s3_dir) or ""
-                    s3_files["ts_log"] = _find_file(["ts_opt/**/*.log", "ts_opt/*.log"], s3_dir) or ""
-                    s3_files["intermediate_fchk"] = _find_file(["S3_intermediate_opt/**/*.fchk", "S3_intermediate_opt/*.fchk"], s3_dir) or ""
-                    s3_files["intermediate_log"] = _find_file(["S3_intermediate_opt/**/*.log", "S3_intermediate_opt/*.log"], s3_dir) or ""
-
-                    energies = {}
-                    try:
-                        with open(sp_meta_path, 'r') as f:
-                            m = json.load(f)
-                            energies = {"e_ts": m.get("e_ts"), "e_intermediate": m.get("e_intermediate"), "e_product": m.get("e_product")}
-                    except (json.JSONDecodeError, OSError) as exc:
-                        self.logger.debug(f"Failed to load SP metadata during rehydrate: {exc}")
-
-                    rehydrated_hashes = sig_data.get("input_hashes")
-                    if not rehydrated_hashes:
-                        rehydrated_hashes = {
-                            "ts_guess": self.compute_file_hash(ts_guess) or "",
-                            "intermediate": self.compute_file_hash(intermediate) or "",
-                            "product": self.compute_file_hash(product_min) or ""
-                        }
-
-                    state.steps["step_s3"] = StepCheckpoint(
-                        step_name="s3", completed=True, timestamp=datetime.now().isoformat(),
-                        output_files=s3_files,
-                        metadata={
-                            "step3_signature": sig_data.get("step3_signature") or self._compute_step3_signature(config),
-                            "input_hashes": rehydrated_hashes,
-                            "energies": energies
-                        }
+                    state.steps[step_key] = StepCheckpoint(
+                        step_name=step_id,
+                        completed=False,
+                        timestamp=now,
+                        output_files=canonical_output_files(self.work_dir, step_id),
+                        metadata=metadata,
                     )
-                    self.logger.info("  ✓ 回填 Step 3")
+                except Exception as exc:
+                    self.logger.debug(f"Failed reading partial status for {step_id}: {exc}")
 
-        if not state.steps:
+        if not completed_any:
             self.logger.warning("未发现可回填的产物")
             return None
 
@@ -544,17 +474,13 @@ class CheckpointManager:
         M2-A: 检查 Step4 是否完成（考虑机制打包完整性）
         """
 
-        # 如果机制打包未启用，使用原始逻辑
-        mech_config = config.get('step4', {}).get('mechanism_packaging', {})
-        if not mech_config.get('enabled', False):
-            return self.is_step_completed('s4')
-
-        # 检查 features_raw.csv (V6.1: 更新为3文件契约)
-        features_raw_csv = s4_dir / "features_raw.csv"
-        if not features_raw_csv.exists() or features_raw_csv.stat().st_size == 0:
+        if not check_step_minimal_complete(self.work_dir, "s4", config):
             return False
 
-        # 检查 mech_index.json
+        mech_config = config.get('step4', {}).get('mechanism_packaging', {})
+        if not mech_config.get('enabled', False):
+            return True
+
         mech_index_path = s4_dir / "mech_index.json"
         if not mech_index_path.exists():
             return False
@@ -612,6 +538,55 @@ class CheckpointManager:
         # 保存状态
         self.save_state(state)
 
+    def mark_step_in_progress(
+        self,
+        step_name: str,
+        phase: str,
+        output_files: Optional[Dict[str, str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        state = self.load_state()
+        if state is None:
+            now = datetime.now().isoformat()
+            state = PipelineState(
+                product_smiles="",
+                work_dir=str(self.work_dir),
+                start_time=now,
+                last_update=now,
+                steps={},
+                config_snapshot={},
+            )
+
+        self._ensure_seeded_steps(state)
+        step_key = f"step_{step_name}"
+        base_metadata = dict(metadata or {})
+        base_metadata["phase"] = phase
+        state.steps[step_key] = StepCheckpoint(
+            step_name=step_name,
+            completed=False,
+            timestamp=datetime.now().isoformat(),
+            output_files=output_files or {},
+            metadata=base_metadata,
+        )
+        self.save_state(state)
+
+    def mark_step_failed_partial(
+        self,
+        step_name: str,
+        phase: str,
+        error_message: str,
+        output_files: Optional[Dict[str, str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        failure_metadata = dict(metadata or {})
+        failure_metadata.update({"phase": phase, "error_stage": phase, "error_message": error_message})
+        self.mark_step_in_progress(
+            step_name=step_name,
+            phase=phase,
+            output_files=output_files,
+            metadata=failure_metadata,
+        )
+
     def get_step_output(self, step_name: str, output_key: str) -> Optional[str]:
         """
         获取步骤的输出文件路径
@@ -657,6 +632,7 @@ class CheckpointManager:
             start_time=datetime.now().isoformat(),
             last_update=datetime.now().isoformat(),
             steps={
+                "step_s0": StepCheckpoint("s0", False, "", {}),
                 "step_s1": StepCheckpoint("s1", False, "", {}),
                 "step_s2": StepCheckpoint("s2", False, "", {}),
                 "step_s3": StepCheckpoint("s3", False, "", {}),
@@ -664,6 +640,8 @@ class CheckpointManager:
             },
             config_snapshot=config
         )
+
+        self._ensure_seeded_steps(state)
 
         self.save_state(state)
         self.logger.info("✓ Pipeline状态已初始化")

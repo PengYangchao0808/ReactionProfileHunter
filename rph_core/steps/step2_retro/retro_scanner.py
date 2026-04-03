@@ -12,8 +12,6 @@ from rph_core.utils.geometry_tools import GeometryUtils, LogParser
 from rph_core.utils.log_manager import LoggerMixin
 from rph_core.utils.naming_compat import (
     INTERMEDIATE_XYZ,
-    REACTANT_COMPLEX_XYZ,
-    create_intermediate_alias,
 )
 from rph_core.utils.qc_interface import XTBInterface
 from rph_core.utils.gau_xtb_interface import GauXTBOptimizer
@@ -83,10 +81,6 @@ class RetroScanner(LoggerMixin):
 
         candidates = [
             product_xyz / "product_min.xyz",
-            product_xyz / "product" / "product_global_min.xyz",
-            product_xyz / "product_global_min.xyz",
-            product_xyz / "product" / "global_min.xyz",
-            product_xyz / "global_min.xyz",
         ]
         resolved = next((p for p in candidates if p.exists()), None)
         if resolved is None:
@@ -310,12 +304,7 @@ class RetroScanner(LoggerMixin):
 
         intermediate_xyz = output_dir / INTERMEDIATE_XYZ
         shutil.copy2(Path(dipole_geom), intermediate_xyz)
-        create_intermediate_alias(Path(dipole_geom), output_dir)
         self.logger.info(f"[S2] Intermediate structure: {intermediate_xyz}")
-        self.logger.info(f"[S2] Backward compatibility alias: {REACTANT_COMPLEX_XYZ}")
-        
-        # Backward compatibility: keep both variable names for existing code
-        reactant_complex_xyz = intermediate_xyz
 
         degraded_reasons: List[str] = []
         status = "COMPLETE"
@@ -346,7 +335,6 @@ class RetroScanner(LoggerMixin):
                 "generation_method": "retro_scan_from_product",
                 "product_xyz": str(product_file),
                 "intermediate_xyz": str(intermediate_xyz),
-                "reactant_complex_xyz": str(reactant_complex_xyz),
                 "forming_bonds": [list(pair) for pair in bonds],
                 "scan_parameters": params,
                 "knee_point_algorithm": {
@@ -386,8 +374,8 @@ class RetroScanner(LoggerMixin):
         
         return (
             ts_guess_xyz_final,
-            reactant_complex_xyz,
-            reactant_complex_xyz,
+            intermediate_xyz,
+            intermediate_xyz,
             bonds,
             scan_profile_json,
             status,
@@ -540,9 +528,9 @@ $end
         ts_guess_xyz = output_dir / "ts_guess.xyz"
         shutil.copy2(result.ts_guess_xyz, ts_guess_xyz)
 
-        reactant_complex_xyz = output_dir / "reactant_complex.xyz"
-        if Path(start_xyz).resolve() != Path(reactant_complex_xyz).resolve():
-            shutil.copy2(start_xyz, reactant_complex_xyz)
+        intermediate_xyz = output_dir / INTERMEDIATE_XYZ
+        if Path(start_xyz).resolve() != Path(intermediate_xyz).resolve():
+            shutil.copy2(start_xyz, intermediate_xyz)
 
         degraded_reasons: List[str] = []
         status = "COMPLETE"
@@ -558,7 +546,7 @@ $end
                 "generation_method": "xtb_path_search",
                 "start_xyz": str(start_xyz),
                 "end_xyz": str(end_xyz),
-                "reactant_complex_xyz": str(reactant_complex_xyz),
+                "intermediate_xyz": str(intermediate_xyz),
                 "ts_guess_xyz": str(ts_guess_xyz),
                 "forming_bonds": [list(pair) for pair in (forming_bonds or [])],
                 "path_parameters": {
@@ -605,8 +593,8 @@ $end
 
         return (
             ts_guess_xyz,
-            reactant_complex_xyz,
-            reactant_complex_xyz,
+            intermediate_xyz,
+            intermediate_xyz,
             bonds,
             path_profile_json,
             status,
@@ -665,3 +653,98 @@ $end
         except Exception as e:
             self.logger.error(f"[S2] Gau_XTB TS optimization failed: {e}")
             return None, None
+
+    def run_with_mechanism_graph(
+        self,
+        product_xyz: Path,
+        mechanism_graph: Any,
+        output_dir: Path,
+        pathway: str = "primary",
+    ):
+        """
+        基于 S0 MechanismGraph 运行 RetroScan
+        
+        Args:
+            product_xyz: 产物 XYZ 文件路径
+            mechanism_graph: MechanismGraph 对象 (from S0)
+            output_dir: 输出目录
+            pathway: 路径 ID (如 "primary", "dr_endo")
+            
+        Returns:
+            Tuple of (ts_guess_xyz, intermediate_xyz, forming_bonds, ...)
+        """
+        from rph_core.steps.mechanism_classifier.models import MechanismGraph as MechGraphModel
+        
+        if not isinstance(mechanism_graph, MechGraphModel):
+            raise TypeError(f"Expected MechanismGraph, got {type(mechanism_graph)}")
+        
+        self.logger.info(f"[S2] Running with mechanism graph: {mechanism_graph.reaction_id}")
+        self.logger.info(f"[S2] Cyclo mode: {mechanism_graph.cyclo_mode}, Topology: {mechanism_graph.topology}")
+        
+        # 获取边属性
+        edges = mechanism_graph.get_edges_for_pathway(pathway)
+        
+        if not edges:
+            raise ValueError(f"No edges found for pathway: {pathway}")
+        
+        # 对于两步反应，需要处理中间体
+        if len(edges) == 2:
+            self.logger.info("[S2] Two-step reaction detected, will generate intermediate")
+            # Step 1: Product -> Intermediate
+            # Step 2: Intermediate -> Reactant (final)
+            # 这里我们先做第一步扫描
+            pass
+        
+        # 使用第一条边的 forming_bonds 作为扫描约束
+        first_edge = edges[0]
+        forming_bonds = first_edge.forming_bonds
+        breaking_bonds = first_edge.breaking_bonds
+        
+        self.logger.info(f"[S2] Using forming_bonds from S0: {forming_bonds}")
+        self.logger.info(f"[S2] Using breaking_bonds from S0: {breaking_bonds}")
+        
+        # 运行标准 retro scan
+        return self.run_retro_scan(
+            product_xyz=product_xyz,
+            output_dir=output_dir,
+            forming_bonds=forming_bonds,
+            scan_config=None,
+            atom_map=None,
+        )
+    
+    def get_edge_info_from_mechanism(
+        self,
+        mechanism_graph: Any,
+        pathway: str = "primary",
+    ) -> Dict[str, Any]:
+        """
+        从 MechanismGraph 提取边信息 (供调试/日志)
+        
+        Returns:
+            dict with edge details
+        """
+        from rph_core.steps.mechanism_classifier.models import MechanismGraph as MechGraphModel
+        
+        if not isinstance(mechanism_graph, MechGraphModel):
+            return {}
+        
+        edges = mechanism_graph.get_edges_for_pathway(pathway)
+        
+        info: Dict[str, Any] = {
+            "reaction_id": mechanism_graph.reaction_id,
+            "cyclo_mode": str(mechanism_graph.cyclo_mode),
+            "topology": str(mechanism_graph.topology),
+            "n_edges": len(edges),
+            "edges": []
+        }
+        
+        for edge in edges:
+            info["edges"].append({
+                "source": edge.source,
+                "target": edge.target,
+                "forming_bonds": edge.forming_bonds,
+                "breaking_bonds": edge.breaking_bonds,
+                "ts_type": edge.ts_type,
+            })
+        
+        return info

@@ -28,17 +28,6 @@ def test_resolve_product_xyz_v61_flat(tmp_path: Path, hunter: ReactionProfileHun
     assert resolved == product
 
 
-def test_resolve_product_xyz_v30_subdir(tmp_path: Path, hunter: ReactionProfileHunter) -> None:
-    s1 = tmp_path / "S1_ConfGeneration"
-    product_dir = s1 / "product"
-    product_dir.mkdir(parents=True)
-    product = product_dir / "global_min.xyz"
-    product.write_text("2\nproduct\nC 0 0 0\nC 0 0 1\n", encoding="utf-8")
-
-    resolved = hunter._resolve_product_xyz_for_s2(s1)
-    assert resolved == product
-
-
 def test_resolve_product_xyz_missing_raises(tmp_path: Path, hunter: ReactionProfileHunter) -> None:
     s1 = tmp_path / "S1_ConfGeneration"
     s1.mkdir()

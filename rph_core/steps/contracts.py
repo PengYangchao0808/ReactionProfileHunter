@@ -6,6 +6,12 @@ from rph_core.utils.data_types import MapId, MolIdx
 
 
 @dataclass
+class Step0Artifacts:
+    mechanism_graph_json: Path
+    mechanism_summary_json: Optional[Path] = None
+
+
+@dataclass
 class Step2Input:
     product_xyz: Path
     forming_bonds: Tuple[Tuple[MapId, MapId], ...]
