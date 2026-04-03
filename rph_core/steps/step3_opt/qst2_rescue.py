@@ -12,11 +12,13 @@ import subprocess
 import re
 import logging
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, Any, Optional
 from dataclasses import dataclass
+import numpy as np
 
 from rph_core.utils.log_manager import LoggerMixin
 from rph_core.utils.qc_interface import GaussianInterface
+from rph_core.utils.qc_runner import run_with_timeout, QCTimeoutError
 from rph_core.utils.file_io import read_xyz
 
 
@@ -27,10 +29,10 @@ logger = logging.getLogger(__name__)
 class QST2Result:
     """QST2优化结果"""
     converged: bool
-    coordinates: 'np.ndarray'
+    coordinates: Optional[np.ndarray]
     energy: float
     imaginary_freq: float
-    frequencies: 'np.ndarray'
+    frequencies: Optional[np.ndarray]
     output_file: Path
     method_used: str = "QST2"
 
@@ -46,7 +48,7 @@ class QST2RescueDriver(LoggerMixin):
 
     def __init__(self, method: str = "B3LYP", basis: str = "def2-SVP",
                  dispersion: str = "GD3BJ", nprocshared: int = 16,
-                 mem: str = "32GB", config: dict = {}):
+                 mem: str = "32GB", config: Optional[dict[str, Any]] = None):
         """
         初始化 QST2 驱动器
 
@@ -65,6 +67,14 @@ class QST2RescueDriver(LoggerMixin):
         self.mem = mem
 
         self.config = config or {}
+        timeout_cfg = self.config.get('optimization_control', {}).get('timeout', {})
+        timeout_default = timeout_cfg.get('default_seconds', 21600)
+        step3_cfg = self.config.get('step3', {})
+        timeout_value = step3_cfg.get('qst2_timeout_seconds', timeout_default)
+        try:
+            self.timeout_seconds = max(1, int(timeout_value))
+        except (TypeError, ValueError):
+            self.timeout_seconds = 21600
 
         exe_config = self.config.get('executables', {}).get('gaussian', {})
         use_wrapper = exe_config.get('use_wrapper', True)
@@ -117,18 +127,22 @@ class QST2RescueDriver(LoggerMixin):
 
         # 2. 提交计算
         try:
-            import subprocess
-            subprocess.run(f'"{self.gaussian_cmd}" {gjf_file.name} {log_file.name}',
-                           shell=True, cwd=output_dir, check=True)
-        except Exception as e:
+            cmd = [self.gaussian_cmd, gjf_file.name, log_file.name]
+            run_with_timeout(cmd=cmd, timeout=self.timeout_seconds, cwd=output_dir)
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError) as e:
             self.logger.error(f"QST2 运行失败: {e}")
             raise RuntimeError(f"QST2 运行失败: {e}")
+        except QCTimeoutError:
+            raise RuntimeError(f"QST2 计算超时: {gjf_file.name}")
             
         # 3. 解析结果
-        from rph_core.steps.step4_features.log_parser import GaussianLogParser
+        from rph_core.utils.gaussian_log_parser import GaussianLogParser
         res = GaussianLogParser.parse_log(log_file)
         
         imag_freq = 0.0
+        if res is None:
+            raise RuntimeError(f"QST2 日志解析失败: {log_file}")
+
         if res.frequencies is not None:
             imag_freqs = [f for f in res.frequencies if f < 0]
             if imag_freqs:
@@ -137,10 +151,10 @@ class QST2RescueDriver(LoggerMixin):
         return QST2Result(
             converged=res.converged,
             coordinates=res.coordinates,
-            energy=res.energy,
+            energy=float(res.energy) if res.energy is not None else 0.0,
             imaginary_freq=imag_freq,
             frequencies=res.frequencies,
-            output_file=res.output_file,
+            output_file=Path(res.output_file) if res.output_file is not None else log_file,
             method_used="QST2"
         )
 

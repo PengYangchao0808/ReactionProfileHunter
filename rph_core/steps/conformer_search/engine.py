@@ -24,7 +24,11 @@ Logic ported from: Original_Eddition/Conf_Search_20251222/config/confsearch.lib.
 # type: ignore
 
 import logging
+import os
 import shutil
+import subprocess
+import json
+import math
 import numpy as np
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
@@ -42,17 +46,17 @@ from rph_core.utils.qc_interface import (
 )
 from rph_core.utils.geometry_tools import GeometryUtils, LogParser
 from rph_core.utils.orca_interface import ORCAInterface
-from rph_core.utils.resource_utils import setup_ld_library_path
 from rph_core.utils.qc_task_runner import QCTaskRunner
+from rph_core.utils.qc_runner import run_with_timeout, QCTimeoutError
 from rph_core.utils.optimization_config import build_gaussian_route_from_config
 from rph_core.utils.isostat_runner import run_isostat
 from rph_core.utils.shermo_runner import run_shermo
+from rph_core.utils.ui import get_progress_manager
+from rph_core.utils.constants import HARTREE_TO_KCAL
+from rph_core.steps.conformer_search.state_manager import ConformerStateManager
 
 
 logger = logging.getLogger(__name__)
-
-HARTREE_TO_KCAL = 627.509
-
 
 class ConformerEngine(LoggerMixin):
     """
@@ -106,6 +110,7 @@ class ConformerEngine(LoggerMixin):
         self.crest_dir.mkdir(exist_ok=True)
         self.cluster_dir.mkdir(exist_ok=True)
         self.dft_dir.mkdir(exist_ok=True)
+        self.state_manager = ConformerStateManager(self.molecule_dir, self.molecule_name)
 
         self.logger.info(f"📁 Created molecule directory: {self.molecule_dir}")
 
@@ -205,68 +210,128 @@ class ConformerEngine(LoggerMixin):
         Returns:
             Tuple[Path, float]: (Path to global min XYZ, Global min SP Energy in Hartree)
         """
-        self.logger.info(f"🚀 Starting Unified Conformer Search for: {self.molecule_name}")
+        self.logger.info(f"[S1] 🚀 Starting Unified Conformer Search for: {self.molecule_name}")
+        pm = get_progress_manager()
+        if pm:
+            pm.update_step("s1", description=f"S1: [{self.molecule_name}] Starting conformer search")
+            pm.log_event("S1", f"Starting conformer search for {self.molecule_name}")
+
         mode = "two-stage (GFN0→GFN2)" if self.two_stage_enabled else "single-stage (GFN2)"
-        self.logger.info(f"   Mode: {mode}")
+        self.logger.info(f"[S1]    Mode: {mode}")
+        self.state_manager.start_run(smiles=smiles, two_stage_enabled=self.two_stage_enabled)
+        self._emit_s1_progress("run_started", {"mode": mode, "smiles": smiles})
+        if pm:
+            pm.log_event("S1", f"Conformer search mode: {mode}")
 
-        # Step 0: Final Output Check (Idempotency)
-        global_min_path = self.molecule_dir / f"{self.molecule_name}_global_min.xyz"
+        try:
+            global_min_path = self.molecule_dir / f"{self.molecule_name}_global_min.xyz"
 
-        if self._is_valid_xyz(global_min_path):
-            self.logger.info(f"⏭️ Found {global_min_path.name}, skipping conformer search")
+            if self._is_valid_xyz(global_min_path):
+                self.logger.info(f"[S1] ⏭️ Found {global_min_path.name}, skipping conformer search")
+                if pm:
+                    pm.log_event("S1", f"Found cache {global_min_path.name}, skipping conformer search")
 
-            # Extract energy - let ValueError propagate if extraction fails
-            energy = self._extract_energy_from_xyz(global_min_path)
-            self.logger.info(f"   Extracted energy: {energy:.6f} Hartree")
+                energy = self._extract_energy_from_xyz(global_min_path)
+                self.state_manager.set_global_min(self.molecule_name, energy, global_min_path)
+                self.state_manager.mark_run_complete()
+                self._emit_s1_progress(
+                    "run_reused",
+                    {"global_min_xyz": str(global_min_path), "energy_hartree": energy},
+                )
+                self.logger.info(f"[S1]    Extracted energy: {energy:.6f} Hartree")
+                if pm:
+                    pm.log_event("S1", f"Extracted cached energy: {energy:.6f} Hartree")
 
-            return global_min_path, energy
+                return global_min_path, energy
 
-        # Step 1: RDKit Embedding
-        initial_xyz = self._step_rdkit_embed(smiles)
+            if pm:
+                pm.enter_phase("S1", "Stage 1: RDKit conformer generation")
+                pm.update_step("s1", completed=5, description=f"S1: [{self.molecule_name}] RDKit Embedding")
+            initial_xyz = self._step_rdkit_embed(smiles)
 
-        # Step 2: CREST Search (Single or Two-Stage)
-        if self.two_stage_enabled and self.stage1_enabled and self.stage2_enabled:
-            self.logger.info("🔀 Executing two-stage CREST workflow (GFN0→GFN2)...")
-            crest_ensemble_file = self._step_two_stage_crest(initial_xyz)
-        else:
-            self.logger.info("📍 Executing single-stage CREST workflow (GFN2)...")
-            crest_ensemble_file = self._step_crest_search(initial_xyz)
+            if pm:
+                pm.enter_phase("S1", "Stage 2: CREST searching")
+                pm.update_step("s1", completed=15, description=f"S1: [{self.molecule_name}] CREST Search")
+            if self.two_stage_enabled and self.stage1_enabled and self.stage2_enabled:
+                self.logger.info("[S1] 🔀 Executing two-stage CREST workflow (GFN0→GFN2)...")
+                if pm:
+                    pm.log_event("S1", "Executing two-stage CREST workflow (GFN0->GFN2)")
+                crest_ensemble_file = self._step_two_stage_crest(initial_xyz)
+            else:
+                self.logger.info("[S1] 📍 Executing single-stage CREST workflow (GFN2)...")
+                if pm:
+                    pm.log_event("S1", "Executing single-stage CREST workflow (GFN2)")
+                crest_ensemble_file = self._step_crest_search(initial_xyz)
 
-        # Step 3: Process Ensemble (Cluster & Filter)
-        candidates = self._step_process_ensemble(crest_ensemble_file)
-        self.logger.info(f"🔍 Selected {len(candidates)} conformers for DFT optimization.")
+            if pm:
+                pm.update_step("s1", completed=45, description=f"S1: [{self.molecule_name}] Processing Ensemble")
+            candidates = self._step_process_ensemble(crest_ensemble_file)
+            self.logger.info(f"[S1] 🔍 Selected {len(candidates)} conformers for DFT optimization.")
+            if pm:
+                pm.log_event("S1", f"Selected {len(candidates)} conformers for DFT optimization")
 
-        if not candidates:
-            raise RuntimeError("No valid conformers found after CREST processing.")
+            if not candidates:
+                raise RuntimeError("No valid conformers found after CREST processing.")
 
-        # Step 4: DFT OPT-SP Coupled Loop
-        best_log, min_energy = self._step_dft_opt_sp_coupled(candidates)
+            if pm:
+                pm.enter_phase("S1", "Stage 4: DFT optimization")
+                pm.update_step("s1", completed=55, description=f"S1: [{self.molecule_name}] DFT optimization")
+            best_log, min_energy = self._step_dft_opt_sp_coupled(candidates)
 
-        # Step 5: Save Global Min
-        global_min_path = self.molecule_dir / f"{self.molecule_name}_global_min.xyz"
+            global_min_path = self.molecule_dir / f"{self.molecule_name}_global_min.xyz"
 
-        # Use final coordinates from the best conf
-        coords, symbols, _ = LogParser.extract_last_converged_coords(
-            best_log,
-            engine_type='auto'
-        )
+            coords, symbols, _ = LogParser.extract_last_converged_coords(
+                best_log,
+                engine_type='auto'
+            )
 
-        if coords is None:
-            raise RuntimeError(f"Failed to extract coordinates from {best_log}")
-        if symbols is None:
-            _, symbols = read_xyz(best_log)
+            if coords is None:
+                raise RuntimeError(f"Failed to extract coordinates from {best_log}")
+            if symbols is None:
+                _, symbols = read_xyz(best_log)
 
-        if symbols is None:
-            symbols = ["X"] * len(coords)
+            if symbols is None:
+                symbols = ["X"] * len(coords)
 
-        write_xyz(global_min_path, coords, symbols, title=f"Global Min SP E={min_energy:.6f}")
-        self.logger.info(f"🏆 Global Minimum Found: {global_min_path}")
-        self.logger.info(f"   SP Energy: {min_energy:.6f} Hartree")
+            write_xyz(global_min_path, coords, symbols, title=f"Global Min SP E={min_energy:.6f}")
+            best_name = Path(best_log).stem.replace("_Res", "")
+            self.state_manager.set_global_min(best_name, min_energy, global_min_path)
+            self.state_manager.mark_run_complete()
+            self._emit_s1_progress(
+                "run_completed",
+                {
+                    "global_min_xyz": str(global_min_path),
+                    "energy_hartree": min_energy,
+                    "best_conformer": best_name,
+                },
+            )
+            self.logger.info(f"[S1] 🏆 Global Minimum Found: {global_min_path}")
+            self.logger.info(f"[S1]    SP Energy: {min_energy:.6f} Hartree")
+            if pm:
+                pm.update_step("s1", completed=98, description=f"S1: [{self.molecule_name}] Finalizing global minimum")
+                pm.log_event("S1", f"Global minimum found: {global_min_path.name} (E={min_energy:.6f} Hartree)")
 
-        return global_min_path, min_energy
+            return global_min_path, min_energy
+        except Exception as exc:
+            self.state_manager.mark_run_failed(str(exc))
+            self._emit_s1_progress("run_failed", {"error": str(exc)})
+            raise
 
-    def _step_rdkit_embed(self, smiles: str) -> Path:
-        self.logger.info("  [1/5] RDKit 3D Embedding...")
+    def _step_rdkit_embed(self, smiles: str, num_conf: int = 1) -> Path:
+        """
+        Generate initial 3D structure using RDKit.
+        
+        Args:
+            smiles: Input SMILES string
+            num_conf: Number of conformers to generate (default: 1)
+            
+        Returns:
+            Path to generated XYZ file
+        """
+        self.logger.info(f"[S1]   [1/5] RDKit 3D Embedding (num_conf={num_conf})...")
+        pm = get_progress_manager()
+        if pm:
+            pm.log_event("S1", f"RDKit 3D embedding started (num_conf={num_conf})")
         mol = Chem.MolFromSmiles(smiles)
         mol = Chem.AddHs(mol)
 
@@ -283,16 +348,29 @@ class ConformerEngine(LoggerMixin):
         assert symbols is not None, "Symbols cannot be None after RDKit generation"
 
         write_xyz(output_path, coords, symbols, title="RDKit_Initial")
+        if pm:
+            pm.log_event("S1", f"RDKit embedding completed: {output_path.name}")
         return output_path
 
     def _step_crest_search(self, input_xyz: Path) -> Path:
         """Single-stage CREST search (GFN2 only) - backward compatible."""
-        self.logger.info("  [2/5] CREST Global Search (Single-Stage)...")
+        self.logger.info("[S1]   [2/5] CREST Global Search (Single-Stage)...")
+        pm = get_progress_manager()
+        if pm:
+            pm.log_event("S1", "CREST global search started (single-stage GFN2)")
 
         crest_ensemble_file = self.crest_dir / "ensemble.xyz"
 
         if self._is_valid_xyz(crest_ensemble_file, min_size=500):
-            self.logger.info("⏭️ Found CREST cache, skipping search")
+            self.logger.info("[S1] ⏭️ Found CREST cache, skipping search")
+            self.state_manager.mark_crest_stage(
+                stage_name="single_stage",
+                status="cached",
+                output_file=crest_ensemble_file,
+            )
+            if pm:
+                pm.log_event("S1", "Found CREST cache, skipping single-stage search")
+            self._emit_s1_progress("crest_single_stage_cached", {"ensemble": str(crest_ensemble_file)})
             return crest_ensemble_file
 
         best_xyz = self.crest_interface.run_conformer_search(input_xyz, self.crest_dir)
@@ -300,10 +378,26 @@ class ConformerEngine(LoggerMixin):
         ensemble_file = self.crest_dir / "crest_conformers.xyz"
         if ensemble_file.exists():
             shutil.copy(ensemble_file, crest_ensemble_file)
+            self.state_manager.mark_crest_stage(
+                stage_name="single_stage",
+                status="completed",
+                output_file=crest_ensemble_file,
+            )
+            if pm:
+                pm.log_event("S1", f"CREST single-stage completed: {crest_ensemble_file.name}")
+            self._emit_s1_progress("crest_single_stage_completed", {"ensemble": str(crest_ensemble_file)})
             return crest_ensemble_file
 
         self.logger.warning("crest_conformers.xyz not found, using best struct only.")
         shutil.copy(best_xyz, crest_ensemble_file)
+        self.state_manager.mark_crest_stage(
+            stage_name="single_stage",
+            status="fallback",
+            output_file=crest_ensemble_file,
+        )
+        if pm:
+            pm.log_event("S1", f"CREST fallback to best structure: {crest_ensemble_file.name}")
+        self._emit_s1_progress("crest_single_stage_fallback", {"ensemble": str(crest_ensemble_file)})
         return crest_ensemble_file
 
     def _step_two_stage_crest(self, input_xyz: Path) -> Path:
@@ -318,74 +412,112 @@ class ConformerEngine(LoggerMixin):
         # ==============================================================
         # Stage 1: GFN0 Conformer Search
         # ==============================================================
-        self.logger.info("  [2a/5] Stage 1: CREST GFN0 Conformer Search (Fast Sampling)...")
+        self.logger.info("[S1]   [2a/5] Stage 1: CREST GFN0 Conformer Search (Fast Sampling)...")
+        pm = get_progress_manager()
+        if pm:
+            pm.enter_phase("S1", "Stage 2: CREST searching")
+            pm.log_event("S1", "Stage 1 CREST GFN0 search started")
 
         stage1_dir = self.crest_dir / "stage1_gfn0"
         stage1_dir.mkdir(exist_ok=True)
-
-        gfn0_ensemble = self._run_crest_stage(
-            input_xyz=input_xyz,
-            output_dir=stage1_dir,
-            gfn_level=self.stage1_gfn_level,
-            stage_name="GFN0",
-            additional_flags=self.stage1_crest_flags
-        )
+        stage1_ensemble = stage1_dir / "crest_conformers.xyz"
+        if self._is_valid_xyz(stage1_ensemble, min_size=500):
+            gfn0_ensemble = stage1_ensemble
+            self.logger.info("[S1]   [2a/5] Stage 1 ensemble cached, skipping GFN0 search")
+            self.state_manager.mark_crest_stage("stage1_gfn0", "cached", output_file=stage1_ensemble)
+        else:
+            gfn0_ensemble = self._run_crest_stage(
+                input_xyz=input_xyz,
+                output_dir=stage1_dir,
+                gfn_level=self.stage1_gfn_level,
+                stage_name="GFN0",
+                additional_flags=self.stage1_crest_flags
+            )
+            self.state_manager.mark_crest_stage("stage1_gfn0", "completed", output_file=gfn0_ensemble)
 
         # ==============================================================
         # Stage 1: ISOSTAT Clustering
         # ==============================================================
         if self.stage1_run_clustering:
-            self.logger.info("  [2b/5] Stage 1: ISOSTAT Clustering...")
-            gfn0_clustered = self._run_isostat_clustering(
-                input_ensemble=gfn0_ensemble,
-                output_dir=stage1_dir,
-                energy_window=self.stage1_energy_window,
-                gdis=self.stage1_isostat_gdis,
-                edis=self.stage1_isostat_edis
-            )
+            self.logger.info("[S1]   [2b/5] Stage 1: ISOSTAT Clustering...")
+            stage1_cluster = stage1_dir / "cluster" / "cluster.xyz"
+            if self._is_valid_xyz(stage1_cluster):
+                gfn0_clustered = stage1_cluster
+                self.logger.info("[S1]   [2b/5] Stage 1 cluster cached, skipping")
+                self.state_manager.mark_crest_stage("stage1_cluster", "cached", output_file=stage1_cluster)
+            else:
+                gfn0_clustered = self._run_isostat_clustering(
+                    input_ensemble=gfn0_ensemble,
+                    output_dir=stage1_dir,
+                    energy_window=self.stage1_energy_window,
+                    gdis=self.stage1_isostat_gdis,
+                    edis=self.stage1_isostat_edis
+                )
+                self.state_manager.mark_crest_stage("stage1_cluster", "completed", output_file=gfn0_clustered)
         else:
             gfn0_clustered = gfn0_ensemble
 
         # ==============================================================
         # Stage 2: GFN2 Batch Optimization
         # ==============================================================
-        self.logger.info("  [2c/5] Stage 2: CREST GFN2 Batch Optimization (Refinement)...")
+        self.logger.info("[S1]   [2c/5] Stage 2: CREST GFN2 Batch Optimization (Refinement)...")
+        if pm:
+            pm.enter_phase("S1", "Stage 3: xTB optimization")
+            pm.log_event("S1", "Stage 2 GFN2 xTB batch optimization started")
 
         stage2_dir = self.crest_dir / "stage2_gfn2"
         stage2_dir.mkdir(exist_ok=True)
-
-        gfn2_ensemble = self._run_crest_batch_optimization(
-            input_xyz=gfn0_clustered,
-            output_dir=stage2_dir,
-            gfn_level=self.stage2_gfn_level,
-            stage_name="GFN2",
-            additional_flags=self.stage2_crest_flags
-        )
+        stage2_ensemble = stage2_dir / "crest_ensemble.xyz"
+        if self._is_valid_xyz(stage2_ensemble, min_size=500):
+            gfn2_ensemble = stage2_ensemble
+            self.logger.info("[S1]   [2c/5] Stage 2 ensemble cached, skipping GFN2 optimization")
+            self.state_manager.mark_crest_stage("stage2_gfn2", "cached", output_file=stage2_ensemble)
+        else:
+            gfn2_ensemble = self._run_crest_batch_optimization(
+                input_xyz=gfn0_clustered,
+                output_dir=stage2_dir,
+                gfn_level=self.stage2_gfn_level,
+                stage_name="GFN2",
+                additional_flags=self.stage2_crest_flags
+            )
+            self.state_manager.mark_crest_stage("stage2_gfn2", "completed", output_file=gfn2_ensemble)
 
         # ==============================================================
         # Stage 2: ISOSTAT Clustering
         # ==============================================================
         if self.stage2_run_clustering:
-            self.logger.info("  [2d/5] Stage 2: ISOSTAT Clustering...")
-            gfn2_clustered = self._run_isostat_clustering(
-                input_ensemble=gfn2_ensemble,
-                output_dir=stage2_dir,
-                energy_window=self.stage2_energy_window,
-                gdis=self.stage2_isostat_gdis,
-                edis=self.stage2_isostat_edis
-            )
+            self.logger.info("[S1]   [2d/5] Stage 2: ISOSTAT Clustering...")
+            stage2_cluster = stage2_dir / "cluster" / "cluster.xyz"
+            if self._is_valid_xyz(stage2_cluster):
+                gfn2_clustered = stage2_cluster
+                self.logger.info("[S1]   [2d/5] Stage 2 cluster cached, skipping")
+                self.state_manager.mark_crest_stage("stage2_cluster", "cached", output_file=stage2_cluster)
+            else:
+                gfn2_clustered = self._run_isostat_clustering(
+                    input_ensemble=gfn2_ensemble,
+                    output_dir=stage2_dir,
+                    energy_window=self.stage2_energy_window,
+                    gdis=self.stage2_isostat_gdis,
+                    edis=self.stage2_isostat_edis
+                )
+                self.state_manager.mark_crest_stage("stage2_cluster", "completed", output_file=gfn2_clustered)
         else:
             gfn2_clustered = gfn2_ensemble
 
         # ==============================================================
         # Final: Copy to standard location for downstream processing
         # ==============================================================
-        self.logger.info("  [2e/5] Finalizing ensemble for DFT processing...")
+        self.logger.info("[S1]   [2e/5] Finalizing ensemble for DFT processing...")
 
         final_ensemble = self.crest_dir / "ensemble.xyz"
-        shutil.copy(gfn2_clustered, final_ensemble)
+        if not final_ensemble.exists() or final_ensemble.resolve() != gfn2_clustered.resolve():
+            shutil.copy(gfn2_clustered, final_ensemble)
+        self.state_manager.mark_crest_stage("final_ensemble", "completed", output_file=final_ensemble)
+        self._emit_s1_progress("crest_two_stage_completed", {"ensemble": str(final_ensemble)})
 
-        self.logger.info(f"  ✓ Two-stage CREST complete: {final_ensemble}")
+        self.logger.info(f"[S1]   ✓ Two-stage CREST complete: {final_ensemble}")
+        if pm:
+            pm.log_event("S1", f"Two-stage CREST completed: {final_ensemble.name}")
 
         return final_ensemble
 
@@ -517,7 +649,7 @@ class ConformerEngine(LoggerMixin):
         return result.cluster_xyz
 
     def _step_process_ensemble(self, ensemble_file: Path) -> List[Path]:
-        self.logger.info("  [3/5] Processing Ensemble (Clustering & Filtering)...")
+        self.logger.info("[S1]   [3/5] Processing Ensemble (Clustering & Filtering)...")
 
         isomers_xyz = self.cluster_dir / "isomers.xyz"
         shutil.copy(ensemble_file, isomers_xyz)
@@ -540,6 +672,19 @@ class ConformerEngine(LoggerMixin):
 
         conformers = self._split_xyz_ensemble(result.cluster_xyz, self.dft_dir, limit=n_calc)
         self.logger.info(f"    - Found {len(conformers)} conformers from isostat (Limit: {n_calc}).")
+        self.state_manager.mark_crest_stage(
+            stage_name="dft_candidates",
+            status="completed",
+            output_file=result.cluster_xyz,
+            metadata={"selected": len(conformers), "limit": n_calc},
+        )
+
+        for idx, conf_path in enumerate(conformers):
+            self.state_manager.upsert_conformer(
+                conf_name=f"conf_{idx:03d}",
+                source_xyz=conf_path,
+                source_index=idx,
+            )
 
         if not conformers:
             return []
@@ -623,8 +768,13 @@ class ConformerEngine(LoggerMixin):
         return selected
 
     def _step_dft_opt_sp_coupled(self, candidates: List[Path]) -> Tuple[Path, float]:
-        self.logger.info("  [4/5] DFT OPT-SP Coupled Loop (Single-Conformer Atomic Operation)...")
+        self.logger.info(f"[S1]   [4/5] DFT OPT-SP Coupled Loop (Total {len(candidates)} conformers)...")
 
+        pm = get_progress_manager()
+        total_confs = len(candidates)
+        if pm:
+            pm.enter_phase("S1", "Stage 4: DFT optimization")
+            pm.log_event("S1", f"DFT OPT-SP loop started for {total_confs} conformers")
         best_weight = -1.0
         best_log = None
         best_sp_energy = None
@@ -632,9 +782,39 @@ class ConformerEngine(LoggerMixin):
 
         for idx, xyz_file in enumerate(candidates):
             conf_name = f"conf_{idx:03d}"
-            self.logger.info(f"    [{idx+1}/{len(candidates)}] 处理 {conf_name}...")
+            self.state_manager.upsert_conformer(conf_name, Path(xyz_file).resolve(), idx)
+
+            cached_record = self.state_manager.get_conformer_record(conf_name)
+            if self.state_manager.is_conformer_completed(conf_name) and isinstance(cached_record, dict):
+                cached_log_file = Path(str(cached_record.get("log_file", "")))
+                if cached_log_file.exists():
+                    self.logger.info(
+                        f"[S1]     ⏭️ [{idx+1}/{len(candidates)}] Skipping completed conformer: "
+                        f"{self.molecule_name} - {conf_name}"
+                    )
+                    if pm:
+                        pm.log_event("S1", f"Conformer cached {idx+1}/{total_confs}: {conf_name}")
+                    self._emit_s1_progress("conformer_skipped", {"conformer": conf_name, "index": idx + 1, "total": total_confs})
+                    records.append(self._restore_record_from_state(cached_record))
+                    continue
+
+            if pm:
+                progress = 55 + int(((idx + 1) / max(total_confs, 1)) * 40)
+                pm.update_step(
+                    "s1",
+                    completed=min(progress, 95),
+                    description=f"S1: [{self.molecule_name}] Opt conformer {idx+1}/{total_confs}"
+                )
+                pm.set_subtask("S1", "DFT Conformers", idx + 1, total_confs)
+                pm.log_event("S1", f"Optimizing conformer {idx+1}/{total_confs}: {conf_name}")
+
+            self.logger.info(f"[S1]     🔄 [{idx+1}/{len(candidates)}] 正在优化构象: {self.molecule_name} - {conf_name}")
+            self.state_manager.mark_conformer_running(conf_name)
+            self._emit_s1_progress("conformer_started", {"conformer": conf_name, "index": idx + 1, "total": total_confs})
 
             current_xyz_source = Path(xyz_file).resolve()
+            converged_this_conf = False
+            conf_failed_reason = ""
 
             for attempt in range(2):
                 current_conf_name = f"{conf_name}_Res" if attempt > 0 else conf_name
@@ -687,11 +867,26 @@ class ConformerEngine(LoggerMixin):
                     attempt=attempt
                 )
 
+                if opt_converged:
+                    self.state_manager.mark_opt_attempt(conf_name, attempt, "converged", log_file)
+                    self._emit_s1_progress("opt_converged", {"conformer": conf_name, "attempt": attempt})
+                else:
+                    self.state_manager.mark_opt_attempt(
+                        conf_name,
+                        attempt,
+                        "failed",
+                        log_file,
+                        note="gaussian_opt_not_converged",
+                    )
+                    self._emit_s1_progress("opt_failed", {"conformer": conf_name, "attempt": attempt})
+
                 if not opt_converged:
                     if attempt == 0:
                         if next_xyz and next_xyz.exists():
                             current_xyz_source = next_xyz
+                        conf_failed_reason = "opt_failed_attempt_0"
                         continue
+                    conf_failed_reason = "opt_failed_after_rescue"
                     break
 
                 final_coords, final_symbols, parse_error = LogParser.extract_last_converged_coords(
@@ -700,6 +895,7 @@ class ConformerEngine(LoggerMixin):
                 )
 
                 if final_coords is None:
+                    conf_failed_reason = "opt_parse_failed"
                     if attempt == 0:
                         continue
                     break
@@ -718,9 +914,26 @@ class ConformerEngine(LoggerMixin):
                 )
 
                 if sp_energy is None:
-                    if attempt == 0:
-                        continue
+                    self.state_manager.mark_sp_result(
+                        conf_name,
+                        status="failed",
+                        output_file=sp_out_file,
+                        note="orca_sp_failed",
+                    )
+                    self._emit_s1_progress("sp_failed", {"conformer": conf_name, "output": str(sp_out_file)})
+                    self.logger.warning(
+                        "      ⚠️  ORCA SP failed after converged OPT; skipping rescue OPT retry and moving on"
+                    )
+                    conf_failed_reason = "sp_failed"
                     break
+
+                self.state_manager.mark_sp_result(
+                    conf_name,
+                    status="completed",
+                    output_file=sp_out_file,
+                    sp_energy=sp_energy,
+                )
+                self._emit_s1_progress("sp_completed", {"conformer": conf_name, "energy_hartree": sp_energy})
 
                 shermo_out = self.dft_dir / f"{current_conf_name}_Shermo.sum"
                 thermo = run_shermo(
@@ -738,7 +951,7 @@ class ConformerEngine(LoggerMixin):
 
                 g_used = thermo.g_conc if thermo.g_conc is not None else thermo.g_sum
 
-                records.append({
+                record = {
                     "name": current_conf_name,
                     "g_used": g_used,
                     "g_sum": thermo.g_sum,
@@ -748,8 +961,19 @@ class ConformerEngine(LoggerMixin):
                     "s_total": thermo.s_total,
                     "sp_energy": sp_energy,
                     "log_file": log_file
-                })
+                }
+                records.append(record)
+                self.state_manager.mark_conformer_completed(conf_name, self._serialize_record_for_state(record))
+                self._emit_s1_progress("conformer_completed", {"conformer": conf_name, "energy_hartree": sp_energy})
+                converged_this_conf = True
                 break
+
+            if not converged_this_conf:
+                self.state_manager.mark_conformer_failed(conf_name, conf_failed_reason or "conformer_failed")
+                self._emit_s1_progress(
+                    "conformer_failed",
+                    {"conformer": conf_name, "reason": conf_failed_reason or "conformer_failed"},
+                )
 
         if not records:
             raise RuntimeError("所有 OPT-SP 循环均失败。")
@@ -799,12 +1023,158 @@ class ConformerEngine(LoggerMixin):
             ]))
         output_file.write_text("\n".join(lines))
 
+        # Generate conformer_energies.json for S4 Step1 activation extractor
+        self._write_conformer_energies_json(records)
+
         if best_log is None or best_sp_energy is None:
             raise RuntimeError("无法确定最佳构象。")
 
         self.logger.info(f"  ✅ 最佳构象权重: {best_weight:.4f} ({best_log.name})")
+        self._emit_s1_progress(
+            "best_conformer_selected",
+            {
+                "conformer": Path(best_log).stem,
+                "weight": best_weight,
+                "energy_hartree": best_sp_energy,
+            },
+        )
+        if pm:
+            pm.log_event("S1", f"Best conformer selected: {best_log.name} (weight={best_weight:.4f})")
 
         return best_log, best_sp_energy
+
+    def _emit_s1_progress(self, event: str, payload: Optional[Dict[str, Any]] = None) -> None:
+        summary = self.state_manager.get_summary()
+        message: Dict[str, Any] = {
+            "schema": "s1_progress_v1",
+            "event": event,
+            "molecule": self.molecule_name,
+            "state_file": str(self.state_manager.state_path),
+            "summary": {
+                "total_conformers": summary.get("total_conformers", 0),
+                "completed": summary.get("completed", 0),
+                "failed": summary.get("failed", 0),
+                "running": summary.get("running", 0),
+                "best_conformer": summary.get("best_conformer", ""),
+                "global_min_energy": summary.get("global_min_energy"),
+            },
+        }
+        if payload:
+            message["payload"] = payload
+        safe_message = self._json_safe(message)
+        self.logger.info("S1_PROGRESS|" + json.dumps(safe_message, sort_keys=True, ensure_ascii=True, default=str, allow_nan=False))
+
+    def _json_safe(self, value: Any) -> Any:
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+        if isinstance(value, dict):
+            return {str(k): self._json_safe(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._json_safe(item) for item in value]
+        return value
+
+    def _serialize_record_for_state(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(record)
+        payload["log_file"] = str(record.get("log_file", ""))
+        return payload
+
+    def _restore_record_from_state(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(record)
+        payload["log_file"] = Path(str(record.get("log_file", "")))
+        return payload
+
+    def _write_conformer_energies_json(self, records: List[Dict[str, Any]]) -> None:
+        """Write conformer_energies.json for S4 Step1 activation extractor.
+
+        Converts conformer thermo records to JSON format expected by
+        step1_activation extractor (list of energies in kcal/mol).
+
+        Args:
+            records: List of conformer records with 'g_used' or 'sp_energy'
+        """
+        import json
+
+        energies = []
+        for record in records:
+            # Prefer g_used (Gibbs free energy), fallback to sp_energy
+            g_val = record.get("g_used")
+            if g_val is not None:
+                energies.append(float(g_val) * HARTREE_TO_KCAL)
+            else:
+                sp_val = record.get("sp_energy")
+                if sp_val is not None:
+                    energies.append(float(sp_val) * HARTREE_TO_KCAL)
+
+        if energies:
+            json_output = self.dft_dir / "conformer_energies.json"
+            with open(json_output, 'w') as f:
+                json.dump(energies, f, indent=2)
+            self.logger.info(f"  ✅ Generated conformer_energies.json ({len(energies)} conformers)")
+
+    def run_optimization_only(self, smiles: str) -> Tuple[Path, float]:
+        """
+        Run optimization-only workflow for rigid small molecules (Skip CREST).
+
+        Flow:
+        1. RDKit embed (generate 1 conformer)
+        2. DFT Opt+Freq+SP (Standard/Rescue)
+        3. Identify best result
+
+        Args:
+            smiles: SMILES string of the molecule
+
+        Returns:
+            Tuple of (path_to_global_min_xyz, energy_hartree)
+        """
+        import time
+        start_time = time.time()
+        self.logger.info(f"[S1] 🚀 启动小分子优化流程: {self.molecule_name}")
+        self.logger.info(f"[S1]    SMILES: {smiles}")
+        self.state_manager.start_run(smiles=smiles, two_stage_enabled=False)
+
+        pm = get_progress_manager()
+        if pm:
+            pm.update_step("s1", description=f"S1: [{self.molecule_name}] Small molecule optimization")
+
+        # Check for existing result (idempotency)
+        global_min_path = self.molecule_dir / f"{self.molecule_name}_global_min.xyz"
+        if self._is_valid_xyz(global_min_path):
+            try:
+                e_sp = self._extract_energy_from_xyz(global_min_path)
+                self.state_manager.set_global_min(self.molecule_name, e_sp, global_min_path)
+                self.state_manager.mark_run_complete()
+                self.logger.info(f"[S1] ⏭️  Found existing global min: {global_min_path.name} (E={e_sp:.6f})")
+                return global_min_path, e_sp
+            except ValueError:
+                self.logger.warning(f"[S1] Existing global min found but energy extract failed. Re-running.")
+
+        # 1. RDKit Initialization (1 conformer)
+        if pm:
+            pm.update_step("s1", description=f"S1: [{self.molecule_name}] RDKit Initialization")
+        self.logger.info("[S1]   [1/2] RDKit Initialization (Single Conformer)...")
+        init_xyz = self._step_rdkit_embed(smiles, num_conf=1)
+
+        # 2. DFT Optimization & SP
+        # We treat the single RDKit structure as the "candidate list"
+        self.logger.info("[S1]   [2/2] DFT Optimization & SP (Direct)...")
+        candidates = [init_xyz]
+        
+        # Reuse the coupled DFT/SP logic
+        # This handles Opt -> Freq -> SP and returns the best log/energy
+        best_log, best_energy = self._step_dft_opt_sp_coupled(candidates)
+
+        # 3. Finalize
+        duration = time.time() - start_time
+        self.logger.info(f"[S1] ✅ Optimization-Only completed in {duration:.1f}s. Best E={best_energy:.6f}")
+
+
+        # Create global min XYZ from the best log
+        self._write_global_min_xyz(best_log, best_energy, global_min_path)
+        self.state_manager.set_global_min(Path(best_log).stem.replace("_Res", ""), best_energy, global_min_path)
+        self.state_manager.mark_run_complete()
+
+        return global_min_path, best_energy
+
 
 
     def _run_gaussian_opt(
@@ -823,7 +1193,6 @@ class ConformerEngine(LoggerMixin):
                 - Path: Coordinates for next attempt (None if success, or fallback path if failed)
         """
         import subprocess
-        import os
 
         # [v3.0 FIX] Path Sanitization - Ensure absolute paths
         dft_dir_abs = self.dft_dir.resolve()
@@ -859,30 +1228,18 @@ class ConformerEngine(LoggerMixin):
 
         self.logger.debug(f"  [Path-Fix] Executing in: {dft_dir_abs}")
 
-        if use_wrapper:
-            cmd = f'"{g16_cmd}" {local_gjf.name} {local_log.name}'
-        else:
-            cmd = f"{g16_cmd} {local_gjf.name} {local_log.name}"
+        cmd = [g16_cmd, local_gjf.name, local_log.name]
+        timeout_value = self.theory_opt.get('timeout')
+        if timeout_value is None:
+            timeout_cfg = self.config.get('optimization_control', {}).get('timeout', {})
+            timeout_value = timeout_cfg.get('default_seconds', 21600)
+        try:
+            timeout_seconds = max(1, int(timeout_value))
+        except (TypeError, ValueError):
+            timeout_seconds = 21600
 
         try:
-            result = subprocess.run(
-                cmd,
-                shell=True,
-                cwd=dft_dir_abs,
-                timeout=self.theory_opt.get('timeout', 3600),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-
-            # Check shell-level errors
-            if result.returncode != 0:
-                self.logger.error(f"      ❌ Gaussian execution failed (returncode {result.returncode})")
-                self.logger.debug(f"      stderr: {result.stderr}")
-
-                # [v3.0 FIX] Determine next coordinate source on failure
-                next_xyz = self._determine_rescue_xyz(xyz_source_abs, local_log, attempt)
-                return False, next_xyz
+            run_with_timeout(cmd=cmd, timeout=timeout_seconds, cwd=dft_dir_abs)
 
             # Check if log file was created and is non-empty
             if not local_log.exists() or local_log.stat().st_size == 0:
@@ -919,11 +1276,17 @@ class ConformerEngine(LoggerMixin):
                 next_xyz = self._try_extract_rescue_coords(local_log, xyz_source_abs)
                 return False, next_xyz
 
-        except subprocess.TimeoutExpired:
+        except QCTimeoutError:
             self.logger.error(f"      ❌ OPT timeout")
 
             # [v3.0 FIX] Try rescue from partial log
             next_xyz = self._try_extract_rescue_coords(local_log, xyz_source_abs)
+            return False, next_xyz
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"      ❌ Gaussian execution failed (returncode {e.returncode})")
+
+            # [v3.0 FIX] Determine next coordinate source on failure
+            next_xyz = self._determine_rescue_xyz(xyz_source_abs, local_log, attempt)
             return False, next_xyz
         except Exception as e:
             self.logger.error(f"      ❌ OPT failed: {e}")
@@ -1000,9 +1363,6 @@ class ConformerEngine(LoggerMixin):
         Returns:
             SP Energy in Hartree, or None if failed
         """
-        import subprocess
-        import os
-
         # Handle None symbols
         if symbols is None or coords is None:
             self.logger.error("      ❌ Invalid coordinates or symbols")
@@ -1020,11 +1380,15 @@ class ConformerEngine(LoggerMixin):
         local_inp = dft_dir_abs / inp_path_abs.name
         local_out = dft_dir_abs / out_path_abs.name
 
-        # Setup ORCA environment
-        setup_ld_library_path([])
+        env = os.environ.copy()
+        if hasattr(self.orca_sp, "_build_orca_runtime_env"):
+            env = self.orca_sp._build_orca_runtime_env()
+
+        nprocs_configured = int(getattr(self.orca_sp, "nprocs", 1) or 1)
+        nprocs_for_sp = self._check_mpirun_compatibility(nprocs_configured, env)
 
         # Generate ORCA input directly (write to local path)
-        self._generate_orca_sp_input(coords, symbols_list, local_inp)
+        self._generate_orca_sp_input(coords, symbols_list, local_inp, nprocs_for_sp)
 
         if not local_inp.exists():
             self.logger.error(f"      ❌ ORCA input not created: {local_inp}")
@@ -1037,17 +1401,11 @@ class ConformerEngine(LoggerMixin):
         self.logger.info(f"      🔄 Running ORCA SP: {local_inp.name}")
 
         try:
-            cmd = [str(self.orca_sp.orca_binary), local_inp.name]
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                cwd=dft_dir_abs,
+            local_out = self.orca_sp._run_orca(
+                local_inp,
+                dft_dir_abs,
                 timeout=self.theory_sp.get('timeout', 3600)
             )
-
-            if not local_out.exists() or local_out.stat().st_size == 0:
-                local_out.write_text(result.stdout + result.stderr)
 
             out_text = local_out.read_text(errors="ignore")
             if "ORCA TERMINATED NORMALLY" in out_text:
@@ -1059,8 +1417,18 @@ class ConformerEngine(LoggerMixin):
                 match = __import__('re').search(energy_pattern, out_text)
                 if match:
                     return float(match.group(1))
+                self.logger.warning(f"      ⚠️  ORCA terminated normally but energy not found in output")
+                return None
 
             self.logger.warning(f"      ⚠️  ORCA did not terminate normally")
+            out_lines = out_text.split('\n')[-30:]
+            err_summary = '\n'.join([f"         {line}" for line in out_lines if line.strip()])
+            if err_summary:
+                self.logger.debug(f"      ORCA output tail:\n{err_summary}")
+            if "error" in out_text.lower() or "fatal" in out_text.lower():
+                error_lines = [line for line in out_lines if any(kw in line.lower() for kw in ['error', 'fatal', 'abort'])]
+                for line in error_lines[-3:]:
+                    self.logger.error(f"         {line.strip()}")
             return None
 
         except subprocess.TimeoutExpired:
@@ -1074,7 +1442,8 @@ class ConformerEngine(LoggerMixin):
         self,
         coords: np.ndarray,
         symbols: List[str],
-        inp_file: Path
+        inp_file: Path,
+        nprocs: int
     ):
         """
         Generate ORCA SP input file from coordinates.
@@ -1103,9 +1472,11 @@ end
 
         coord_content = "\n".join(coord_lines)
 
+        pal_block = f"%pal nprocs {nprocs} end\n" if nprocs > 1 else ""
+
         inp_content = f"""{route}
 %maxcore {self.orca_sp.maxcore}
-%pal nprocs {self.orca_sp.nprocs} end
+{pal_block}
 {cpcm_block}
  * xyz 0 1
 {coord_content}
@@ -1114,6 +1485,33 @@ end
 
         inp_file.write_text(inp_content)
         self.logger.debug(f"  ✓ ORCA SP input written: {inp_file}")
+
+    def _check_mpirun_compatibility(self, nprocs: int, env: Optional[Dict[str, str]] = None) -> int:
+        if nprocs <= 1:
+            return 1
+
+        search_path = (env or os.environ).get("PATH", "")
+        mpirun_path = shutil.which("mpirun", path=search_path)
+        if not mpirun_path:
+            self.logger.warning("  mpirun not found, using single-core ORCA")
+            return 1
+        try:
+            result = subprocess.run(
+                [mpirun_path, "-np", "1", "/bin/true"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env=env
+            )
+            if result.returncode != 0:
+                stderr_text = (result.stderr or "").strip()
+                stdout_text = (result.stdout or "").strip()
+                probe_error = stderr_text or stdout_text or f"return code {result.returncode}"
+                self.logger.warning(f"  mpirun probe failed ({probe_error}), using single-core ORCA")
+                return 1
+        except Exception:
+            pass
+        return nprocs
 
     def _is_valid_xyz(self, path: Path, min_size: int = 100) -> bool:
         """
@@ -1211,3 +1609,22 @@ end
             f"File may be corrupted or format unknown. "
             f"Tried: XYZ comment line and companion log files."
         )
+
+    def _write_global_min_xyz(self, log_file: Path, energy: float, output_path: Path) -> None:
+        from rph_core.utils.geometry_tools import LogParser
+        
+        coords, symbols, parse_error = LogParser.extract_last_converged_coords(
+            log_file,
+            engine_type='auto'
+        )
+
+        if coords is None:
+            raise RuntimeError(f"Failed to extract coordinates from {log_file}")
+        if symbols is None:
+            _, symbols = read_xyz(log_file)
+
+        if symbols is None:
+            symbols = ["X"] * len(coords)
+
+        write_xyz(output_path, coords, symbols, title=f"Global Min SP E={energy:.6f}")
+        self.logger.info(f"[S1] ✓ Global minimum saved: {output_path.name}")

@@ -1,16 +1,38 @@
 # config/AGENTS.md
 
 ## OVERVIEW
-defaults + QC 输入模板（Gaussian .gjf/.com）。
+Single source of truth for all runtime configuration: `defaults.yaml` (executable paths, theory levels, step parameters, resources) + Gaussian job templates (`templates/*.gjf`/`.com`).
 
 ## WHERE TO LOOK
-- `defaults.yaml`
-- `templates/gaussian_*.gjf` / `templates/gaussian_*.com`
+| File | Role |
+|------|------|
+| `defaults.yaml` | All config keys; never duplicate or fork this file |
+| `templates/gaussian_*.gjf` | Gaussian input templates; read at runtime via `config_loader.py` |
+| `templates/gaussian_*.com` | Alternative Gaussian input templates |
+
+## KEY CONFIG SECTIONS
+| Section | Purpose |
+|---------|---------|
+| `executables.*` | Paths for Gaussian, ORCA, xTB, CREST, Multiwfn, ISOSTAT, Shermo, wrapper_path |
+| `resources.*` | `mem`, `nproc`, `orca_maxcore_safety` |
+| `theory.preoptimization` | xTB GFN level, overlap threshold |
+| `theory.optimization` | DFT method/basis/dispersion/engine |
+| `theory.single_point` | SP method/basis/engine |
+| `step1.conformer_search` | `two_stage_enabled`, stage configs, energy windows |
+| `reaction_profiles.*.s2_strategy` | S2 strategy routing (`forward_scan` or `retro_scan`) |
+| `step2.xtb_settings` | xTB scan controls (`gfn_level`, `solvent`, optional `etemp`) |
+| `step3.reactant_opt.enable_nbo` | NBO disabled by default — enable explicitly |
+| `run.*` | `source` (single/batch/dataset), `resume`, `output_root` |
+| `step4.enabled_plugins` | Filter extractor plugins; if absent, all registered run |
+| `step4.mlr.columns` | Override `DEFAULT_MLR_COLUMNS` for `features_mlr.csv` |
 
 ## CONVENTIONS
-- defaults.yaml 是配置单一来源；代码应通过统一 config 传递获取，而非散落默认值。
-- 模板修改需考虑可追溯性与复用策略（例如 oldchk/Guess=Read 若启用）。
+- `defaults.yaml` is the **only** config file — do not create forks. `.bak` files exist but must not diverge in behavior.
+- All code reads config through `rph_core/utils/config_loader.py` (passed as dict at runtime).
+- Templates are read at runtime; do not hardcode template strings in Python source.
+- `oldchk`/`Guess=Read` continuations: if enabling, check template traceability.
 
 ## ANTI-PATTERNS
-- 在代码中复制模板字符串（应读 templates 文件）
-- 维护多份 defaults 并让行为分叉（仓库存在 .bak：避免逻辑依赖它）
+- Copying template strings inline in Python code.
+- Maintaining multiple `defaults.yaml` forks with diverged behavior.
+- Reading config files directly from steps — config dict is passed from orchestrator.

@@ -94,6 +94,10 @@ class ORCAInterface:
         self._sp_cache_hits = 0
         self._sp_cache_misses = 0
 
+    def _pal_block(self, nprocs: Optional[int] = None) -> str:
+        effective_nprocs = self.nprocs if nprocs is None else nprocs
+        return f"%pal nprocs {effective_nprocs} end\n" if effective_nprocs > 1 else ""
+
     def _compute_sp_cache_key(
         self,
         xyz_file: Path,
@@ -229,10 +233,11 @@ class ORCAInterface:
         if extra_input_block:
             extra_block = f"\n{extra_input_block}\n"
 
+        pal_block = self._pal_block()
+
         inp_content = f"""{route}
  %maxcore {self.maxcore}
- %pal nprocs {self.nprocs} end
- {cpcm_block}
+ {pal_block}{cpcm_block}
 {extra_block}
   * xyz {charge} {spin}
 {xyz_content}
@@ -291,10 +296,11 @@ class ORCAInterface:
         else:
             xyz_content = xyz_copy.read_text()
 
+        pal_block = self._pal_block()
+
         inp_content = f"""{route}
  %maxcore {self.maxcore}
- %pal nprocs {self.nprocs} end
- {cpcm_block}
+ {pal_block}{cpcm_block}
 {constraints_block}
   * xyz {charge} {spin}
 {xyz_content}
@@ -430,6 +436,88 @@ class ORCAInterface:
         logger.error("未找到 ORCA 可执行文件")
         return None
 
+    def _build_orca_runtime_env(self) -> Dict[str, str]:
+        env = os.environ.copy()
+
+        if self.orca_binary is None:
+            return env
+
+        orca_dir = self.orca_binary.parent
+
+        mpi_bin_candidates = [
+            orca_dir / "openmpi" / "bin",
+            orca_dir / "mpi" / "bin",
+            orca_dir / "bin",
+            orca_dir,
+        ]
+
+        # Also derive MPI bin candidates from LD_LIBRARY_PATH entries
+        # e.g. /opt/openmpi418/lib -> /opt/openmpi418/bin
+        current_ld = env.get("LD_LIBRARY_PATH", "")
+        for ld_entry in current_ld.split(":"):
+            ld_entry = ld_entry.strip()
+            if not ld_entry:
+                continue
+            ld_path = Path(ld_entry)
+            if ld_path.name == "lib" or ld_path.name.startswith("lib"):
+                sibling_bin = ld_path.parent / "bin"
+                if sibling_bin not in mpi_bin_candidates:
+                    mpi_bin_candidates.append(sibling_bin)
+
+        selected_mpi_bin: Optional[Path] = None
+        for candidate in mpi_bin_candidates:
+            mpirun_path = candidate / "mpirun"
+            if mpirun_path.exists() and mpirun_path.is_file():
+                selected_mpi_bin = candidate
+                break
+
+        current_path = env.get("PATH", "")
+        path_parts = [p for p in current_path.split(":") if p]
+        preferred_path_parts = [str(orca_dir)]
+        if selected_mpi_bin is not None:
+            preferred_path_parts.append(str(selected_mpi_bin))
+            self.logger.debug(f"ORCA runtime PATH prefixed with MPI bin: {selected_mpi_bin}")
+        env["PATH"] = ":".join(
+            preferred_path_parts + [
+                p for p in path_parts
+                if p not in preferred_path_parts and not ("openmpi" in p.lower() and p != str(selected_mpi_bin))
+            ]
+        )
+
+        mpi_lib_candidates = [
+            orca_dir / "openmpi" / "lib",
+            orca_dir / "mpi" / "lib",
+            orca_dir / "lib",
+            orca_dir,
+        ]
+
+        selected_lib_paths = [str(p) for p in mpi_lib_candidates if p.exists() and p.is_dir()]
+        if selected_mpi_bin is not None:
+            selected_mpi_lib = selected_mpi_bin.parent / "lib"
+            selected_mpi_lib_str = str(selected_mpi_lib)
+            if selected_mpi_lib.exists() and selected_mpi_lib.is_dir() and selected_mpi_lib_str not in selected_lib_paths:
+                selected_lib_paths.insert(0, selected_mpi_lib_str)
+        if str(orca_dir) not in selected_lib_paths:
+            selected_lib_paths.insert(0, str(orca_dir))
+
+        if selected_lib_paths:
+            current_ld = env.get("LD_LIBRARY_PATH", "")
+            ld_parts = [p for p in current_ld.split(":") if p]
+            merged = selected_lib_paths + [
+                p for p in ld_parts
+                if p not in selected_lib_paths and not ("openmpi" in p.lower() and p not in selected_lib_paths)
+            ]
+            env["LD_LIBRARY_PATH"] = ":".join(merged)
+
+        env.setdefault("ORCA_PATH", str(orca_dir))
+        env.setdefault("ORCA_DIR", str(orca_dir))
+
+        if os.getuid() == 0:
+            env.setdefault("OMPI_ALLOW_RUN_AS_ROOT", "1")
+            env.setdefault("OMPI_ALLOW_RUN_AS_ROOT_CONFIRM", "1")
+
+        return env
+
     def _run_orca(
         self,
         inp_file: Path,
@@ -483,9 +571,9 @@ class ORCAInterface:
                 temp_out_file = temp_inp_file.with_suffix('.out')
                 shutil.copy(inp_file, temp_inp_file)
 
-                cmd = [str(self.orca_binary), str(temp_inp_file.name)]
+                cmd = [str(self.orca_binary), str(temp_inp_file.resolve())]
 
-                env = os.environ.copy()
+                env = self._build_orca_runtime_env()
                 env['ORCA_TEMP_DIR'] = str(temp_dir)
 
                 with open(temp_out_file, 'w') as out_f:
@@ -549,7 +637,8 @@ class ORCAInterface:
                     stdout=out_f,
                     stderr=subprocess.PIPE,
                     cwd=str(output_dir),
-                    text=True
+                    text=True,
+                    env=self._build_orca_runtime_env()
                 )
 
                 # 等待进程完成或超时
@@ -776,7 +865,7 @@ end
         # 组装完整输入文件
         inp_content = f"""{route}
 %maxcore {self.maxcore}
-%pal nprocs {self.nprocs} end
+{self._pal_block()}
 {cpcm_block}
  * xyzfile 0 1 {xyz_copy.name}
  *
@@ -984,7 +1073,7 @@ end
         # 组装完整输入文件
         inp_content = f"""{route}
 %maxcore {self.maxcore}
-%pal nprocs {self.nprocs} end
+{self._pal_block()}
 {cpcm_block}
 {geom_block}
  * xyzfile {charge} {spin} {xyz_copy.name}
@@ -1027,6 +1116,7 @@ end
         inp_file_abs = inp_file.resolve()
         out_file = inp_file.with_suffix('.out')
         cmd = [str(self.orca_binary), str(inp_file_abs)]
+        env = self._build_orca_runtime_env()
 
         try:
             with open(out_file, 'w') as out_f:
@@ -1035,7 +1125,8 @@ end
                     stdout=out_f,
                     stderr=subprocess.PIPE,
                     cwd=str(output_dir),
-                    text=True
+                    text=True,
+                    env=env
                 )
 
                 # 等待进程完成（无超时限制）

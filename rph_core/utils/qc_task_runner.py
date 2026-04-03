@@ -25,6 +25,7 @@ import numpy as np
 
 from rph_core.utils.log_manager import LoggerMixin
 from rph_core.utils.optimization_config import OptimizationConfig, build_gaussian_route_from_config
+from rph_core.utils.keyword_translator import KeywordTranslator
 from rph_core.utils.qc_interface import (
     XTBInterface,
     GaussianInterface,
@@ -33,6 +34,7 @@ from rph_core.utils.qc_interface import (
 )
 from rph_core.utils.orca_interface import ORCAInterface
 from rph_core.utils.file_io import write_xyz, read_xyz
+from rph_core.utils.ui import get_progress_manager
 
 logger = logging.getLogger(__name__)
 
@@ -97,9 +99,10 @@ class QCTaskRunner(LoggerMixin):
         self.theory_opt = config.get('theory', {}).get('optimization', {})
         self.theory_sp = config.get('theory', {}).get('single_point', {})
 
-        # 资源配置
-        self.nprocshared = self.theory_opt.get('nproc', 16)
-        self.mem = self.theory_opt.get('mem', '32GB')
+        # 资源配置 - 统一从 resources 读取
+        resources = config.get('resources', {})
+        self.nprocshared = resources.get('nproc', 16)
+        self.mem = resources.get('mem', '32GB')
 
         # 优化配置
         self.method = self.theory_opt.get('method', 'B3LYP')
@@ -134,11 +137,16 @@ class QCTaskRunner(LoggerMixin):
             method=self.theory_sp.get('method', 'WB97M-V'),
             basis=self.theory_sp.get('basis', 'def2-TZVPP'),
             aux_basis=self.theory_sp.get('aux_basis', 'def2/J'),
-            nprocs=self.theory_sp.get('nproc', 16),
+            nprocs=self.nprocshared,  # 统一从 resources 读取
             maxcore=self.theory_sp.get('maxcore', 4000),
             solvent=self.theory_sp.get('solvent', 'acetone'),
             config=self.config
         )
+
+        self.normal_route = None
+        self.normal_rescue_route = None
+        self.ts_route = None
+        self.ts_rescue_route = None
 
         self.logger.info(f"QCTaskRunner 初始化: {self.engine_type} {self.method}/{self.basis}")
         self.logger.info(f"  L2 SP: {self.orca.method}/{self.orca.basis}")
@@ -180,7 +188,30 @@ class QCTaskRunner(LoggerMixin):
             route = step3_keywords.get('berny')
         if not route:
             route = "# B3LYP/def2SVP EmpiricalDispersion=GD3BJ Opt=(TS, CalcFC, NoEigenTest) Freq"
+        if not self._route_has_method_basis(route):
+            route = route.strip()
+            if route.startswith("#"):
+                route = route.lstrip("#").strip()
+                if route.lower().startswith("p "):
+                    route = route[1:].strip()
+            route = f"{self._build_ts_route_prefix()} {route}".strip()
         return self._ensure_ts_force_constants(route)
+
+    def _route_has_method_basis(self, route: str) -> bool:
+        pattern = r"\b[A-Za-z0-9][A-Za-z0-9+_.-]*\s*/\s*[A-Za-z0-9][A-Za-z0-9+_.()\-]*"
+        return re.search(pattern, route) is not None
+
+    def _build_ts_route_prefix(self) -> str:
+        method = self.theory_opt.get('method', 'B3LYP')
+        basis = KeywordTranslator.to_gaussian_basis(self.theory_opt.get('basis', 'def2SVP'))
+        dispersion = KeywordTranslator.to_gaussian_dispersion(self.theory_opt.get('dispersion'))
+        solvent = KeywordTranslator.to_gaussian_solvent(self.theory_opt.get('solvent'))
+        parts = [f"#p {method}/{basis}"]
+        if dispersion:
+            parts.append(dispersion)
+        if solvent:
+            parts.append(solvent.strip())
+        return " ".join(parts)
 
     def _ensure_ts_force_constants(self, route: str) -> str:
         normalized = route
@@ -222,32 +253,15 @@ class QCTaskRunner(LoggerMixin):
     ) -> QCOptimizationResult:
         """
         执行基态优化 + 频率验证 + L2 SP 完整流程
-
-        策略:
-        0. [NEW] xTB 预优化 (如果检测到原子重叠，避免 Gaussian 崩溃)
-        1. 标准几何优化
-        2. 频率分析验证无虚频
-        3. 失败则救援: CalcFC + MaxStep=10
-        4. L2 高精度单点能
-
-        Args:
-            xyz_file: 输入 XYZ 文件
-            output_dir: 输出目录
-            charge: 分子电荷
-            spin: 自旋多重度
-            enable_l2_sp: 是否启用 L2 SP
-            enable_nbo: 是否在 OPT+Freq 中集成 NBO (默认 Pop=NBO)
-            old_checkpoint: 复用之前的 checkpoint
-
-        Returns:
-            QCOptimizationResult 对象
+...
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        self.logger.info(f"=== Normal 模式优化: {xyz_file.name} ===")
+        self.logger.info(f"[QCTaskRunner] === Normal 模式优化: {xyz_file.name} ===")
 
         # 【NEW】Step 0: 几何预处理 (检测重叠 → xTB 预优化)
+
         from rph_core.utils.geometry_preprocessor import GeometryPreprocessor
         
         preprocessor = GeometryPreprocessor(self.config)
@@ -298,7 +312,8 @@ class QCTaskRunner(LoggerMixin):
         # L2 高精度 SP
         l2_energy = None
         if enable_l2_sp and opt_result.converged:
-            self.logger.info("执行 L2 高精度单点能...")
+            self.logger.info("[QCTaskRunner] 执行 L2 高精度单点能...")
+
             l2_result = self._run_l2_sp(
                 opt_result.optimized_xyz,
                 output_dir / "L2_SP",
@@ -319,93 +334,62 @@ class QCTaskRunner(LoggerMixin):
         enable_l2_sp: bool = True,
         old_checkpoint: Optional[Path] = None
     ) -> QCOptimizationResult:
-        """
-        执行 TS 优化 + 虚频验证 + L2 SP 完整流程
+        """Execute TS optimization + frequency validation + L2 SP workflow.
 
-        策略:
-        0. [NEW] xTB 预优化 (如果检测到原子重叠，避免 Gaussian 崩溃)
-        1. 标准 Berny TS 优化 (Opt=TS, CalcFC, NoEigenTest)
-        2. 验证恰好 1 个虚频
-        3. 失败则救援: Recalc=5 + NoEigenTest + MaxStep=10
-        4. L2 高精度单点能
+        This method orchestrates the TS optimization flow:
+        1. Attempt standard TS optimization (Berny for Gaussian, OptTS for ORCA)
+        2. If fails, attempt TS rescue (QST2 or modified strategy)
+        3. If converged and L2 SP requested, run high-level single-point
 
         Args:
-            xyz_file: TS 猜想 XYZ 文件
-            output_dir: 输出目录
-            charge: 分子电荷
-            spin: 自旋多重度
-            enable_l2_sp: 是否启用 L2 SP
-            old_checkpoint: 复用之前的 checkpoint
+            xyz_file: Input XYZ file with TS guess geometry
+            output_dir: Directory for all output files
+            charge: Molecular charge (default 0)
+            spin: Spin multiplicity (default 1 for singlet)
+            enable_l2_sp: Whether to run L2 single-point calculation
+            old_checkpoint: Optional checkpoint file from previous calculation
 
         Returns:
-            QCOptimizationResult 对象
+            QCOptimizationResult with converged TS geometry and optional L2 SP result
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        self.logger.info(f"=== TS 模式优化: {xyz_file.name} ===")
+        self.logger.info(f"[QCTaskRunner] === TS optimization cycle: {xyz_file.name} ===")
 
-        # 【NEW】Step 0: 几何预处理 (检测重叠 → xTB 预优化)
-        from rph_core.utils.geometry_preprocessor import GeometryPreprocessor
-        
-        preprocessor = GeometryPreprocessor(self.config)
-        preopt_result = preprocessor.preprocess(
-            xyz_file=xyz_file,
-            output_dir=output_dir / "preoptimization",
-            charge=charge,
-            uhf=spin - 1  # 自旋多重度 → UHF 转换
-        )
-        
-        # 如果预优化成功，使用预优化后的结构；否则继续使用原始结构
-        if preopt_result.success and preopt_result.coordinates:
-            working_xyz = preopt_result.coordinates
-            # 通过 error_message 判断预优化状态
-            status = preopt_result.error_message or ""
-            if status == "preopt_success":
-                self.logger.info(f"✓ xTB 预优化已完成，将使用预优化结构: {working_xyz}")
-            elif status in ("no_overlap", "preopt_disabled"):
-                self.logger.info(f"无需预优化（{status}），继续使用原始结构: {working_xyz}")
-            elif status.startswith("xtb_preopt_failed"):
-                self.logger.warning(f"xTB 预优化失败但继续：{status}")
-            else:
-                self.logger.info(f"预优化状态: {status}, 使用结构: {working_xyz}")
-        else:
-            working_xyz = xyz_file
-            self.logger.warning(
-                f"预优化失败或被跳过，将直接使用原始结构进行 DFT 优化: {working_xyz}"
-            )
+        # Step 1: Attempt TS optimization
+        ts_output_dir = output_dir / "ts_opt"
+        ts_output_dir.mkdir(parents=True, exist_ok=True)
+        self.logger.info("[QCTaskRunner] Attempting TS optimization (primary)...")
+        ts_result = self._try_ts_optimization(xyz_file, ts_output_dir, charge, spin, old_checkpoint)
 
-        self.ts_route = self._get_ts_route()
-        self.ts_rescue_route = self._get_ts_route(rescue=True)
+        # Step 2: If primary TS attempt failed, try rescue (Berny only, QST2 disabled)
+        if not ts_result.converged:
+            # Check if QST2 rescue is disabled
+            disable_qst2 = self.config.get('step3', {}).get('disable_qst2_rescue', True)
+            if disable_qst2:
+                self.logger.warning("[QCTaskRunner] Primary TS failed but QST2 rescue is DISABLED. Returning failed result.")
+                return ts_result
+            
+            if ts_result.error_message and ts_result.error_message.startswith("FATAL:"):
+                self.logger.error(f"Fatal error during TS optimization; skipping rescue: {ts_result.error_message}")
+                return ts_result
+            self.logger.warning("[QCTaskRunner] Primary TS optimization failed; attempting TS rescue...")
+            ts_result = self._try_ts_rescue(xyz_file, ts_output_dir, charge, spin, old_checkpoint)
 
-        # 尝试标准 TS 优化（使用预处理后的结构）
-        opt_result = self._try_ts_optimization(
-            working_xyz, output_dir, charge, spin, old_checkpoint
-        )
+        # Step 3: If we have converged TS and L2 SP requested, run L2 SP and attach
+        if enable_l2_sp and ts_result.converged:
+            self.logger.info("[QCTaskRunner] Running L2 single-point on TS geometry...")
+            try:
+                l2_result = self._run_l2_sp(ts_result.optimized_xyz, ts_output_dir / "L2_SP", charge=charge, spin=spin)
+                ts_result.l2_sp_result = l2_result
+                ts_result.l2_energy = l2_result.energy if l2_result.converged else None
+            except Exception as e:
+                self.logger.error(f"L2 SP execution raised exception: {e}")
+                ts_result.l2_sp_result = None
+                ts_result.l2_energy = None
 
-        # 如果 TS 优化失败，尝试救援
-        if not opt_result.converged or opt_result.imaginary_count != 1:
-            if opt_result.error_message and opt_result.error_message.startswith("FATAL:"):
-                self.logger.error(f"Fatal error detected; skipping TS rescue: {opt_result.error_message}")
-                return opt_result
-            self.logger.warning("TS 优化失败或虚频不符，启动救援策略...")
-            opt_result = self._try_ts_rescue(
-                working_xyz, output_dir, charge, spin, old_checkpoint
-            )
-
-        l2_energy = None
-        if enable_l2_sp and opt_result.converged:
-            self.logger.info("执行 L2 高精度单点能...")
-            l2_result = self._run_l2_sp(
-                opt_result.optimized_xyz,
-                output_dir / "L2_SP",
-                charge=charge,
-                spin=spin
-            )
-            opt_result.l2_sp_result = l2_result
-            opt_result.l2_energy = l2_result.energy if l2_result.converged else None
-
-        return opt_result
+        return ts_result
 
     def _count_imaginary(self, frequencies: Optional[np.ndarray]) -> int:
         if frequencies is None:
@@ -494,7 +478,7 @@ class QCTaskRunner(LoggerMixin):
         enable_nbo: bool = False
     ) -> QCOptimizationResult:
         """尝试标准基态优化"""
-        self.logger.info("尝试标准基态优化...")
+        self.logger.info("[QCTaskRunner] 尝试标准基态优化...")
 
         route = self.normal_route if hasattr(self, "normal_route") and self.normal_route else self._get_normal_route()
         if "freq" not in route.lower():
@@ -578,7 +562,7 @@ class QCTaskRunner(LoggerMixin):
         enable_nbo: bool = False
     ) -> QCOptimizationResult:
         """尝试基态救援 (CalcFC + MaxStep=10)"""
-        self.logger.info("救援: CalcFC + MaxStep=10")
+        self.logger.info("[QCTaskRunner] 救援: CalcFC + MaxStep=10")
 
         route = self.normal_rescue_route if hasattr(self, "normal_rescue_route") and self.normal_rescue_route else self._get_normal_route(rescue=True)
         if "freq" not in route.lower():
@@ -655,7 +639,7 @@ class QCTaskRunner(LoggerMixin):
         old_checkpoint: Optional[Path]
     ) -> QCOptimizationResult:
         """尝试标准 TS 优化"""
-        self.logger.info(f"尝试标准 TS 优化 (引擎: {self.engine_type})...")
+        self.logger.info(f"[S3] 尝试标准 TS 优化 (引擎: {self.engine_type})...")
 
         if self.engine_type == 'gaussian':
             return self._try_ts_optimization_gaussian(
@@ -841,7 +825,7 @@ class QCTaskRunner(LoggerMixin):
         old_checkpoint: Optional[Path]
     ) -> QCOptimizationResult:
         """尝试 TS 救援 (Recalc=5 + NoEigenTest + MaxStep=10)"""
-        self.logger.info("救援: Recalc=5 + NoEigenTest + MaxStep=10")
+        self.logger.info("[S3] 救援: Recalc=5 + NoEigenTest + MaxStep=10")
 
         route = self.ts_rescue_route if hasattr(self, "ts_rescue_route") and self.ts_rescue_route else self._get_ts_route(rescue=True)
         if "freq" not in route.lower():
@@ -947,7 +931,7 @@ class QCTaskRunner(LoggerMixin):
                     error_message=result.error_message
                 )
 
-            self.logger.info(f"✓ L2 SP 成功: {result.energy:.8f} Hartree")
+            self.logger.info(f"[QCTaskRunner] ✓ L2 SP 成功: {result.energy:.8f} Hartree")
             return QCSPResult(
                 energy=float(result.energy),
                 converged=True,
@@ -985,7 +969,7 @@ class QCTaskRunner(LoggerMixin):
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        self.logger.info(f"执行单点能计算: {xyz_file.name}")
+        self.logger.info(f"[QCTaskRunner] 执行单点能计算: {xyz_file.name}")
 
         try:
             result = self.orca.single_point(

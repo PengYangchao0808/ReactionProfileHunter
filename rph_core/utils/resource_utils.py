@@ -163,11 +163,17 @@ def setup_ld_library_path(ld_library_paths: list):
     new_paths = []
 
     for path_str in ld_library_paths:
-        path = Path(path_str)
-        if path.exists():
-            new_paths.append(str(path))
-        else:
-            logger.warning(f"库路径不存在: {path_str}")
+        # Support colon-separated strings (e.g. "/opt/openmpi418/lib:/opt/software/orca")
+        individual_paths = path_str.split(':') if ':' in path_str else [path_str]
+        for single_path in individual_paths:
+            single_path = single_path.strip()
+            if not single_path:
+                continue
+            path = Path(single_path)
+            if path.exists():
+                new_paths.append(str(path))
+            else:
+                logger.warning(f"库路径不存在: {single_path}")
 
     if new_paths:
         if current_path:
@@ -211,14 +217,13 @@ def resolve_executable_config(
             source = "path"
 
     ld_path_str = exe_cfg.get('ld_library_path')
-    ld_path: Optional[Path] = Path(ld_path_str) if ld_path_str else None
 
     if ld_path_str:
         setup_ld_library_path([ld_path_str])
 
     return {
         'path': exe_path,
-        'ld_library_path': ld_path,
+        'ld_library_path': ld_path_str,
         'found': exe_path is not None,
         'source': source
     }

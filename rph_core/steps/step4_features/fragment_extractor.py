@@ -313,7 +313,7 @@ class FragmentExtractor(LoggerMixin):
                 }
                 split_config_dict["fragmenter"] = fragmenter_cfg
 
-            from rph_core.steps.step3_opt.intramolecular_fragmenter import IntramolecularFragmenter
+            from rph_core.utils.intramolecular_fragmenter import IntramolecularFragmenter
 
             fragmenter = IntramolecularFragmenter()
             fragmenter_cfg = split_config_dict.get("fragmenter", {})
@@ -665,13 +665,13 @@ class FragmentExtractor(LoggerMixin):
         if not isinstance(fragmenter_cfg, dict):
             fragmenter_cfg = {}
 
+        from rph_core.utils.intramolecular_fragmenter import IntramolecularFragmenter
+
         if "charge_multiplicity" not in fragmenter_cfg:
             fragmenter_cfg["charge_multiplicity"] = {
                 "fragA": {"charge": 0, "multiplicity": 1},
                 "fragB": {"charge": 0, "multiplicity": 1}
             }
-
-        from rph_core.steps.step3_opt.intramolecular_fragmenter import IntramolecularFragmenter
 
         fragmenter = IntramolecularFragmenter()
         forming_bonds_pair = cast(Tuple[Tuple[int, int], Tuple[int, int]], forming_bonds)

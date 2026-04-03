@@ -12,13 +12,14 @@ import subprocess
 import re
 import logging
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
 from dataclasses import dataclass
 
 import numpy as np
 
 from rph_core.utils.log_manager import LoggerMixin
 from rph_core.utils.qc_interface import GaussianInterface
+from rph_core.utils.qc_runner import run_with_timeout, QCTimeoutError
 from rph_core.utils.file_io import read_xyz
 from rph_core.utils.resource_utils import get_project_root
 
@@ -56,7 +57,7 @@ class IRCDriver(LoggerMixin):
     def __init__(self, method: str = "B3LYP", basis: str = "def2-SVP",
                  dispersion: str = "GD3BJ", nprocshared: int = 16,
                  mem: str = "32GB", max_points: int = 50,
-                 step_size: int = 10, config: dict = {}):
+                 step_size: int = 10, config: Optional[dict[str, Any]] = None):
         """
         初始化 IRC 驱动器
 
@@ -77,7 +78,15 @@ class IRCDriver(LoggerMixin):
         self.mem = mem
         self.max_points = max_points
         self.step_size = step_size
-        self.config = config
+        self.config = config or {}
+        timeout_cfg = self.config.get('optimization_control', {}).get('timeout', {})
+        timeout_default = timeout_cfg.get('default_seconds', 21600)
+        step3_cfg = self.config.get('step3', {})
+        timeout_value = step3_cfg.get('irc_timeout_seconds', timeout_default)
+        try:
+            self.timeout_seconds = max(1, int(timeout_value))
+        except (TypeError, ValueError):
+            self.timeout_seconds = 21600
 
         # 构建 Gaussian route card
         # IRC=(CalcFC, MaxPoints=N, StepSize=S) 会同时计算正向和反向
@@ -188,13 +197,13 @@ IRC from TS
             g16_cmd = 'g16'
 
         try:
-            cmd = f'"{g16_cmd}" {gjf_file.name} {log_file.name}'
-            subprocess.run(cmd, shell=True, cwd=str(output_dir), check=True)
+            cmd = [g16_cmd, gjf_file.name, log_file.name]
+            run_with_timeout(cmd=cmd, timeout=self.timeout_seconds, cwd=output_dir)
             self.logger.info(f"✓ Gaussian IRC 完成: {log_file}")
         except subprocess.CalledProcessError as e:
             self.logger.error(f"Gaussian IRC 执行失败: {e}")
             raise RuntimeError(f"Gaussian IRC 失败")
-        except subprocess.TimeoutExpired:
+        except QCTimeoutError:
             raise RuntimeError(f"Gaussian IRC 计算超时: {gjf_file.name}")
         except FileNotFoundError:
             raise RuntimeError("未找到 Gaussian (g16)，请确保已安装并在 PATH 中")
@@ -278,7 +287,7 @@ IRC from TS
 
         return False
 
-    def _extract_irc_energies(self, content: str) -> dict:
+    def _extract_irc_energies(self, content: str) -> dict[str, float]:
         """
         提取 IRC 各点的能量
 
@@ -288,7 +297,7 @@ IRC from TS
         Returns:
             能量字典 {'ts': float, 'reactant': float, 'product': float}
         """
-        energies = {}
+        energies: dict[str, float] = {}
 
         # 提取 TS 能量 (第一个点)
         ts_match = re.search(
@@ -396,7 +405,7 @@ IRC from TS
     def calculate_reaction_profile(
         self,
         irc_result: IRCResult
-    ) -> dict:
+    ) -> dict[str, float]:
         """
         计算反应能垒和反应能
 

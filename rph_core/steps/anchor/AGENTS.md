@@ -1,20 +1,34 @@
 # rph_core/steps/anchor/AGENTS.md
 
 ## OVERVIEW
-S1 锚定阶段：对底物池与产物做构象搜索 + OPT/SP，产出每个分子的全局最低能结构与 SP 能量。
+S1 anchor phase: conformer search + DFT OPT/SP for each molecule in the substrate pool (product, precursor, leaving group, small molecules). Outputs the global minimum-energy structure and SP energy per molecule.
 
 ## WHERE TO LOOK
-- Coordinator: `handler.py`（`AnchorPhase.run()`）
-- Conformer search engine: `rph_core/steps/conformer_search/engine.py`
+- Coordinator: `handler.py` → `AnchorPhase.run()`
+- Conformer engine: `rph_core/steps/conformer_search/engine.py` → `ConformerEngine`
+- QC facade: `rph_core/utils/qc_interface.py` → `try_formchk()` for .chk → .fchk conversion
+- Small molecule cache: `rph_core/utils/small_molecule_cache.py` → avoids re-running for common small molecules
 
-## IO / OUTPUTS
-- 输出写入 `S1_ConfGeneration/<molecule_name>/`（由 `ConformerEngine` 管理 `xtb2/`, `cluster/`, `dft/`）
-- `anchored_molecules[name]` 结构：`xyz`(Path) + `e_sp`(float) + 可选 `log/chk/fchk`
+## OUTPUTS
+Written to `S1_ConfGeneration/<molecule_name>/` (managed by `ConformerEngine`):
+```
+<molecule_name>/
+├── xtb2/          # xTB conformer search (stage1_gfn0/, stage2_gfn2/ in two-stage mode)
+├── cluster/       # ISOSTAT clustering output
+└── dft/           # Gaussian/ORCA OPT+SP (conformer_thermo.csv, *.fchk, *.log)
+```
+
+Returned in `anchor_result.anchored_molecules[name]`:
+- `xyz` (Path): final minimum geometry
+- `e_sp` (float): single-point energy (Hartree)
+- `log`, `fchk`, `qm_output`, `checkpoint` (optional Paths)
+- `product_thermo` (optional Path): `dft/conformer_thermo.csv`
 
 ## CONVENTIONS
-- 目录统一用 `pathlib.Path`；不要在此层自行拼接相对路径。
-- Gaussian `.chk` -> `.fchk` 转换复用 `rph_core/utils/qc_interface.py:try_formchk()`。
+- All paths via `pathlib.Path`; never hand-concatenate string paths here.
+- `.chk` → `.fchk` conversion uses `qc_interface.try_formchk()` — never call `formchk` directly.
+- `SmallMoleculeCache` (utils) should be checked before running conformer search on common fragments.
 
 ## ANTI-PATTERNS
-- 在 S1 内重复实现 QC runner / sandbox（应复用 `rph_core/utils/qc_interface.py`）。
-- 产物/底物输出命名漂移导致 S2/S3/S4 找不到输入（改名需同步 orchestrator/contract）。
+- Reimplementing QC runner / sandbox inside S1 — use `utils/qc_interface.py`.
+- Renaming output files without syncing orchestrator + downstream step contracts (S2/S3/S4 path lookups will break).

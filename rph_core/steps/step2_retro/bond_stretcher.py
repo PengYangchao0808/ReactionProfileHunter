@@ -103,6 +103,51 @@ class BondStretcher:
 
         return new_coords
 
+    def stretch_bonds(
+        self,
+        coords: np.ndarray,
+        bonds: List[Tuple[Tuple[int, int], float]],
+        fix_center_of_mass: bool = True
+    ) -> np.ndarray:
+        """
+        拉伸任意数量的键到各自目标长度
+
+        Args:
+            coords: 坐标数组 (N, 3)
+            bonds: 键列表，每项为 ((atom_i, atom_j), target_length)
+            fix_center_of_mass: 是否固定质心
+
+        Returns:
+            修改后的坐标数组 (N, 3)
+
+        Example:
+            >>> coords = np.array([[0,0,0], [1,0,0], [2,0,0], [3,0,0]])
+            >>> bonds = [((0, 1), 1.5), ((2, 3), 1.8)]
+            >>> new_coords = stretcher.stretch_bonds(coords, bonds)
+        """
+        if not bonds:
+            return coords
+
+        new_coords = coords.copy()
+        bond_descriptions = []
+
+        for bond, target_length in bonds:
+            atom_i, atom_j = bond
+            new_coords = self.stretch_bond(
+                new_coords, atom_i, atom_j, target_length, fix_center_of_mass=False
+            )
+            bond_descriptions.append(f"{bond} → {target_length} Å")
+
+        # 只在最后固定一次质心
+        if fix_center_of_mass:
+            original_com = np.mean(coords, axis=0)
+            new_com = np.mean(new_coords, axis=0)
+            new_coords += (original_com - new_com)
+
+        logger.info(f"✓ 拉伸了 {len(bonds)} 根键: {bond_descriptions}")
+
+        return new_coords
+
     def stretch_two_bonds(
         self,
         coords: np.ndarray,
@@ -122,12 +167,32 @@ class BondStretcher:
         Returns:
             修改后的坐标数组
         """
-        # 先拉伸第一根键
-        new_coords = self.stretch_bond(coords, bond1[0], bond1[1], target_length)
+        if target_length is None:
+            target_length = self.params.target_length_A
 
-        # 再拉伸第二根键
-        new_coords = self.stretch_bond(new_coords, bond2[0], bond2[1], target_length)
+        # 使用 stretch_bonds 统一处理
+        bonds = [
+            (bond1, target_length),
+            (bond2, target_length)
+        ]
+        return self.stretch_bonds(coords, bonds)
 
-        logger.info(f"✓ 拉伸了两根键: {bond1} 和 {bond2} → {target_length} Å")
 
-        return new_coords
+def stretch_bonds(
+    coords: np.ndarray,
+    bonds: List[Tuple[Tuple[int, int], float]],
+    fix_center_of_mass: bool = True
+) -> np.ndarray:
+    """
+    模块级函数：拉伸任意数量的键
+
+    Args:
+        coords: 坐标数组 (N, 3)
+        bonds: 键列表，每项为 ((atom_i, atom_j), target_length)
+        fix_center_of_mass: 是否固定质心
+
+    Returns:
+        修改后的坐标数组 (N, 3)
+    """
+    stretcher = BondStretcher()
+    return stretcher.stretch_bonds(coords, bonds, fix_center_of_mass)

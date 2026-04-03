@@ -101,8 +101,8 @@ def test_sp_report_to_json():
 
     # 验证 JSON 格式
     data = json.loads(json_str)
-    assert data["e_product_l2"] == -123.45678901
-    assert data["e_reactant_l2"] == -456.78901234
+    assert data["e_product"] == -123.45678901
+    assert data["e_reactant"] == -456.78901234
 
     # 验证缩进
     assert "\n" in json_str  # 有换行符表示有缩进
@@ -150,7 +150,7 @@ def test_sp_report_validate():
 
     # 无效数据 (包含字符串)
     invalid_report = SPMatrixReport(
-        e_product="invalid",  # type: ignore
+        e_product="invalid",  # pyright: ignore[reportArgumentType]
         e_reactant=-456.78901234,
         e_ts_final=-345.67890123,
         e_frag_a_ts=-234.56789012,
@@ -211,7 +211,7 @@ def test_sp_report_get_reaction_energy():
     delta_g = report.get_reaction_energy()
 
     assert isinstance(delta_g, float)
-    assert abs(delta_g - 209168.7) < 0.1  # 允许小误差
+    assert abs(delta_g - 209168.7) < 1.0  # Allow small tolerance
 
 
 

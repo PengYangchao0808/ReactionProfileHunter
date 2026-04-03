@@ -10,6 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from rph_core.orchestrator import ReactionProfileHunter, PipelineResult
 from rph_core.steps.anchor.handler import AnchorPhaseResult
+from rph_core.utils.checkpoint_manager import CheckpointManager
 from rph_core.utils.task_builder import TaskSpec
 
 class TestOrchestratorMultiMolecule:
@@ -140,10 +141,152 @@ class TestOrchestratorMultiMolecule:
             mock_run.return_value = PipelineResult(success=True)
             _run_tasks(hunter, run_cfg)
             
-            mock_run.assert_called_once_with(
-                product_smiles="C1CCCCC1",
-                work_dir=tmp_path / "rx_test_rx",
-                skip_steps=[],
-                precursor_smiles="C=C",
-                leaving_group_key="AcOH"
+            mock_run.assert_called_once()
+            call_kwargs = mock_run.call_args[1]  # keyword arguments
+            assert call_kwargs["product_smiles"] == "C1CCCCC1"
+            assert call_kwargs["precursor_smiles"] == "C=C"
+            assert call_kwargs["leaving_group_key"] == "AcOH"
+            assert call_kwargs["skip_steps"] == []
+
+    @patch("rph_core.orchestrator.load_config")
+    @patch("rph_core.orchestrator.normalize_qc_config")
+    @patch("rph_core.orchestrator.ui.print_pipeline_header")
+    @patch("rph_core.orchestrator.get_progress_manager")
+    @patch("rph_core.orchestrator.notify.notify_completion")
+    def test_run_pipeline_marks_s0_skipped_reason(
+        self,
+        _mock_notify,
+        mock_get_pm,
+        _mock_ui,
+        mock_normalize,
+        mock_load,
+        config,
+        tmp_path,
+    ):
+        cfg = dict(config)
+        cfg["s0"] = {"enabled": True}
+        cfg["run"] = {"resume": False}
+        mock_load.return_value = cfg
+        mock_normalize.return_value = (cfg, [])
+        pm = MagicMock()
+        mock_get_pm.return_value = pm
+
+        hunter = ReactionProfileHunter()
+        result = hunter.run_pipeline(
+            product_smiles="C=C",
+            work_dir=tmp_path,
+            skip_steps=["s1", "s2", "s3", "s4"],
+            cleaner_data=None,
+        )
+
+        assert result.success is True
+        descriptions = [
+            call.kwargs.get("description", "")
+            for call in pm.update_step.call_args_list
+            if call.args and call.args[0] == "s0"
+        ]
+        assert any("Step 0: Mechanism [SKIPPED: cleaner_data_unavailable]" in d for d in descriptions)
+
+    @patch("rph_core.orchestrator.load_config")
+    @patch("rph_core.orchestrator.normalize_qc_config")
+    @patch("rph_core.orchestrator.ui.print_pipeline_header")
+    def test_run_s0_fallback_adds_rxn_key_hash_and_completes(
+        self,
+        _mock_ui,
+        mock_normalize,
+        mock_load,
+        config,
+        tmp_path,
+    ):
+        cfg = dict(config)
+        cfg["s0"] = {"enabled": True}
+        cfg["run"] = {"resume": False}
+        mock_load.return_value = cfg
+        mock_normalize.return_value = (cfg, [])
+
+        hunter = ReactionProfileHunter()
+        checkpoint_mgr = CheckpointManager(tmp_path)
+        mock_s0 = MagicMock()
+        mock_s0.classify_from_dict.return_value = None
+
+        cleaner_data = {
+            "reaction_id": "rx_manual",
+            "reaction_type": "cycloaddition",
+            "precursor_smiles": "C=C",
+            "forming_bonds": [[0, 1]],
+        }
+
+        with patch.object(ReactionProfileHunter, "s0_engine", mock_s0):
+            summary = hunter._run_s0(
+                work_dir=tmp_path,
+                product_smiles="CC",
+                cleaner_data=cleaner_data,
+                checkpoint_mgr=checkpoint_mgr,
+                resume_enabled=False,
             )
+
+        assert summary is not None
+        assert summary.get("status") == "complete"
+        assert summary.get("forming_bonds") == [[0, 1]]
+
+        called_row = mock_s0.classify_from_dict.call_args[0][0]
+        assert called_row.get("rxn_key_hash") == "rx_manual"
+
+        s0_dir = tmp_path / "S0_Mechanism"
+        assert (s0_dir / "mechanism_graph.json").exists()
+        assert (s0_dir / "mechanism_summary.json").exists()
+
+    @patch("rph_core.orchestrator.load_config")
+    @patch("rph_core.orchestrator.normalize_qc_config")
+    @patch("rph_core.orchestrator.ui.print_pipeline_header")
+    def test_s0_status_json_written_on_every_exit_path(
+        self,
+        _mock_ui,
+        mock_normalize,
+        mock_load,
+        config,
+        tmp_path,
+    ):
+        cfg = dict(config)
+        cfg["s0"] = {"enabled": True}
+        cfg["run"] = {"resume": False}
+        mock_load.return_value = cfg
+        mock_normalize.return_value = (cfg, [])
+        hunter = ReactionProfileHunter()
+        checkpoint_mgr = CheckpointManager(tmp_path)
+
+        result = hunter._run_s0(
+            work_dir=tmp_path,
+            product_smiles="CC",
+            cleaner_data=None,
+            checkpoint_mgr=checkpoint_mgr,
+            resume_enabled=False,
+        )
+        assert result["status"] == "skipped"
+        s0_dir = tmp_path / "S0_Mechanism"
+        status_file = s0_dir / "s0_status.json"
+        assert status_file.exists()
+        import json
+        artifact = json.loads(status_file.read_text())
+        assert artifact["status"] == "skipped"
+        assert artifact["reason"] == "cleaner_data_unavailable"
+        assert "timestamp" in artifact
+
+        cfg2 = dict(config)
+        cfg2["s0"] = {"enabled": False}
+        cfg2["run"] = {"resume": False}
+        mock_load.return_value = cfg2
+        mock_normalize.return_value = (cfg2, [])
+        hunter2 = ReactionProfileHunter()
+        result2 = hunter2._run_s0(
+            work_dir=tmp_path,
+            product_smiles="CC",
+            cleaner_data={"reaction_id": "x"},
+            checkpoint_mgr=checkpoint_mgr,
+            resume_enabled=False,
+        )
+        assert result2["status"] == "skipped"
+        assert result2["reason"] == "disabled_by_config"
+        artifact2 = json.loads(status_file.read_text())
+        assert artifact2["status"] == "skipped"
+        assert artifact2["reason"] == "disabled_by_config"

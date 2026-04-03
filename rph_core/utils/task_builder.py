@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from .dataset_loader import load_reaction_records
 
@@ -18,7 +19,7 @@ _RX_ID_SANITIZE_RE = re.compile(r"[^A-Za-z0-9_-]+")
 class TaskSpec:
     rx_id: str
     product_smiles: str
-    meta: dict[str, str | None]
+    meta: dict[str, Any]
 
 
 def sanitize_rx_id(rx_id: str) -> str:
@@ -27,7 +28,7 @@ def sanitize_rx_id(rx_id: str) -> str:
     return cleaned or "unknown"
 
 
-def build_tasks_from_run_config(run_cfg: dict) -> list[TaskSpec]:
+def build_tasks_from_run_config(run_cfg: dict[str, Any]) -> list[TaskSpec]:
     source = str(run_cfg.get("source", "single"))
 
     if source == "single":
@@ -69,6 +70,9 @@ def build_tasks_from_run_config(run_cfg: dict) -> list[TaskSpec]:
                 "precursor_smiles": record.precursor_smiles,
                 "ylide_smiles": record.ylide_smiles,
                 "leaving_small_molecule_key": record.get_leaving_small_molecule_key(),
+                "reaction_type": record.reaction_type,
+                "reaction_profile": (record.raw or {}).get("reaction_profile"),
+                "cleaner_data": record.raw or {},
             }
             tasks.append(TaskSpec(rx_id=record.rx_id, product_smiles=product_smiles, meta=meta))
         return tasks

@@ -1,0 +1,8 @@
+{
+    "step": "s1",
+    "molecule": "product",
+    "index": 3,
+    "total": 3,
+    "smiles": "C1=CCCCC1",
+    "status": "running"
+}

@@ -1,8 +1,10 @@
 {
-  "active_plan": "/mnt/e/Calculations/[5+2] Mechain learning/Scripts/ReactionProfileHunter/ReactionProfileHunter_20260121/.sisyphus/plans/s1-precursor-leaving-group-refactor.md",
-  "started_at": "2026-01-31T12:09:47.701Z",
+  "active_plan": "/mnt/e/Calculations/AI4S_ML_Studys/[4+3] Mechain learning/ReactionProfileHunter/ReactionProfileHunter_20260121/.sisyphus/plans/rph-universal-forward-scan.md",
+  "started_at": "2026-03-10T08:42:58.154Z",
   "session_ids": [
-    "ses_3ed029adfffe11JOx2cnifq9UI"
+    "ses_32d381d92ffe43M3XPSq8MJgVN"
   ],
-  "plan_name": "s1-precursor-leaving-group-refactor"
+  "plan_name": "rph-universal-forward-scan",
+  "agent": "atlas",
+  "worktree_path": "/mnt/e/Calculations/AI4S_ML_Studys/[4+3] Mechain learning/ReactionProfileHunter/ReactionProfileHunter_20260121"
 }

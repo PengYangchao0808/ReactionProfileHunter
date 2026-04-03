@@ -13,8 +13,6 @@ import json
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-HARTREE_TO_KCAL = 627.509
-
 
 def generate_step4_plugin_cache_key(
     plugin_name: str,

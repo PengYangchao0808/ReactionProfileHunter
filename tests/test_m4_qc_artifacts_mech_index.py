@@ -39,6 +39,10 @@ def pipeline_root(tmp_path):
     s3_ts = root / "S3_TS"
     s3_ts.mkdir(parents=True, exist_ok=True)
 
+    nbo_dir = s3_ts / "nbo_analysis"
+    nbo_dir.mkdir(parents=True, exist_ok=True)
+    (nbo_dir / "job_nbo.37").write_text("NBO test data")
+
     # S1/S2 directories (minimal)
     s1 = root / "S1_ConfGeneration"
     s1.mkdir(parents=True, exist_ok=True)

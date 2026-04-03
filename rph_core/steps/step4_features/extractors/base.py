@@ -222,7 +222,7 @@ def register_extractor(extractor: BaseExtractor) -> None:
     """
     name = extractor.get_plugin_name()
     if name in EXTRACTORS:
-        logger.warning(f"Extractor '{name}' already registered, overwriting")
+        raise ValueError(f"Extractor '{name}' already registered")
 
     EXTRACTORS[name] = extractor
     logger.info(f"Registered extractor: {name}")

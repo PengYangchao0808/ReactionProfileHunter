@@ -101,11 +101,11 @@ ReactionProfileHunter.run()
 4. **S2/S3/S4 适配**: 更新路径引用
 
 ### Definition of Done
-- [ ] S1 可接受 precursor/product/leaving_group 三类 SMILES
-- [ ] 小分子缓存机制工作（检测存在 → 跳过计算）
-- [ ] 所有步骤的路径引用更新为 `S1_ConfGeneration`
-- [ ] 集成测试通过（单个反应完整流程）
-- [ ] 文档更新（README + AGENTS.md）
+- [x] S1 可接受 precursor/product/leaving_group 三类 SMILES
+- [x] 小分子缓存机制工作（检测存在 → 跳过计算）
+- [x] 所有步骤的路径引用更新为 `S1_ConfGeneration`
+- [x] 集成测试通过（单个反应完整流程）
+- [x] 文档更新（README + AGENTS.md）
 
 ### Must Have
 - 前体构象搜索（复用 ConformerEngine）
@@ -569,7 +569,7 @@ Parallel Speedup: ~50% faster than sequential
   - Files: `rph_core/steps/step2_retro/*.py`, `tests/test_step2_path_compat.py`
   - Pre-commit: `pytest tests/test_step2_path_compat.py`
 
-- [ ] 9. 更新 S3 的路径引用
+- [x] 9. 更新 S3 的路径引用
 
   **What to do**:
   - 修改 `rph_core/steps/step3_opt/ts_optimizer.py`
@@ -807,15 +807,15 @@ find rph_output/ -name "S1_Product" -type d
 ```
 
 ### Final Checklist
-- [ ] ✅ Precursor conformer search 工作正常
-- [ ] ✅ Leaving group conformer search 工作正常
-- [ ] ✅ 小分子缓存机制正常（检测、跳过、复用）
-- [ ] ✅ 目录从 `S1_Product` 重命名为 `S1_ConfGeneration`
-- [ ] ✅ S2/S3/S4 路径引用全部更新
-- [ ] ✅ 向后兼容性保留（S1_DIR_ALIASES）
-- [ ] ✅ 所有单元测试通过
-- [ ] ✅ 集成测试通过（完整反应流程）
-- [ ] ✅ 文档更新完成（README + AGENTS.md）
+- [x] ✅ Precursor conformer search 工作正常
+- [x] ✅ Leaving group conformer search 工作正常
+- [x] ✅ 小分子缓存机制正常（检测、跳过、复用）
+- [x] ✅ 目录从 `S1_Product` 重命名为 `S1_ConfGeneration`
+- [x] ✅ S2/S3/S4 路径引用全部更新
+- [x] ✅ 向后兼容性保留（S1_DIR_ALIASES）
+- [x] ✅ 所有单元测试通过
+- [x] ✅ 集成测试通过（完整反应流程）
+- [x] ✅ 文档更新完成（README + AGENTS.md）
 
 ---
 
@@ -829,7 +829,7 @@ find rph_output/ -name "S1_Product" -type d
 - 小分子缓存预期减少 **30-50%** 的重复计算（对于共用离去基团的反应）
 - 前体构象搜索增加计算时间，但对反应机理理解至关重要
 
-### 未来扩展
-- [ ] S4 可扩展为提取 precursor 相关特征（如前体扭曲能）
-- [ ] 小分子缓存可扩展为支持自定义阈值（当前硬编码 < 10 重原子）
-- [ ] 可添加 `--skip-precursor` CLI 参数用于仅产物计算模式
+### 未来扩展 (可选)
+- [x] 🔄 S4 可扩展为提取 precursor 相关特征（如前体扭曲能）
+- [x] 🔄 小分子缓存可扩展为支持自定义阈值（当前硬编码 < 10 重原子）
+- [x] 🔄 可添加 `--skip-precursor` CLI 参数用于仅产物计算模式

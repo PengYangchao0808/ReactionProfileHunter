@@ -42,13 +42,13 @@ class TestMockNBOCollection:
         for ext in NBO_WHITELIST:
             (nbo_dir / f"{jobname}{ext}").write_text(f"NBO file {ext}")
 
-        result = harvest_nbo_files(nbo_dir, "test_job")
+        result = harvest_nbo_files(tmp_path, "test_job")
 
         assert isinstance(result, dict)
         assert len(result) == len(NBO_WHITELIST)
         for ext in NBO_WHITELIST:
             assert ext in result
-            assert result[ext].name == f"test_job.{ext}"
+            assert result[ext].name == f"test_job{ext}"
             assert result[ext].is_absolute()
 
 

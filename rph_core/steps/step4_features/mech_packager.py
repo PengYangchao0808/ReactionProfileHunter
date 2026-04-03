@@ -24,6 +24,13 @@ import numpy as np
 
 from rph_core.utils.file_io import read_xyz, write_xyz
 from rph_core.utils.qc_interface import is_path_toxic
+from rph_core.utils.naming_compat import (
+    normalize_source_label,
+    get_intermediate_source_priority,
+    SOURCE_S2_INTERMEDIATE,
+    SOURCE_S3_INTERMEDIATE,
+)
+from rph_core.utils.forming_bonds_resolver import resolve_forming_bonds
 
 logger = logging.getLogger(__name__)
 
@@ -32,9 +39,9 @@ logger = logging.getLogger(__name__)
 # Constants
 # ============================================================================
 
-S3_DIR_ALIASES = ["S3_TS", "S3_TransitionAnalysis"]
+S3_DIR_ALIASES = ["S3_TS"]
 S2_DIR_ALIASES = ["S2_Retro"]
-S1_DIR_ALIASES = ["S1_ConfGeneration", "S1_Product"]
+S1_DIR_ALIASES = ["S1_ConfGeneration"]
 
 # ============================================================================
 # Dataclasses
@@ -57,7 +64,7 @@ class MechanismContext:
     s1_product: Optional[Path] = None
     s1_precursor: Optional[Path] = None
     s2_ts_guess: Optional[Path] = None
-    s2_reactant_complex: Optional[Path] = None
+    s2_intermediate: Optional[Path] = None
 
     s3_ts_final: Optional[Path] = None
     s3_reactant_sp: Optional[Path] = None
@@ -93,7 +100,7 @@ class QualityFlags:
 
 @dataclass
 class MechanismMetaStep2:
-    """Metadata for Step 2 mechanism assets."""
+    """Metadata for forming bonds derived from optimized geometries."""
     forming_bonds: Optional[Tuple[Tuple[int, int], ...]] = None
     source_summary: str = ""
 
@@ -177,7 +184,7 @@ def resolve_mechanism_context(
             s1_precursor=None,
             s1_precursor_source="none",
             s2_ts_guess=None,
-            s2_reactant_complex=None,
+            s2_intermediate=None,
             s3_ts_final=None,
             s3_reactant_sp=None,
         )
@@ -189,7 +196,7 @@ def resolve_mechanism_context(
     s2_ts_guess, s2_reactant = _resolve_s2_assets(s2_dir)
 
     s3_dir = _find_s3_dir(work_dir, max_recursion_depth)
-    s3_ts_final, s3_reactant = _resolve_s3_assets(s3_dir)
+    s3_ts_final, s3_intermediate = _resolve_s3_assets(s3_dir)
 
     precursor_priority = config.get('precursor_source_priority', None)
     if precursor_priority is not None:
@@ -212,10 +219,10 @@ def resolve_mechanism_context(
         s1_precursor_source=s1_precursor_source,
 
         s2_ts_guess=s2_ts_guess,
-        s2_reactant_complex=s2_reactant,
+        s2_intermediate=s2_reactant,
 
         s3_ts_final=s3_ts_final,
-        s3_reactant_sp=s3_reactant,
+        s3_reactant_sp=s3_intermediate,
     )
 
 
@@ -233,21 +240,19 @@ def _find_s3_dir(work_dir: Path, max_recursion_depth: int) -> Optional[Path]:
     Returns:
         Resolved S3 directory path or None if not found
     """
-    for alias in S3_DIR_ALIASES:
-        s3_path = work_dir / alias
-        if s3_path.exists():
-            logger.debug(f"Found S3 directory via alias: {alias}")
-            return s3_path
-
-    logger.warning(f"S3 directory not found, tried aliases: {S3_DIR_ALIASES}")
+    s3_path = work_dir / "S3_TS"
+    if s3_path.exists():
+        return s3_path
+    logger.warning("S3 directory not found: S3_TS")
     return None
 
 
 def _find_step_dir(work_dir: Path, aliases: List[str]) -> Optional[Path]:
-    for alias in aliases:
-        candidate = work_dir / alias
-        if candidate.exists():
-            return candidate
+    if not aliases:
+        return None
+    candidate = work_dir / aliases[0]
+    if candidate.exists():
+        return candidate
     return None
 
 
@@ -298,8 +303,6 @@ def _resolve_s1_product(s1_dir: Optional[Path]) -> Optional[Path]:
     # Search in order of preference
     candidates = [
         s1_dir / "product_min.xyz",
-        s1_dir / "product_global_min.xyz",
-        s1_dir / "global_min.xyz"
     ]
 
     return _first_existing(candidates)
@@ -383,28 +386,35 @@ def _write_json_atomic(data: Dict[str, Any], target_path: Path) -> None:
         raise
 
 
-def _resolve_dipole_source(s3_reactant: Optional[Path], s2_reactant: Optional[Path], priority: List[str]) -> Tuple[Optional[Path], str]:
+def _resolve_dipole_source(s3_intermediate: Optional[Path], s2_reactant: Optional[Path], priority: List[str]) -> Tuple[Optional[Path], str]:
     """
-    Resolve dipole source based on configurable priority order.
+    Resolve intermediate source based on configurable priority order.
 
     P0-2 FIX: Now actually respects the priority list instead of hardcoding S3 > S2.
 
     Args:
         s3_reactant: Path to S3 reactant_sp.xyz (or None)
-        s2_reactant: Path to S2 reactant_complex.xyz (or None)
-        priority: List of source labels in preference order (e.g., ['S3_reactant', 'S2_reactant_complex'])
+        s2_reactant: Path to S2 intermediate.xyz (or None)
+        priority: List of source labels in preference order (e.g., ['S3_intermediate', 'S2_intermediate'])
 
     Returns:
         Tuple of (resolved_path, source_label). Returns (None, "none") if no valid source found.
     """
+    # Normalize priority labels to new standard
+    normalized_priority = [normalize_source_label(l) for l in priority]
+    
     # Build candidate map for O(1) lookup
     candidates = {
-        'S3_reactant': s3_reactant,
-        'S2_reactant_complex': s2_reactant,
+        SOURCE_S3_INTERMEDIATE: s3_intermediate,
+        SOURCE_S2_INTERMEDIATE: s2_reactant,
     }
+    
+    # Add legacy aliases for backward compatibility
+    candidates['S3_reactant'] = s3_intermediate
+    candidates['S2_reactant_complex'] = s2_reactant
 
     # Iterate through priority list and return first valid .xyz path
-    for label in priority:
+    for label in normalized_priority:
         path = candidates.get(label)
         if path and path.exists() and path.suffix == ".xyz":
             return path, label
@@ -414,21 +424,14 @@ def _resolve_dipole_source(s3_reactant: Optional[Path], s2_reactant: Optional[Pa
 
 
 def _resolve_s2_assets(s2_dir: Optional[Path]) -> Tuple[Optional[Path], Optional[Path]]:
-    """Resolve S2 assets (ts_guess and reactant_complex).
-
-    Args:
-        s2_dir: S2_Retro directory path
-
-    Returns:
-        Tuple of (ts_guess_path, reactant_complex_path)
-    """
+    """Resolve S2 assets (ts_guess and intermediate)."""
     if s2_dir is None or not s2_dir.exists():
         return None, None
 
     ts_guess = _first_existing([s2_dir / "ts_guess.xyz"])
-    reactant_complex = _first_existing([s2_dir / "reactant_complex.xyz"])
+    intermediate = _first_existing([s2_dir / "intermediate.xyz"])
 
-    return ts_guess, reactant_complex
+    return ts_guess, intermediate
 
 
 def _resolve_s3_assets(s3_dir: Optional[Path]) -> Tuple[Optional[Path], Optional[Path]]:
@@ -473,11 +476,11 @@ def _resolve_s1_precursor(
     """
     M2-B2: Resolve S1 precursor state with enhanced fallback chain.
 
-    Priority: S1 precursor → S2 neutral_precursor → S2 reactant_complex
+    Priority: S1 precursor → S2 neutral_precursor → S2 intermediate
 
     Priority order controlled by config.precursor_source_priority:
-    - Default: ["S1_precursor", "S2_neutral_precursor", "S2_reactant_complex"]
-    - Respects Step2 contract: reactant_complex.xyz must be available as fallback
+    - Default: ["S1_precursor", "S2_neutral_precursor", "S2_intermediate"]
+    - Respects Step2 contract: intermediate.xyz is canonical fallback
 
     Args:
         s1_dir: S1_ConfGeneration directory path (MUST be a directory, not a file)
@@ -500,7 +503,7 @@ def _resolve_s1_precursor(
 
     # M2-B2: Use priority list from config
     if priority is None:
-        priority = ["S1_precursor", "S2_neutral_precursor", "S2_reactant_complex"]
+        priority = ["S1_precursor", "S2_neutral_precursor", "S2_intermediate"]
 
     # M2-B2: Iterate through priority list and return first valid source
     for label in priority:
@@ -520,11 +523,11 @@ def _resolve_s1_precursor(
                 if s2_precursor is not None:
                     return s2_precursor, "S2_neutral_precursor"
         
-        elif label == "S2_reactant_complex":
+        elif label == "S2_intermediate":
             if s2_dir is not None and s2_dir.exists():
-                s2_reactant = _first_existing([s2_dir / "reactant_complex.xyz"])
+                s2_reactant = _first_existing([s2_dir / "intermediate.xyz"])
                 if s2_reactant is not None:
-                    return s2_reactant, "S2_reactant_complex"
+                    return s2_reactant, "S2_intermediate"
 
     return None, "none"
 
@@ -777,7 +780,7 @@ def _build_mech_index(
                 assets_dict[key]["source_label"] = asset_info.source_label
 
     # Build step2 metadata
-    step2_meta_dict = {
+    step2_meta_dict: Dict[str, Any] = {
         "filename": "mech_step2_meta.json",
         "forming_bonds": None,
         "source_summary": step2_meta.source_summary
@@ -1204,7 +1207,7 @@ def pack_mechanism_assets(
         step_dirs: Dictionary with keys 'S1', 'S2', 'S3' pointing to step directories
         out_dir: S4 output directory (S4_Data/)
         config: Configuration dictionary for mechanism packaging
-        forming_bonds: Forming bond indices from Step 2
+        forming_bonds: Optional override for forming bonds
         use_central_resolver: Use centralized asset resolution (default: True)
 
     Returns:
@@ -1219,6 +1222,22 @@ def pack_mechanism_assets(
 
     context = resolve_mechanism_context(out_dir, config)
 
+    resolved_forming_bonds = forming_bonds
+    if resolved_forming_bonds is None:
+        forming_cfg = config.get('forming_bonds', {}) or {}
+        resolved = resolve_forming_bonds(
+            product_xyz=context.s1_product,
+            ts_xyz=context.s3_ts_final,
+            s3_dir=context.s3_dir,
+            s4_dir=out_dir,
+            config=forming_cfg,
+            write_meta=forming_cfg.get('write_meta', True)
+        )
+        resolved_forming_bonds = resolved.forming_bonds
+        if resolved.warnings:
+            for w in resolved.warnings:
+                logger.warning(f"Forming bonds resolver: {w}")
+
     # Derive work_dir from step_dirs when available (prefer explicit over guessing)
     work_dir = None
     for key in ('S1', 'S2', 'S3'):
@@ -1231,13 +1250,13 @@ def pack_mechanism_assets(
 
     assets: Dict[str, Optional[AssetInfo]] = {}
 
-    # Resolve dipole source
-    dipole_source, dipole_label = _resolve_dipole_source(
+    # Resolve intermediate source
+    intermediate_source, intermediate_label = _resolve_dipole_source(
         context.s3_reactant_sp,
-        context.s2_reactant_complex,
-        config.get('dipole_source_priority', ['S3_reactant', 'S2_reactant_complex'])
+        context.s2_intermediate,
+        get_intermediate_source_priority(config)
     )
-    logger.debug(f"Dipole source: {dipole_label} -> {dipole_source}")
+    logger.debug(f"Intermediate source: {intermediate_label} -> {intermediate_source}")
 
     # Resolve precursor
     # M1-P0: Pass directories (context.s1_dir, context.s2_dir), not file paths
@@ -1272,7 +1291,7 @@ def pack_mechanism_assets(
         return {}
 
     logger.info(f"Copy mode: {copy_mode}")
-    logger.info(f"Dipole source priority: {config.get('dipole_source_priority', ['S3_reactant', 'S2_reactant_complex'])}")
+    logger.info(f"Intermediate source priority: {get_intermediate_source_priority(config)}")
 
     # Copy/link assets to S4 root with fixed naming
     assets: Dict[str, Optional[AssetInfo]] = {}
@@ -1302,29 +1321,27 @@ def pack_mechanism_assets(
         logger.warning("  ✗ S3 ts_final not available")
         assets['mech_step2_ts2'] = None
 
-    # Asset 2: mech_step2_reactant_dipole.xyz (dipole source)
-    # M1-P0: Log specific reason if dipole is missing (e.g., no .xyz file available)
-    if dipole_source:
-        target = out_dir / "mech_step2_reactant_dipole.xyz"
-        if _copy_or_link_asset(dipole_source, target, copy_mode):
-            assets['mech_step2_reactant_dipole'] = AssetInfo(
-                filename="mech_step2_reactant_dipole.xyz",
-                source_path=dipole_source,
-                source_step="S3" if dipole_label == "S3_reactant" else "S2",
-                source_label=dipole_label,
+    # Asset 2: mech_step2_reactant_intermediate.xyz (intermediate source)
+    if intermediate_source:
+        target = out_dir / "mech_step2_reactant_intermediate.xyz"
+        if _copy_or_link_asset(intermediate_source, target, copy_mode):
+            assets['mech_step2_reactant_intermediate'] = AssetInfo(
+                filename="mech_step2_reactant_intermediate.xyz",
+                source_path=intermediate_source,
+                source_step="S3" if "S3" in intermediate_label else "S2",
+                source_label=intermediate_label,
                 sha256=_compute_sha256(target)
             )
             logger.info(f"  ✓ Created: {target}")
         else:
             logger.warning(f"  ✗ Failed to create: {target}")
-            assets['mech_step2_reactant_dipole'] = None
+            assets['mech_step2_reactant_intermediate'] = None
     else:
-        # M1-P0: Specific logging for missing dipole
-        if dipole_label == "none":
-            logger.warning("  ✗ Dipole source not available: no .xyz file found in S3_reactant or S2_reactant_complex")
+        if intermediate_label == "none":
+            logger.warning("  ✗ Intermediate source not available: no .xyz file found in S3_intermediate or S2_intermediate")
         else:
-            logger.warning(f"  ✗ Dipole source not available: {dipole_label}")
-        assets['mech_step2_reactant_dipole'] = None
+            logger.warning(f"  ✗ Intermediate source not available: {intermediate_label}")
+        assets['mech_step2_reactant_intermediate'] = None
 
     # Asset 3: mech_step2_product.xyz (from S1 product)
     if s1_product:
@@ -1396,9 +1413,9 @@ def pack_mechanism_assets(
 
         # forming_bond_window_ok: Check TS or dipole
         if ts2_asset and ts2_asset.source_path:
-            if forming_bonds:
+            if resolved_forming_bonds:
                 quality_flags.forming_bond_window_ok = _check_forming_bond_window(
-                    ts2_asset.source_path, forming_bonds
+                    ts2_asset.source_path, resolved_forming_bonds
                 )
                 if quality_flags.forming_bond_window_ok:
                     logger.info("  ✓ forming_bond_window_ok: Within window")
@@ -1408,9 +1425,9 @@ def pack_mechanism_assets(
                 quality_flags.forming_bond_window_ok = True
                 logger.info("  ✓ forming_bond_window_ok: No forming bonds data")
         elif dipole_asset and dipole_asset.source_path:
-            if forming_bonds:
+            if resolved_forming_bonds:
                 quality_flags.forming_bond_window_ok = _check_forming_bond_window(
-                    dipole_asset.source_path, forming_bonds
+                    dipole_asset.source_path, resolved_forming_bonds
                 )
                 if quality_flags.forming_bond_window_ok:
                     logger.info("  ✓ forming_bond_window_ok: Within window")
@@ -1436,7 +1453,7 @@ def pack_mechanism_assets(
         product_path = product_asset.source_path
 
     suspect_result = _check_suspect_optimized_to_product(
-        ts_path, product_path, forming_bonds
+        ts_path, product_path, resolved_forming_bonds
     )
 
     if suspect_result is None:
@@ -1487,8 +1504,8 @@ def pack_mechanism_assets(
         )
 
     step2_meta = MechanismMetaStep2(
-        forming_bonds=forming_bonds,
-        source_summary="M3 auto-generated metadata"
+        forming_bonds=resolved_forming_bonds,
+        source_summary="derived_from_s1_s3"
     )
 
     step1_meta = MechanismMetaStep1(
@@ -1506,7 +1523,7 @@ def pack_mechanism_assets(
     pipeline_root = out_dir.parent
 
     # Derive s3_dir from context, or fallback to pipeline_root/S3_TS
-    s3_dir = context.s3_dir if context.s3_dir else (pipeline_root / "S3_TS" if (pipeline_root / "S3_TS").exists() else pipeline_root / "S3_TransitionAnalysis")
+    s3_dir = context.s3_dir if context.s3_dir else (pipeline_root / "S3_TS")
     qc_artifacts = _collect_qc_artifacts(
         s3_dir=s3_dir,
         pipeline_root=pipeline_root,

@@ -1,13 +1,15 @@
 # bin/AGENTS.md
 
 ## OVERVIEW
-本地 CLI wrapper：保证“未安装 editable 包”的情况下也能从 repo root 运行 `rph_core.orchestrator:main`。
+Thin CLI wrappers that insert the repo root into `sys.path` and call `rph_core.orchestrator.main()`. Enables running the pipeline without `pip install`.
 
 ## WHERE TO LOOK
-- `rph_run` / `rph`：插入 `PROJECT_ROOT` 到 `sys.path` 后调用 `rph_core.orchestrator.main()`
+- `rph_run` and `rph`: identical behavior — add `PROJECT_ROOT` to `sys.path`, then `main()`
 
 ## CONVENTIONS
-- `bin/` 只做薄封装；业务逻辑留在 `rph_core/`。
+- Keep `bin/` wrappers minimal — all logic lives in `rph_core/`.
+- Same behavior as `python -m rph_core` and installed `rph_run` console script.
 
 ## ANTI-PATTERNS
-- 在 wrapper 内解析/修改 pipeline config（应由 `rph_core/orchestrator.py` 统一处理）。
+- Parsing or modifying pipeline config in bin wrappers — `rph_core/orchestrator.py` owns config resolution.
+- Adding step logic or side effects here.

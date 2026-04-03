@@ -1,0 +1,12 @@
+StepII-新增功能自动识别任务文件
+请阅读该脚本，给出增加实现以下功能的修改建议：
+我希望脚本能够自动识别任务名称Title并自动修改Gaussian计算的关键词
+1. 当任务名为INT-XXX-XX（意思为中间体）或S-XXX-XX（意思为起始原料）或P-XXX-XX（意思为最终产物）时，计算前两行关键词为：
+%nprocshared=1
+#p opt=(calcall,noeigen,nomicro) external='./xtb.sh' nosymm
+2. 当任务名为TS-XXX-XX（意思为过渡态）时，计算前两行关键词为：
+%nprocshared=1
+#p opt=(calcall,TS,noeigen,nomicro) external='./xtb.sh' nosymm
+3. 当任务名为TS-XXX-XX-IRC（意思为某过渡态的内禀反应坐标计算）时，计算前两行关键词为：
+%nprocshared=1
+#p IRC(calcfc,stepsize=5) external='./xtb.sh' nosymm
