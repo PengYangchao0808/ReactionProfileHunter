@@ -638,6 +638,119 @@ class ReactionProfileHunter:
             scan_config=scan_config,
         )
 
+    def _extract_reaction_type_token(self, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+
+        text = str(value).strip()
+        if not text:
+            return None
+
+        compact = text.replace(" ", "")
+        if compact.endswith("_default"):
+            compact = compact[:-8]
+
+        bracket_match = re.search(r"\[(\d+\+\d+)\]", compact)
+        if bracket_match:
+            return f"[{bracket_match.group(1)}]"
+
+        plain_match = re.search(r"(\d+\+\d+)", compact)
+        if plain_match:
+            return f"[{plain_match.group(1)}]"
+
+        return compact or None
+
+    def _normalize_cleaner_data_for_pipeline(
+        self,
+        cleaner_data: Optional[Dict[str, Any]],
+        *,
+        product_smiles: str,
+        precursor_smiles: Optional[str] = None,
+        reaction_profile: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not cleaner_data:
+            return None
+
+        row = dict(cleaner_data)
+        raw_obj = row.get("raw")
+        raw: Dict[str, Any] = dict(raw_obj) if isinstance(raw_obj, dict) else {}
+
+        def _pick_nonempty(*values: Any) -> Optional[str]:
+            for value in values:
+                if value is None:
+                    continue
+                text = str(value).strip()
+                if text:
+                    return text
+            return None
+
+        rxn_key_hash = _pick_nonempty(
+            row.get("rxn_key_hash"),
+            row.get("reaction_id"),
+            row.get("rx_id"),
+            row.get("record_id"),
+            row.get("id"),
+            raw.get("rxn_key_hash"),
+            raw.get("reaction_id"),
+            raw.get("rx_id"),
+            raw.get("record_id"),
+            raw.get("id"),
+        )
+        if rxn_key_hash:
+            row["rxn_key_hash"] = rxn_key_hash
+            raw.setdefault("rxn_key_hash", rxn_key_hash)
+
+        precursor = _pick_nonempty(
+            row.get("precursor_smiles"),
+            row.get("reactant_smiles"),
+            row.get("substrate_smiles"),
+            raw.get("precursor_smiles"),
+            raw.get("reactant_smiles"),
+            raw.get("substrate_smiles"),
+            precursor_smiles,
+        )
+        if precursor:
+            row["precursor_smiles"] = precursor
+            raw.setdefault("precursor_smiles", precursor)
+
+        product_main = _pick_nonempty(
+            row.get("product_smiles_main"),
+            row.get("product_smiles"),
+            raw.get("product_smiles_main"),
+            raw.get("product_smiles"),
+            product_smiles,
+        )
+        if product_main:
+            row["product_smiles_main"] = product_main
+            raw.setdefault("product_smiles_main", product_main)
+
+        reaction_type = _pick_nonempty(
+            self._extract_reaction_type_token(row.get("reaction_type")),
+            self._extract_reaction_type_token(row.get("rxn_type")),
+            self._extract_reaction_type_token(raw.get("reaction_type")),
+            self._extract_reaction_type_token(raw.get("rxn_type")),
+            self._extract_reaction_type_token(row.get("reaction_family")),
+            self._extract_reaction_type_token(raw.get("reaction_family")),
+            self._extract_reaction_type_token(row.get("reaction_profile")),
+            self._extract_reaction_type_token(raw.get("reaction_profile")),
+            self._extract_reaction_type_token(reaction_profile),
+        )
+        if reaction_type:
+            row["reaction_type"] = reaction_type
+            raw.setdefault("reaction_type", reaction_type)
+
+        profile_text = _pick_nonempty(
+            row.get("reaction_profile"),
+            raw.get("reaction_profile"),
+            reaction_profile,
+        )
+        if profile_text:
+            row["reaction_profile"] = profile_text
+            raw.setdefault("reaction_profile", profile_text)
+
+        row["raw"] = raw
+        return row
+
     def _run_s0(
         self,
         *,
@@ -702,11 +815,15 @@ class ReactionProfileHunter:
         checkpoint_mgr.mark_step_in_progress("s0", phase="classifying")
         if pm:
             pm.update_step("s0", completed=30, description="Classifying reaction mechanism...")
-        cleaner_row = dict(cleaner_data)
+        cleaner_row = self._normalize_cleaner_data_for_pipeline(
+            cleaner_data,
+            product_smiles=product_smiles,
+        ) or dict(cleaner_data)
         if not cleaner_row.get("rxn_key_hash"):
             fallback_rxn_id = (
                 cleaner_row.get("reaction_id")
                 or cleaner_row.get("rx_id")
+                or cleaner_row.get("record_id")
                 or cleaner_row.get("id")
                 or "manual"
             )
@@ -901,7 +1018,12 @@ class ReactionProfileHunter:
                     if state is not None:
                         checkpoint_mgr.save_state(state)
 
-            effective_cleaner_data = dict(cleaner_data) if cleaner_data else None
+            effective_cleaner_data = self._normalize_cleaner_data_for_pipeline(
+                cleaner_data,
+                product_smiles=product_smiles,
+                precursor_smiles=precursor_smiles,
+                reaction_profile=reaction_profile,
+            )
             if 's0' not in skip_steps:
                 pm.update_step("s0", description="Running mechanism classification...")
                 try:

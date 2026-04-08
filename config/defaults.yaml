@@ -431,9 +431,11 @@ run:
   # dataset 模式配置 (当 source=dataset 时使用)
   # JSON 文件会被自动识别 (通过 .json 后缀检测)
   dataset:
-    path: "E:\\Calculations\\AI4S_ML_Studys\\[4+3] Mechain learning\\ReactionProfileHunter\\xiong_2003_gold_manul_Check.json"  # JSON 数据集文件路径
-    product_smiles_col: "product_smiles"  # 产物SMILES列名 (JSON 中为 product_smiles)
-    precursor_smiles_col: "substrate_smiles"  # 前体SMILES列名 (JSON 中为 substrate_smiles)
+    path: "E:/Calculations/AI4S_ML_Studys/[4+3] Mechain learning/ReactionProfileHunter/data/reaxys_cleaned.csv"  # CSV 数据集文件路径
+    product_smiles_col: "product_smiles_main"  # 产物SMILES列名
+    precursor_smiles_col: "precursor_smiles"  # 前体SMILES列名
+    id_col: "rx_id"                           # ID列名
+    delimiter: ","                            # CSV分隔符
   # 通用运行选项
   output_root: ./rph_output  # 输出根目录 (会被global.work_dir_base覆盖)
   workdir_naming: "rx_{rx_id}"  # 工作目录命名模板
@@ -443,7 +445,8 @@ run:
   resume_partial_enabled: true
   dry_run: false      # 干运行模式（仅显示任务，不执行）
   max_tasks: 1        # 最大任务数 (0=无限制, 1=只读取第一行)
-  filter_ids: ["X2003-Sch2-1A"]  # 精确指定第一条数据记录
+  filter_ids: []      # 精确指定要运行的记录ID (如: ["1", "2"])，留空则按顺序运行
+  reaction_type: "[4+3]_default"  # 反应类型 (从reaxys_cleaned.csv数据可知是4+3反应)
 
   max_workers: 1      # 并行工作进程数
   notify:

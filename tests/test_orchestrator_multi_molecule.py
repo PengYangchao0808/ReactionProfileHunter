@@ -262,6 +262,7 @@ class TestOrchestratorMultiMolecule:
             checkpoint_mgr=checkpoint_mgr,
             resume_enabled=False,
         )
+        assert result is not None
         assert result["status"] == "skipped"
         s0_dir = tmp_path / "S0_Mechanism"
         status_file = s0_dir / "s0_status.json"
@@ -285,8 +286,48 @@ class TestOrchestratorMultiMolecule:
             checkpoint_mgr=checkpoint_mgr,
             resume_enabled=False,
         )
+        assert result2 is not None
         assert result2["status"] == "skipped"
         assert result2["reason"] == "disabled_by_config"
         artifact2 = json.loads(status_file.read_text())
         assert artifact2["status"] == "skipped"
         assert artifact2["reason"] == "disabled_by_config"
+
+    @patch("rph_core.orchestrator.load_config")
+    @patch("rph_core.orchestrator.normalize_qc_config")
+    @patch("rph_core.orchestrator.ui.print_pipeline_header")
+    def test_normalize_cleaner_data_for_pipeline_maps_dataset_json_fields(
+        self,
+        _mock_ui,
+        mock_normalize,
+        mock_load,
+        config,
+    ):
+        cfg = dict(config)
+        cfg["run"] = {"resume": False}
+        mock_load.return_value = cfg
+        mock_normalize.return_value = (cfg, [])
+
+        hunter = ReactionProfileHunter()
+        cleaner_data = {
+            "record_id": "X2003-Sch2-1A",
+            "substrate_smiles": "C=C",
+            "product_smiles": "C1CCO1",
+            "reaction_family": "[4+3] cycloaddition",
+        }
+
+        normalized = hunter._normalize_cleaner_data_for_pipeline(
+            cleaner_data,
+            product_smiles="C1CCO1",
+            precursor_smiles=None,
+            reaction_profile="[4+3]_default",
+        )
+
+        assert normalized is not None
+        assert normalized.get("rxn_key_hash") == "X2003-Sch2-1A"
+        assert normalized.get("precursor_smiles") == "C=C"
+        assert normalized.get("product_smiles_main") == "C1CCO1"
+        assert normalized.get("reaction_type") == "[4+3]"
+        assert normalized.get("reaction_profile") == "[4+3]_default"
+        assert isinstance(normalized.get("raw"), dict)
+        assert normalized["raw"].get("reaction_type") == "[4+3]"

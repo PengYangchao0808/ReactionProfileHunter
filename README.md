@@ -6,7 +6,7 @@
 
 **Product-driven reaction mechanism exploration and feature extraction**
 
-[![Version](https://img.shields.io/badge/version-6.2.0-blue.svg)](https://github.com/yourusername/ReactionProfileHunter)
+[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](https://github.com/yourusername/ReactionProfileHunter)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Code Style](https://img.shields.io/badge/code%20style-agents%20ready-success.svg)](AGENTS.md)
@@ -41,7 +41,7 @@ ReactionProfileHunter (RPH) is a product-driven automated reaction mechanism pip
 
 ## Key features
 
-### v6.2.0 highlights (mechanism-aware features)
+### v2.0.0 highlights (forward-scan + major refactoring)
 
 - Step1 activation features: Boltzmann/Gibbs weighted energy, conformer entropy/flexibility, leaving-group geometry, alpha-H gating
 - Step2 cyclization features: kinetics/thermochemistry, TS geometry (forming bonds), CDFT metrics (Fukui/Dual Descriptor/QTAIM)
@@ -51,7 +51,7 @@ ReactionProfileHunter (RPH) is a product-driven automated reaction mechanism pip
 - Multiwfn integration: tier-1 support (Fukui/Dual Descriptor/QTAIM), non-interactive batch, failure-tolerant, caching
 - Strict contract: feature_meta records config snapshot and provenance; missing features degrade with NaN + warning
 
-### v6.1.0 highlights
+### v1.x historical (legacy versions from v6.x era)
 
 - Simplified S4 module: feature extraction only (no QC execution)
 - Fixed output format: features_raw.csv, features_mlr.csv, feature_meta.json
@@ -602,12 +602,12 @@ bin/rph_run --log-level DEBUG
 If you use ReactionProfileHunter in research, please cite:
 
 ```bibtex
-@software{reactionprofilehunter2024,
+@software{reactionprofilehunter2025,
   title = {ReactionProfileHunter: Automated Reaction Mechanism Exploration},
   author = {Your Name},
-  year = {2024},
+  year = {2025},
   url = {https://github.com/yourusername/ReactionProfileHunter},
-  version = {6.2.0}
+  version = {2.0.0}
 }
 ```
 

@@ -10,6 +10,7 @@ from rph_core.utils.dataset_loader import (
     DatasetLoaderError,
     load_reaction_records,
 )
+from rph_core.steps.step2_retro.smarts_matcher import SMARTSMatcher
 from rph_core.utils.cleaner_adapter import (
     CleanerAdapterError,
     convert_cleaner_row_to_record,
@@ -346,3 +347,34 @@ class TestXiongJsonCompatibility:
         assert records[0].raw.get("topology") == "intramolecular"
         assert records[0].raw.get("solvent") == "CH2Cl2"
 
+
+class TestSmartsReactionTypeNormalization:
+    def test_prefers_reaction_family_when_reaction_type_missing(self):
+        matcher = SMARTSMatcher()
+        cleaner_data = {
+            "reaction_family": "[4+3] cycloaddition",
+            "reaction_type": None,
+            "rxn_type": None,
+        }
+        assert matcher._normalize_reaction_type(cleaner_data) == "[4+3]"
+
+    def test_supports_reaction_profile_default_suffix(self):
+        matcher = SMARTSMatcher()
+        cleaner_data = {
+            "reaction_profile": "[4+3]_default",
+        }
+        assert matcher._normalize_reaction_type(cleaner_data) == "[4+3]"
+
+    def test_uses_raw_nested_fields(self):
+        matcher = SMARTSMatcher()
+        cleaner_data = {
+            "raw": {
+                "reaction_family": "4+2 cycloaddition"
+            }
+        }
+        assert matcher._normalize_reaction_type(cleaner_data) == "[4+2]"
+
+    def test_falls_back_to_52_when_no_hints(self):
+        matcher = SMARTSMatcher()
+        cleaner_data = {"reaction_type": "", "rxn_type": "", "raw": {}}
+        assert matcher._normalize_reaction_type(cleaner_data) == "[5+2]"

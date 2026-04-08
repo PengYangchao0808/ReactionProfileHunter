@@ -10,6 +10,7 @@ Date: 2026-01-13
 """
 
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from pathlib import Path
@@ -212,12 +213,42 @@ class SMARTSMatcher(LoggerMixin):
         if not cleaner_data:
             return "[5+2]"
 
-        candidate = cleaner_data.get("reaction_type") or cleaner_data.get("rxn_type")
-        if not candidate:
-            return "[5+2]"
+        raw_obj = cleaner_data.get("raw")
+        raw: Dict[str, Any] = raw_obj if isinstance(raw_obj, dict) else {}
+        candidates = [
+            cleaner_data.get("reaction_type"),
+            cleaner_data.get("rxn_type"),
+            cleaner_data.get("reaction_family"),
+            cleaner_data.get("reaction_profile"),
+            raw.get("reaction_type"),
+            raw.get("rxn_type"),
+            raw.get("reaction_family"),
+            raw.get("reaction_profile"),
+        ]
 
-        text = str(candidate).strip()
-        return text if text else "[5+2]"
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            text = str(candidate).strip()
+            if not text:
+                continue
+
+            compact = text.replace(" ", "")
+            if compact.endswith("_default"):
+                compact = compact[:-8]
+
+            bracket_match = re.search(r"\[(\d+\+\d+)\]", compact)
+            if bracket_match:
+                return f"[{bracket_match.group(1)}]"
+
+            plain_match = re.search(r"(\d+\+\d+)", compact)
+            if plain_match:
+                return f"[{plain_match.group(1)}]"
+
+            if compact in _TEMPLATES:
+                return compact
+
+        return "[5+2]"
 
     def _select_template(self, reaction_type: str) -> Optional[SMARTSTemplate]:
         if reaction_type in _TEMPLATES:

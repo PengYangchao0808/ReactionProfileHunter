@@ -172,6 +172,12 @@ class CleanAdapter:
             atom_map=core_atom_map
         )
         
+        if not bond_changes.get('forming'):
+            alt_forming = self._extract_forming_from_alt_sources(row)
+            if alt_forming:
+                bond_changes['forming'] = alt_forming
+                logger.debug(f"[CleanAdapter] Using forming_bonds from alt sources: {alt_forming}")
+        
         # 解析 new_ring_size
         new_ring_size = None
         if row.get('new_ring_size'):
@@ -220,7 +226,7 @@ class CleanAdapter:
     def _parse_bond_changes(
         self, 
         changes_str: str,
-        atom_map: Dict[int, int] = None
+        atom_map: Optional[Dict[int, int]] = None
     ) -> Dict[str, List[Tuple[int, int]]]:
         """
         解析 core_bond_changes 字段
@@ -287,6 +293,52 @@ class CleanAdapter:
                 continue
         
         return {'forming': forming, 'breaking': breaking}
+    
+    def _extract_forming_from_alt_sources(self, row: Dict[str, str]) -> List[Tuple[int, int]]:
+        """从备用字段提取 forming_bonds (当 core_bond_changes 为空时)."""
+        for key in ['formed_bond_index_pairs', 'forming_bonds', 'formed_bonds']:
+            if key in row and row[key]:
+                bonds = self._normalize_bond_list(row[key])
+                if bonds:
+                    return bonds
+        return []
+    
+    def _normalize_bond_list(self, value: Any) -> List[Tuple[int, int]]:
+        """归一化各种格式的 bond 列表."""
+        if isinstance(value, list):
+            result = []
+            for pair in value:
+                if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                    try:
+                        result.append((int(pair[0]), int(pair[1])))
+                    except (ValueError, TypeError):
+                        continue
+                elif isinstance(pair, str) and '-' in pair:
+                    try:
+                        a, b = pair.split('-', 1)
+                        result.append((int(a.strip()), int(b.strip())))
+                    except (ValueError, IndexError):
+                        continue
+            return result
+        if isinstance(value, str):
+            result = []
+            for item in value.split(';'):
+                item = item.strip()
+                if not item:
+                    continue
+                for delim in ['-', ',', ' ']:
+                    if delim in item:
+                        try:
+                            parts = item.split(delim)
+                            if len(parts) >= 2:
+                                a = int(parts[0].strip())
+                                b = int(parts[1].strip())
+                                result.append((a, b))
+                                break
+                        except (ValueError, IndexError):
+                            continue
+            return result
+        return []
     
     def filter_by_reaction_type(
         self, 
