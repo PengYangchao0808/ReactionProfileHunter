@@ -17,15 +17,18 @@ import logging
 import shutil
 import json
 import math
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from rph_core.utils.log_manager import LoggerMixin
-from rph_core.steps.conformer_search.engine import ConformerEngine
+from rph_core.steps.anchor.engine_factory import create_s1_engine
+from rph_core.steps.conformer_search.protocols import resolve_protocol_spec
 from rph_core.utils.molecule_utils import is_small_molecule
 from rph_core.utils.small_molecule_cache import SmallMoleculeCache
 from rph_core.utils.ui import get_progress_manager
+from rph_core.version import __version__
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +79,15 @@ class AnchorPhase(LoggerMixin):
         self.base_work_dir.mkdir(parents=True, exist_ok=True)
 
         # Small molecule threshold from config (V6.2 Extension)
-        self.small_mol_threshold = self.config.get("s1", {}).get(
-            "small_molecule_threshold", 10
+        step1_cfg = self.config.get("step1", {})
+        s1_legacy_cfg = self.config.get("s1", {})
+        self.protocol = str(step1_cfg.get("protocol", s1_legacy_cfg.get("protocol", "ext"))).lower()
+        self.protocol_spec = resolve_protocol_spec(self.config, self.protocol)
+        self.small_mol_threshold = step1_cfg.get(
+            "small_molecule_threshold", s1_legacy_cfg.get("small_molecule_threshold", 10)
         )
-        self.logger.info(f"Small molecule threshold (heavy atoms): {self.small_mol_threshold}")
+        self.logger.info(f"[S1] Protocol tier: {self.protocol}")
+        self.logger.info(f"[S1] Small-molecule cutoff: {self.small_mol_threshold} heavy atoms")
 
         # Removed: SmallMoleculeCache initialization in __init__ (moved to run())
         # This ensures cache is created relative to the actual run directory
@@ -94,7 +102,43 @@ class AnchorPhase(LoggerMixin):
         # ConformerEngine 将在内部创建分子自治目录结构
         # 例如：S1_ConfGeneration/[Molecule_Name]/crest 和 .../dft
 
-        self.logger.info("AnchorPhase v3.0 初始化完成（分子自治架构）")
+        self.logger.info("[S1] AnchorPhase ready (V4.0 CENSO-like model)")
+
+    def _display_path(self, path: Path) -> str:
+        path = Path(path)
+        for root in (self.base_work_dir, Path.cwd()):
+            try:
+                rel = path.resolve().relative_to(root.resolve())
+                return str(rel)
+            except Exception:
+                continue
+        parts = path.parts
+        if len(parts) >= 3:
+            return str(Path("...") / parts[-2] / parts[-1])
+        return path.name or str(path)
+
+    def _protocol_tier_label(self) -> str:
+        mapping = {
+            "ext": "RPH baseline",
+            "default": "RPH baseline",
+            "full": "CENSO-like full funnel",
+            "lite": "CENSO-like lite funnel",
+            "zero": "CENSO-like zero funnel",
+        }
+        return mapping.get(self.protocol_spec.name, self.protocol_spec.name)
+
+    def _protocol_funnel_summary(self) -> str:
+        mapping = {
+            "ext": "GFN0→GFN2 two-stage ensemble → all candidates",
+            "default": "GFN0→GFN2 two-stage ensemble → all candidates",
+            "full": "GFN2 ensemble → prescreen fast-SP → screening fast-SP → survivor window",
+            "lite": "GFN2 ensemble → screening-level fast-SP → cutoff",
+            "zero": "GFN2 ensemble → narrow energy window",
+        }
+        return mapping.get(self.protocol_spec.name, "protocol-defined funnel")
+
+    def _protocol_handoff_summary(self) -> str:
+        return "shared DFT handoff → Gaussian OPT/FREQ → ORCA final SP"
 
     def run(
         self,
@@ -119,16 +163,19 @@ class AnchorPhase(LoggerMixin):
         cache_dir_cfg = self.config.get("global", {}).get("small_molecule_cache_dir")
         if cache_dir_cfg:
             cache_root = Path(cache_dir_cfg).resolve()
-            self.logger.info(f"Using configured small molecule cache: {cache_root}")
+            self.logger.info(f"[S1] Cache root   : {self._display_path(cache_root)}")
         else:
             cache_root = self.base_work_dir / "SmallMolecules"
-            self.logger.info(f"Using run-local small molecule cache: {cache_root}")
+            self.logger.info(f"[S1] Cache root   : {self._display_path(cache_root)}")
         self.small_mol_cache = SmallMoleculeCache(cache_root)
 
-        self.logger.info("=" * 60)
-        self.logger.info("[S1] Anchor Phase: 统一锚定底物池和产物（v3.0）")
-        self.logger.info("=" * 60)
-        self.logger.info(f"[S1] 分子数量: {len(molecules)}")
+        self.logger.info("=" * 72)
+        self.logger.info("[S1] Conformer Search & Anchor Phase — V4.0 CENSO-like model")
+        self.logger.info(f"[S1] Tier         : {self.protocol_spec.name.upper()} · {self._protocol_tier_label()}")
+        self.logger.info(f"[S1] Funnel       : {self._protocol_funnel_summary()}")
+        self.logger.info(f"[S1] Handoff      : {self._protocol_handoff_summary()}")
+        self.logger.info(f"[S1] Molecules    : {len(molecules)}")
+        self.logger.info("=" * 72)
         self._emit_anchor_progress(
             "anchor_started",
             {
@@ -154,8 +201,9 @@ class AnchorPhase(LoggerMixin):
                 )
                 pm.set_subtask("S1", "Anchor Molecules", idx + 1, total_mols)
             
-            self.logger.info(f"\n[S1] >>> ⚓ 锚定任务启动: {name} ...")
-            self.logger.info(f"[S1]     SMILES: {smiles}")
+            self.logger.info(f"\n[S1] >>> Molecule {idx + 1}/{total_mols} · {name}")
+            self.logger.info(f"[S1]     SMILES      : {smiles}")
+            self.logger.info(f"[S1]     Search tier : {self._protocol_tier_label()}")
 
             # Write status file
             status_file = self.base_work_dir / ".rph_step_status.json"
@@ -189,6 +237,7 @@ class AnchorPhase(LoggerMixin):
 
             best_sp_out: Optional[Path] = None
             sp_energy: Optional[float] = None
+            final_opt_sp_stage_meta: Dict[str, Any] = self._default_final_opt_sp_meta(stage_status="not_run")
 
             try:
                 is_small = is_small_molecule(smiles, threshold=self.small_mol_threshold)
@@ -230,13 +279,14 @@ class AnchorPhase(LoggerMixin):
                                     sp_energy = 0.0
                         
                         cache_hit = True
+                        final_opt_sp_stage_meta = self._default_final_opt_sp_meta(stage_status="cache_reused")
 
                 if not cache_hit:
                     lock_file = None
                     if is_small:
                         lock_file = self.small_mol_cache.acquire_compute_lock(smiles)
                         if lock_file is None:
-                            self.logger.info(f"    ⏳ Another process is computing {name}, waiting...")
+                            self.logger.info(f"    ⏳ Small-molecule cache busy for {name}, waiting...")
                             import time
                             time.sleep(1)
                             if self.small_mol_cache.exists(smiles, theory_signature):
@@ -275,10 +325,11 @@ class AnchorPhase(LoggerMixin):
                                     cache_hit = True
                     
                     if not cache_hit:
-                        temp_engine = ConformerEngine(
+                        temp_engine = create_s1_engine(
+                            protocol=self.protocol,
                             config=self.config,
                             work_dir=self.base_work_dir,
-                            molecule_name=name
+                            molecule_name=name,
                         )
                         
                         if is_small:
@@ -290,6 +341,15 @@ class AnchorPhase(LoggerMixin):
                             self.logger.info("    ℹ️  说明: 执行系综搜索 (CREST) + DFT OPT-SP 耦合循环。")
                             best_sp_out, sp_energy = temp_engine.run(smiles=smiles)
 
+                        stage_meta_from_engine = getattr(temp_engine, "last_final_opt_sp_meta", None)
+                        if isinstance(stage_meta_from_engine, dict) and stage_meta_from_engine:
+                            final_opt_sp_stage_meta = {
+                                **self._default_final_opt_sp_meta(stage_status="completed"),
+                                **stage_meta_from_engine,
+                            }
+                        else:
+                            final_opt_sp_stage_meta = self._default_final_opt_sp_meta(stage_status="completed")
+
                         if is_small:
                             cache_dir = self.small_mol_cache.get_or_create(smiles, name=name)
                             shutil.copy(best_sp_out, cache_dir / "molecule_min.xyz")
@@ -300,12 +360,13 @@ class AnchorPhase(LoggerMixin):
                                     shutil.rmtree(dest_dft)
                                 shutil.copytree(mol_dft_dir, dest_dft)
                             self.small_mol_cache.write_cache_meta(smiles, theory_signature)
-                            self.logger.info(f"    ✓ Small molecule {name} saved to cache")
+                            self.logger.info(f"    ✓ Cached small molecule: {name}")
                     
                     if lock_file:
                         self.small_mol_cache.release_compute_lock(lock_file)
 
-                self.logger.info(f"    ✓ OPT-SP 完成: {best_sp_out}")
+                if best_sp_out is not None:
+                    self.logger.info(f"    ✓ Finalized output: {self._display_path(best_sp_out)}")
                 self.logger.info(f"    ✓ SP 能量: {sp_energy:.8f} Hartree")
 
                 conformer_state = self.base_work_dir / name / "conformer_state.json"
@@ -342,6 +403,9 @@ class AnchorPhase(LoggerMixin):
                     "fchk": fchk_file,
                     "qm_output": best_sp_out,
                     "conformer_state": conformer_state if conformer_state.exists() else None,
+                    "protocol": self.protocol,
+                    "engine": "ConformerEngine",
+                    "final_opt_sp_stage_meta": final_opt_sp_stage_meta,
                 }
 
                 molecule_statuses[name] = {
@@ -377,7 +441,7 @@ class AnchorPhase(LoggerMixin):
                         indent=4,
                     )
 
-                self.logger.info(f"  ✓ {name} 锚定完成")
+                self.logger.info(f"  ✓ {name} anchor complete")
 
             except Exception as e:
                 error_msg = f"{name} 锚定失败: {e}"
@@ -436,6 +500,7 @@ class AnchorPhase(LoggerMixin):
         success = len(error_messages) < len(molecules)
 
         self.anchored_molecules = anchored_molecules
+        self._write_s1_provenance(anchored_molecules=anchored_molecules, molecule_statuses=molecule_statuses)
 
         result = AnchorPhaseResult(
             success=success,
@@ -443,7 +508,7 @@ class AnchorPhase(LoggerMixin):
             error_message="; ".join(error_messages) if error_messages else None
         )
 
-        self.logger.info("=" * 60)
+        self.logger.info("=" * 72)
         self._emit_anchor_progress(
             "anchor_finished",
             {
@@ -457,7 +522,7 @@ class AnchorPhase(LoggerMixin):
             self.logger.info(f"[S1] ✓ Anchor Phase 完成: {len(anchored_molecules)}/{len(molecules)} 个分子成功")
         else:
             self.logger.error(f"[S1] ✗ Anchor Phase 失败: {result.error_message}")
-        self.logger.info("=" * 60)
+        self.logger.info("=" * 72)
 
         status_file = self.base_work_dir / ".rph_step_status.json"
         with open(status_file, "w") as f:
@@ -475,6 +540,145 @@ class AnchorPhase(LoggerMixin):
             )
 
         return result
+
+    def _write_s1_provenance(
+        self,
+        *,
+        anchored_molecules: Dict[str, Dict[str, Any]],
+        molecule_statuses: Dict[str, Dict[str, Any]],
+    ) -> None:
+        theory_signature = self._build_theory_signature()
+        final_opt_sp_meta = self._resolve_final_opt_sp_meta(anchored_molecules)
+        final_opt_enabled = bool(final_opt_sp_meta.get("enabled", self.protocol_spec.final_opt_sp_enabled))
+        funnel_payload = {
+            "search_mode": self.protocol_spec.funnel_policy.search_mode,
+            "clustering_mode": self.protocol_spec.funnel_policy.clustering_mode,
+            "prescreen_mode": self.protocol_spec.funnel_policy.prescreen_mode,
+            "rerank_mode": self.protocol_spec.funnel_policy.rerank_mode,
+            "use_mrrho_like_correction": self.protocol_spec.funnel_policy.use_mrrho_like_correction,
+            "survivor_window_kcal": self.protocol_spec.funnel_policy.survivor_window_kcal,
+            "narrow_window_kcal": self.protocol_spec.funnel_policy.narrow_window_kcal,
+            "prescreen_window_kcal": self.protocol_spec.funnel_policy.prescreen_window_kcal,
+            "screening_window_kcal": self.protocol_spec.funnel_policy.screening_window_kcal,
+            "optimize_limit": self.protocol_spec.funnel_policy.optimize_limit,
+            "top2_fallback_enabled": self.protocol_spec.funnel_policy.top2_fallback_enabled,
+            "boltzmann_cutoff": self.protocol_spec.funnel_policy.boltzmann_cutoff,
+            "ranking_basis": str(final_opt_sp_meta.get("ranking_basis_before_handoff", "input_order")),
+            "candidate_total": int(final_opt_sp_meta.get("input_candidate_count", 0)),
+            "survivor_count": int(final_opt_sp_meta.get("selected_candidate_count", 0)),
+            "candidate_ids": list(final_opt_sp_meta.get("input_candidate_ids", [])),
+            "window_threshold": final_opt_sp_meta.get("energy_window_used"),
+            "energy_window_kcal": final_opt_sp_meta.get("energy_window_used"),
+            "window_count": int(final_opt_sp_meta.get("window_count", 0)),
+            "gap_rank1_rank2": final_opt_sp_meta.get("gap_rank1_rank2"),
+            "stages_executed": list(final_opt_sp_meta.get("stages_executed", [])),
+            "approx_thermo_applied": bool(final_opt_sp_meta.get("approx_thermo_applied", False)),
+            "fallback_triggered": bool(final_opt_sp_meta.get("fallback_triggered", False)),
+        }
+        handoff_payload = {
+            "mode": str(final_opt_sp_meta.get("mode_effective", self.protocol_spec.handoff_policy.mode)),
+            "mode_requested": str(final_opt_sp_meta.get("mode_requested", self.protocol_spec.handoff_policy.mode)),
+            "mode_effective": str(final_opt_sp_meta.get("mode_effective", self.protocol_spec.handoff_policy.mode)),
+            "fallback_mode": self.protocol_spec.handoff_policy.fallback_mode,
+            "small_gap_kcal": self.protocol_spec.handoff_policy.small_gap_kcal,
+            "ranking_after_handoff": self.protocol_spec.handoff_policy.ranking_after_handoff,
+            "selected_candidate_count": int(final_opt_sp_meta.get("selected_candidate_count", 0)),
+            "selected_candidate_ids": list(final_opt_sp_meta.get("selected_candidate_ids", [])),
+            "selection_rule": str(final_opt_sp_meta.get("selection_mode", self.protocol_spec.handoff_policy.mode)),
+            "selection_reason": str(final_opt_sp_meta.get("selection_reason", "unspecified")),
+            "candidate_scores_before_handoff": final_opt_sp_meta.get("candidate_scores_before_handoff", {}),
+            "window_count": int(final_opt_sp_meta.get("window_count", 0)),
+            "gap_rank1_rank2": final_opt_sp_meta.get("gap_rank1_rank2"),
+            "fallback_trigger": bool(final_opt_sp_meta.get("fallback_trigger", final_opt_sp_meta.get("fallback_triggered", False))),
+            "fallback_triggered": bool(final_opt_sp_meta.get("fallback_triggered", False)),
+        }
+        payload: Dict[str, Any] = {
+            "schema_version": "s1_provenance_v1",
+            "protocol_spec_version": "protocol_spec_v1",
+            "rph_version": __version__,
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "protocol": self.protocol_spec.name,
+            "engine": "ConformerEngine",
+            "has_geometry_optimization": True,
+            "final_opt_sp": {
+                "enabled": final_opt_enabled,
+                "stage": "final_opt_sp" if final_opt_enabled else "disabled",
+                "stage_status": str(final_opt_sp_meta.get("stage_status", "unknown")),
+                "freq_requested": bool(final_opt_sp_meta.get("freq_requested", self.protocol_spec.freq_enabled)),
+                "final_sp_requested": bool(final_opt_sp_meta.get("final_sp_requested", self.protocol_spec.final_sp_enabled)),
+                "selection_mode": str(final_opt_sp_meta.get("selection_mode", self.protocol_spec.selection_mode)),
+                "protocol": str(final_opt_sp_meta.get("protocol", self.protocol_spec.name)),
+                "selected_candidate_count": int(final_opt_sp_meta.get("selected_candidate_count", 0)),
+                "freq_enabled": bool(final_opt_sp_meta.get("freq_requested", self.protocol_spec.freq_enabled)),
+                "final_sp_enabled": bool(final_opt_sp_meta.get("final_sp_requested", self.protocol_spec.final_sp_enabled)),
+                "stage_meta": dict(final_opt_sp_meta),
+            },
+            "protocol_spec": {
+                "name": self.protocol_spec.name,
+                "two_stage_enabled": self.protocol_spec.two_stage_enabled,
+                "ngeom_default": self.protocol_spec.ngeom_default,
+                "ngeom_max": self.protocol_spec.ngeom_max,
+                "funnel_policy": asdict(self.protocol_spec.funnel_policy),
+                "handoff_policy": asdict(self.protocol_spec.handoff_policy),
+                "provenance_flags": self.protocol_spec.provenance_flags,
+            },
+            "funnel": funnel_payload,
+            "handoff": handoff_payload,
+            "artifact_contract": {
+                "product_geometry_level": "dft_optimized",
+                "has_geometry_optimization": True,
+            },
+            "theory_signature": theory_signature,
+            "conformer_search": {
+                "two_stage_enabled": self.protocol_spec.two_stage_enabled,
+                "ngeom_default": self.protocol_spec.ngeom_default,
+                "ngeom_max": self.protocol_spec.ngeom_max,
+            },
+            "molecules": {},
+        }
+
+        for name, record in anchored_molecules.items():
+            xyz_path = record.get("xyz")
+            payload["molecules"][name] = {
+                "status": molecule_statuses.get(name, {}).get("status", "unknown"),
+                "smiles": molecule_statuses.get(name, {}).get("smiles", ""),
+                "energy_hartree": record.get("e_sp"),
+                "xyz": str(xyz_path) if isinstance(xyz_path, Path) else None,
+            }
+
+        provenance_file = self.base_work_dir / "provenance.json"
+        provenance_file.write_text(
+            json.dumps(self._json_safe(payload), indent=2, ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
+
+    def _default_final_opt_sp_meta(self, *, stage_status: str) -> Dict[str, Any]:
+        enabled = bool(self.protocol_spec.final_opt_sp_enabled)
+        return {
+            "stage": "final_opt_sp" if enabled else "disabled",
+            "stage_status": stage_status,
+            "enabled": enabled,
+            "protocol": self.protocol_spec.name,
+            "selection_mode": self.protocol_spec.selection_mode,
+            "mode_requested": self.protocol_spec.handoff_policy.mode,
+            "mode_effective": self.protocol_spec.handoff_policy.mode,
+            "selected_candidate_count": 0,
+            "freq_requested": bool(self.protocol_spec.freq_enabled),
+            "final_sp_requested": bool(self.protocol_spec.final_sp_enabled),
+            "fallback_trigger": False,
+            "fallback_triggered": False,
+            "window_count": 0,
+            "gap_rank1_rank2": None,
+        }
+
+    def _resolve_final_opt_sp_meta(self, anchored_molecules: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        resolved = self._default_final_opt_sp_meta(stage_status="unknown")
+        for record in anchored_molecules.values():
+            stage_meta = record.get("final_opt_sp_stage_meta")
+            if isinstance(stage_meta, dict) and stage_meta:
+                resolved = {**resolved, **stage_meta}
+                break
+        return resolved
 
     def get_sp_energy(self, molecule_name: str) -> Optional[float]:
         """

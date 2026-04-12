@@ -33,6 +33,10 @@ class ConformerStateManager:
             "run": {
                 "status": "initialized",
                 "two_stage_enabled": False,
+                "protocol": "",
+                "funnel_signature": {},
+                "handoff_signature": {},
+                "stages_executed": [],
                 "last_error": "",
             },
             "crest": {},
@@ -45,6 +49,14 @@ class ConformerStateManager:
                 "best_conformer": "",
                 "global_min_energy": None,
                 "global_min_xyz": "",
+                "ranking_basis": "",
+                "candidate_total": 0,
+                "selected_candidate_count": 0,
+                "fallback_triggered": False,
+                "fallback_trigger": False,
+                "window_count": 0,
+                "gap_rank1_rank2": None,
+                "mode_effective": "",
             },
         }
 
@@ -79,6 +91,38 @@ class ConformerStateManager:
         run["last_error"] = ""
         self.state["smiles"] = smiles
         self.save()
+
+    def set_protocol_signature(
+        self,
+        *,
+        protocol: str,
+        funnel_signature: Dict[str, Any],
+        handoff_signature: Dict[str, Any],
+        stages_executed: Optional[List[str]] = None,
+    ) -> None:
+        run = self.state.setdefault("run", {})
+        run["protocol"] = str(protocol)
+        run["funnel_signature"] = dict(funnel_signature)
+        run["handoff_signature"] = dict(handoff_signature)
+        if stages_executed is not None:
+            run["stages_executed"] = list(stages_executed)
+        self.save()
+
+    def is_resume_compatible(
+        self,
+        *,
+        protocol: str,
+        funnel_signature: Dict[str, Any],
+        handoff_signature: Dict[str, Any],
+    ) -> bool:
+        run = self.state.get("run", {})
+        if not isinstance(run, dict):
+            return False
+        return (
+            run.get("protocol") == str(protocol)
+            and run.get("funnel_signature") == dict(funnel_signature)
+            and run.get("handoff_signature") == dict(handoff_signature)
+        )
 
     def mark_run_complete(self) -> None:
         self.state.setdefault("run", {})["status"] = "completed"
@@ -214,6 +258,32 @@ class ConformerStateManager:
         summary["best_conformer"] = best_conf_name
         summary["global_min_energy"] = float(energy)
         summary["global_min_xyz"] = str(global_min_xyz)
+        self.save()
+
+    def set_funnel_summary(
+        self,
+        *,
+        ranking_basis: str,
+        candidate_total: int,
+        selected_candidate_count: int,
+        fallback_triggered: bool,
+        window_count: Optional[int] = None,
+        gap_rank1_rank2: Optional[float] = None,
+        mode_effective: str = "",
+        stages_executed: Optional[List[str]] = None,
+    ) -> None:
+        summary = self.state.setdefault("summary", {})
+        summary["ranking_basis"] = str(ranking_basis)
+        summary["candidate_total"] = int(candidate_total)
+        summary["selected_candidate_count"] = int(selected_candidate_count)
+        summary["fallback_triggered"] = bool(fallback_triggered)
+        summary["fallback_trigger"] = bool(fallback_triggered)
+        if window_count is not None:
+            summary["window_count"] = int(window_count)
+        summary["gap_rank1_rank2"] = gap_rank1_rank2
+        summary["mode_effective"] = str(mode_effective)
+        if stages_executed is not None:
+            self.state.setdefault("run", {})["stages_executed"] = list(stages_executed)
         self.save()
 
     def get_summary(self) -> Dict[str, Any]:

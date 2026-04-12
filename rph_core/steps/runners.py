@@ -1,7 +1,74 @@
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from rph_core.steps.contracts import Step2Artifacts, Step3Artifacts, Step4Artifacts
+
+
+def _read_s1_provenance(work_dir: Path) -> Dict[str, Any]:
+    import json
+
+    provenance_file = Path(work_dir) / "S1_ConfGeneration" / "provenance.json"
+    if not provenance_file.exists():
+        return {}
+
+    try:
+        with open(provenance_file, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _adapt_product_xyz_for_s2_if_needed(
+    *,
+    hunter: Any,
+    work_dir: Path,
+    product_xyz_file: Path,
+) -> Path:
+    import json
+    import shutil
+
+    step2_cfg = hunter.config.get("step2", {}) if isinstance(hunter.config, dict) else {}
+    adapter_cfg = step2_cfg.get("pes_adapter", {}) if isinstance(step2_cfg, dict) else {}
+    if not bool(adapter_cfg.get("enabled", False)):
+        return product_xyz_file
+
+    mode = str(adapter_cfg.get("mode", "fallback")).lower()
+    if mode != "fallback":
+        return product_xyz_file
+
+    provenance = _read_s1_provenance(work_dir)
+    has_opt = bool(provenance.get("has_geometry_optimization", False))
+    if has_opt:
+        return product_xyz_file
+
+    protocol = str(provenance.get("protocol", "unknown"))
+    provenance_schema_version = str(provenance.get("schema_version", "unknown"))
+    trigger_class = "exception_path" if protocol in {"ext", "default", "lite", "zero"} else "legacy_or_unknown"
+
+    fallback_dir = Path(work_dir) / "S2_Retro" / "pes_adapter_fallback"
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    adapted_xyz = fallback_dir / "product_relaxed.xyz"
+    shutil.copy2(product_xyz_file, adapted_xyz)
+
+    meta = {
+        "mode": "fallback",
+        "triggered": True,
+        "reason": "s1_geometry_not_dft_optimized",
+        "protocol": protocol,
+        "provenance_schema_version": provenance_schema_version,
+        "trigger_source": "s1_provenance.has_geometry_optimization=false",
+        "trigger_class": trigger_class,
+        "source": str(product_xyz_file),
+        "adapted": str(adapted_xyz),
+    }
+    with open(fallback_dir / "adapter_meta.json", "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+
+    hunter.logger.warning(
+        "[S2] S1 geometry is not DFT-optimized; applying fallback pes_adapter path"
+    )
+    return adapted_xyz
 
 
 def run_step2(
@@ -16,7 +83,22 @@ def run_step2(
     from rph_core.utils.file_io import read_xyz
     from rph_core.utils.geometry_tools import GeometryUtils
     from rph_core.utils.scan_profile_plotter import plot_scan_profile
-    product_xyz_file = hunter._resolve_product_xyz_for_s2(product_xyz)
+    product_xyz_file_raw = hunter._resolve_product_xyz_for_s2(product_xyz)
+    product_xyz_file = _adapt_product_xyz_for_s2_if_needed(
+        hunter=hunter,
+        work_dir=work_dir,
+        product_xyz_file=product_xyz_file_raw,
+    )
+    adapter_triggered = product_xyz_file != product_xyz_file_raw
+    adapter_trigger_class = "unknown"
+    if adapter_triggered:
+        adapter_meta_file = work_dir / "S2_Retro" / "pes_adapter_fallback" / "adapter_meta.json"
+        if adapter_meta_file.exists():
+            try:
+                adapter_meta = json.loads(adapter_meta_file.read_text(encoding="utf-8"))
+                adapter_trigger_class = str(adapter_meta.get("trigger_class", "unknown"))
+            except Exception:
+                adapter_trigger_class = "unknown"
     profile_key = hunter._resolve_profile_key(reaction_profile=reaction_profile, cleaner_data=cleaner_data)
     forming_bonds = hunter._resolve_forming_bonds_for_s2(
         cleaner_data=cleaner_data,
@@ -259,6 +341,14 @@ def run_step2(
         except Exception as e:
             hunter.logger.warning(f"[S2] Failed to create final plot: {e}")
 
+    fallback_reasons: Tuple[str, ...] = tuple()
+    if adapter_triggered:
+        fallback_reasons = ("pes_adapter_fallback_applied",)
+        if adapter_trigger_class == "exception_path":
+            fallback_reasons += ("pes_adapter_fallback_exception_path",)
+        elif adapter_trigger_class == "legacy_or_unknown":
+            fallback_reasons += ("pes_adapter_fallback_legacy_or_unknown",)
+
     return Step2Artifacts(
         ts_guess_xyz=ts_guess_xyz,
         substrate_xyz=substrate_xyz,
@@ -268,7 +358,7 @@ def run_step2(
         generation_method=generation_method,
         status=status,
         ts_guess_confidence=ts_guess_confidence,
-        degraded_reasons=tuple(degraded_reasons),
+        degraded_reasons=tuple(degraded_reasons) + fallback_reasons,
         step2_signature=step2_signature,
         scan_profile_json=scan_profile_json,
     )
