@@ -1,4 +1,4 @@
-# pyright: ignore
+# pyright: reportImportCycles=false
 
 """
 Unified Conformer Engine (UCE) - v3.0 (Refactored)
@@ -54,6 +54,9 @@ from rph_core.utils.shermo_runner import run_shermo
 from rph_core.utils.ui import get_progress_manager
 from rph_core.utils.constants import HARTREE_TO_KCAL
 from rph_core.steps.conformer_search.state_manager import ConformerStateManager
+from rph_core.steps.conformer_search.candidates import CandidateSet, ConformerCandidate, candidate_set_from_paths
+from rph_core.steps.conformer_search.pipeline.executor import PipelineExecutor
+from rph_core.steps.conformer_search.protocols import ProtocolSpec, resolve_protocol_spec
 
 
 logger = logging.getLogger(__name__)
@@ -92,7 +95,13 @@ class ConformerEngine(LoggerMixin):
     - To disable conformer search: do not instantiate ConformerEngine.
     - Placeholder mode is not implemented; use conditional instantiation instead.
     """
-    def __init__(self, config: Dict[str, Any], work_dir: Path, molecule_name: str):
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        work_dir: Path,
+        molecule_name: str,
+        protocol_spec: Optional[ProtocolSpec] = None,
+    ):
         super().__init__()
         self.config = config
         self.molecule_name = molecule_name
@@ -112,9 +121,13 @@ class ConformerEngine(LoggerMixin):
         self.dft_dir.mkdir(exist_ok=True)
         self.state_manager = ConformerStateManager(self.molecule_dir, self.molecule_name)
 
-        self.logger.info(f"📁 Created molecule directory: {self.molecule_dir}")
+        self.logger.info(f"📁 S1 workspace: {self.molecule_dir.name}/")
 
         self.step1_config = config.get('step1', {})
+        self.protocol = str(self.step1_config.get('protocol', 'ext')).lower()
+        self.protocol_spec = protocol_spec or resolve_protocol_spec(config, self.protocol)
+        self.pipeline_executor = PipelineExecutor(self.protocol_spec)
+        self.last_final_opt_sp_meta: Dict[str, Any] = {}
         self.crest_config = self.step1_config.get('crest', {})
         self.confsearch_config = self.step1_config.get('conformer_search', {})
         self.theory_opt = config.get('theory', {}).get('optimization', {})
@@ -198,6 +211,51 @@ class ConformerEngine(LoggerMixin):
             config=config
         )
 
+    def _display_path(self, path: Path) -> str:
+        path = Path(path)
+        for root in (self.molecule_dir, Path.cwd()):
+            try:
+                return str(path.resolve().relative_to(root.resolve()))
+            except Exception:
+                continue
+        parts = path.parts
+        if len(parts) >= 3:
+            return str(Path("...") / parts[-2] / parts[-1])
+        return path.name or str(path)
+
+    def _protocol_tier_label(self) -> str:
+        mapping = {
+            'ext': 'RPH baseline',
+            'default': 'RPH baseline',
+            'full': 'CENSO-like full funnel',
+            'lite': 'CENSO-like lite funnel',
+            'zero': 'CENSO-like zero funnel',
+        }
+        return mapping.get(self.protocol_spec.name, self.protocol_spec.name)
+
+    def _protocol_funnel_summary(self) -> str:
+        mapping = {
+            'ext': 'GFN0→GFN2 two-stage ensemble → all candidates',
+            'default': 'GFN0→GFN2 two-stage ensemble → all candidates',
+            'full': 'GFN2 ensemble → prescreen fast-SP → screening fast-SP → survivor window',
+            'lite': 'GFN2 ensemble → screening-level fast-SP → cutoff',
+            'zero': 'GFN2 ensemble → narrow energy window',
+        }
+        return mapping.get(self.protocol_spec.name, 'protocol-defined funnel')
+
+    def _protocol_handoff_summary(self) -> str:
+        return 'shared DFT handoff → Gaussian OPT/FREQ → ORCA final SP'
+
+    def _protocol_progress_label(self) -> str:
+        mapping = {
+            'ext': 'EXT funnel · two-stage baseline',
+            'default': 'EXT funnel · two-stage baseline',
+            'full': 'FULL funnel · prescreen + screening',
+            'lite': 'LITE funnel · screening + cutoff',
+            'zero': 'ZERO funnel · narrow window',
+        }
+        return mapping.get(self.protocol_spec.name, 'Protocol funnel')
+
     def run(self, smiles: str) -> Tuple[Path, float]:
         """
         Execute full conformer search workflow (OPT-SP coupled).
@@ -210,18 +268,35 @@ class ConformerEngine(LoggerMixin):
         Returns:
             Tuple[Path, float]: (Path to global min XYZ, Global min SP Energy in Hartree)
         """
-        self.logger.info(f"[S1] 🚀 Starting Unified Conformer Search for: {self.molecule_name}")
+        self.logger.info(f"[S1] 🚀 Starting V4.0 CENSO-like conformer search: {self.molecule_name}")
         pm = get_progress_manager()
         if pm:
             pm.update_step("s1", description=f"S1: [{self.molecule_name}] Starting conformer search")
             pm.log_event("S1", f"Starting conformer search for {self.molecule_name}")
 
         mode = "two-stage (GFN0→GFN2)" if self.two_stage_enabled else "single-stage (GFN2)"
-        self.logger.info(f"[S1]    Mode: {mode}")
+        self.logger.info(f"[S1]    Tier         : {self.protocol_spec.name.upper()} · {self._protocol_tier_label()}")
+        self.logger.info(f"[S1]    Funnel       : {self._protocol_funnel_summary()}")
+        self.logger.info(f"[S1]    Handoff      : {self._protocol_handoff_summary()}")
+        self.logger.info(f"[S1]    Search mode  : {mode}")
+        self.logger.info(f"[S1]    Candidate cap: default={self.ngeom_default}, max={self.max_conformers}")
         self.state_manager.start_run(smiles=smiles, two_stage_enabled=self.two_stage_enabled)
+        self.state_manager.set_protocol_signature(
+            protocol=self.protocol_spec.name,
+            funnel_signature={
+                "search_mode": self.protocol_spec.funnel_policy.search_mode,
+                "clustering_mode": self.protocol_spec.funnel_policy.clustering_mode,
+                "prescreen_mode": self.protocol_spec.funnel_policy.prescreen_mode,
+                "rerank_mode": self.protocol_spec.funnel_policy.rerank_mode,
+            },
+            handoff_signature={
+                "mode": self.protocol_spec.handoff_policy.mode,
+                "fallback_mode": self.protocol_spec.handoff_policy.fallback_mode,
+            },
+        )
         self._emit_s1_progress("run_started", {"mode": mode, "smiles": smiles})
         if pm:
-            pm.log_event("S1", f"Conformer search mode: {mode}")
+            pm.log_event("S1", f"{self._protocol_tier_label()} · {mode}")
 
         try:
             global_min_path = self.molecule_dir / f"{self.molecule_name}_global_min.xyz"
@@ -250,25 +325,16 @@ class ConformerEngine(LoggerMixin):
             initial_xyz = self._step_rdkit_embed(smiles)
 
             if pm:
-                pm.enter_phase("S1", "Stage 2: CREST searching")
-                pm.update_step("s1", completed=15, description=f"S1: [{self.molecule_name}] CREST Search")
-            if self.two_stage_enabled and self.stage1_enabled and self.stage2_enabled:
-                self.logger.info("[S1] 🔀 Executing two-stage CREST workflow (GFN0→GFN2)...")
-                if pm:
-                    pm.log_event("S1", "Executing two-stage CREST workflow (GFN0->GFN2)")
-                crest_ensemble_file = self._step_two_stage_crest(initial_xyz)
-            else:
-                self.logger.info("[S1] 📍 Executing single-stage CREST workflow (GFN2)...")
-                if pm:
-                    pm.log_event("S1", "Executing single-stage CREST workflow (GFN2)")
-                crest_ensemble_file = self._step_crest_search(initial_xyz)
-
+                pm.enter_phase("S1", "Stage 2: Funnel runtime")
+                pm.update_step("s1", completed=15, description=f"S1: [{self.molecule_name}] {self._protocol_progress_label()}")
+            candidate_set = self._run_protocol_funnel(initial_xyz)
+            candidates = [candidate.source_xyz for candidate in candidate_set.candidates]
+            self.logger.info(
+                f"[S1] 🔍 Funnel summary: basis={candidate_set.ranking_basis}, "
+                f"candidates={candidate_set.total_count}, survivors={len(candidates)}"
+            )
             if pm:
-                pm.update_step("s1", completed=45, description=f"S1: [{self.molecule_name}] Processing Ensemble")
-            candidates = self._step_process_ensemble(crest_ensemble_file)
-            self.logger.info(f"[S1] 🔍 Selected {len(candidates)} conformers for DFT optimization.")
-            if pm:
-                pm.log_event("S1", f"Selected {len(candidates)} conformers for DFT optimization")
+                pm.log_event("S1", f"{self._protocol_progress_label()} → {len(candidates)} DFT candidates")
 
             if not candidates:
                 raise RuntimeError("No valid conformers found after CREST processing.")
@@ -276,7 +342,18 @@ class ConformerEngine(LoggerMixin):
             if pm:
                 pm.enter_phase("S1", "Stage 4: DFT optimization")
                 pm.update_step("s1", completed=55, description=f"S1: [{self.molecule_name}] DFT optimization")
-            best_log, min_energy = self._step_dft_opt_sp_coupled(candidates)
+            best_log, min_energy, stage_meta = self._run_shared_dft_handoff(candidate_set)
+            self.last_final_opt_sp_meta = dict(stage_meta)
+            self.state_manager.set_funnel_summary(
+                ranking_basis=str(candidate_set.ranking_basis),
+                candidate_total=int(candidate_set.total_count),
+                selected_candidate_count=int(stage_meta.get("selected_candidate_count", len(candidates))),
+                fallback_triggered=bool(stage_meta.get("fallback_triggered", False)),
+                window_count=int(candidate_set.metadata.get("window_count", len(candidate_set.candidates))),
+                gap_rank1_rank2=candidate_set.metadata.get("gap_rank1_rank2"),
+                mode_effective=str(stage_meta.get("mode_effective", stage_meta.get("handoff_mode", ""))),
+                stages_executed=list(candidate_set.metadata.get("stages_executed", [])),
+            )
 
             global_min_path = self.molecule_dir / f"{self.molecule_name}_global_min.xyz"
 
@@ -305,7 +382,7 @@ class ConformerEngine(LoggerMixin):
                     "best_conformer": best_name,
                 },
             )
-            self.logger.info(f"[S1] 🏆 Global Minimum Found: {global_min_path}")
+            self.logger.info(f"[S1] 🏆 Global minimum: {self._display_path(global_min_path)}")
             self.logger.info(f"[S1]    SP Energy: {min_energy:.6f} Hartree")
             if pm:
                 pm.update_step("s1", completed=98, description=f"S1: [{self.molecule_name}] Finalizing global minimum")
@@ -328,7 +405,7 @@ class ConformerEngine(LoggerMixin):
         Returns:
             Path to generated XYZ file
         """
-        self.logger.info(f"[S1]   [1/5] RDKit 3D Embedding (num_conf={num_conf})...")
+        self.logger.info(f"[S1]   [1/5] RDKit 3D embedding (num_conf={num_conf})...")
         pm = get_progress_manager()
         if pm:
             pm.log_event("S1", f"RDKit 3D embedding started (num_conf={num_conf})")
@@ -354,7 +431,7 @@ class ConformerEngine(LoggerMixin):
 
     def _step_crest_search(self, input_xyz: Path) -> Path:
         """Single-stage CREST search (GFN2 only) - backward compatible."""
-        self.logger.info("[S1]   [2/5] CREST Global Search (Single-Stage)...")
+        self.logger.info("[S1]   [2/5] GFN2 ensemble generation (single-stage)...")
         pm = get_progress_manager()
         if pm:
             pm.log_event("S1", "CREST global search started (single-stage GFN2)")
@@ -515,7 +592,7 @@ class ConformerEngine(LoggerMixin):
         self.state_manager.mark_crest_stage("final_ensemble", "completed", output_file=final_ensemble)
         self._emit_s1_progress("crest_two_stage_completed", {"ensemble": str(final_ensemble)})
 
-        self.logger.info(f"[S1]   ✓ Two-stage CREST complete: {final_ensemble}")
+        self.logger.info(f"[S1]   ✓ Two-stage funnel complete: {final_ensemble.name}")
         if pm:
             pm.log_event("S1", f"Two-stage CREST completed: {final_ensemble.name}")
 
@@ -649,7 +726,7 @@ class ConformerEngine(LoggerMixin):
         return result.cluster_xyz
 
     def _step_process_ensemble(self, ensemble_file: Path) -> List[Path]:
-        self.logger.info("[S1]   [3/5] Processing Ensemble (Clustering & Filtering)...")
+        self.logger.info("[S1]   [3/5] Ensemble processing (clustering + filtering)...")
 
         isomers_xyz = self.cluster_dir / "isomers.xyz"
         shutil.copy(ensemble_file, isomers_xyz)
@@ -767,7 +844,7 @@ class ConformerEngine(LoggerMixin):
         self.logger.info(f"    - Clustering reduced {len(conf_list)} -> {len(selected)} structures.")
         return selected
 
-    def _step_dft_opt_sp_coupled(self, candidates: List[Path]) -> Tuple[Path, float]:
+    def _step_dft_opt_sp_coupled(self, candidates: List[Path]) -> Tuple[Path, float, List[Dict[str, Any]]]:
         self.logger.info(f"[S1]   [4/5] DFT OPT-SP Coupled Loop (Total {len(candidates)} conformers)...")
 
         pm = get_progress_manager()
@@ -788,10 +865,7 @@ class ConformerEngine(LoggerMixin):
             if self.state_manager.is_conformer_completed(conf_name) and isinstance(cached_record, dict):
                 cached_log_file = Path(str(cached_record.get("log_file", "")))
                 if cached_log_file.exists():
-                    self.logger.info(
-                        f"[S1]     ⏭️ [{idx+1}/{len(candidates)}] Skipping completed conformer: "
-                        f"{self.molecule_name} - {conf_name}"
-                    )
+                    self.logger.info(f"[S1]     ⏭️ [{idx+1}/{len(candidates)}] Reusing cached conformer: {conf_name}")
                     if pm:
                         pm.log_event("S1", f"Conformer cached {idx+1}/{total_confs}: {conf_name}")
                     self._emit_s1_progress("conformer_skipped", {"conformer": conf_name, "index": idx + 1, "total": total_confs})
@@ -808,7 +882,7 @@ class ConformerEngine(LoggerMixin):
                 pm.set_subtask("S1", "DFT Conformers", idx + 1, total_confs)
                 pm.log_event("S1", f"Optimizing conformer {idx+1}/{total_confs}: {conf_name}")
 
-            self.logger.info(f"[S1]     🔄 [{idx+1}/{len(candidates)}] 正在优化构象: {self.molecule_name} - {conf_name}")
+            self.logger.info(f"[S1]     🔄 [{idx+1}/{len(candidates)}] DFT handoff on conformer: {conf_name}")
             self.state_manager.mark_conformer_running(conf_name)
             self._emit_s1_progress("conformer_started", {"conformer": conf_name, "index": idx + 1, "total": total_confs})
 
@@ -1041,7 +1115,7 @@ class ConformerEngine(LoggerMixin):
         if pm:
             pm.log_event("S1", f"Best conformer selected: {best_log.name} (weight={best_weight:.4f})")
 
-        return best_log, best_sp_energy
+        return best_log, best_sp_energy, records
 
     def _emit_s1_progress(self, event: str, payload: Optional[Dict[str, Any]] = None) -> None:
         summary = self.state_manager.get_summary()
@@ -1161,7 +1235,7 @@ class ConformerEngine(LoggerMixin):
         
         # Reuse the coupled DFT/SP logic
         # This handles Opt -> Freq -> SP and returns the best log/energy
-        best_log, best_energy = self._step_dft_opt_sp_coupled(candidates)
+        best_log, best_energy, _ = self._run_final_opt_sp_stage(candidates)
 
         # 3. Finalize
         duration = time.time() - start_time
@@ -1174,6 +1248,99 @@ class ConformerEngine(LoggerMixin):
         self.state_manager.mark_run_complete()
 
         return global_min_path, best_energy
+
+    def _run_final_opt_sp_stage(self, candidates: List[Path]) -> Tuple[Path, float, Dict[str, Any]]:
+        selected = [Path(item).resolve() for item in candidates]
+        candidate_set = candidate_set_from_paths(
+            selected,
+            source_protocol=self.protocol_spec.name,
+            ranking_basis="input_order",
+            ranking_unit="hartree",
+            source_stage="post_ensemble",
+        )
+        stage_sequence = self.pipeline_executor.stage_sequence()
+        self._emit_s1_progress(
+            "final_opt_sp_started",
+            {
+                "protocol": self.protocol_spec.name,
+                "selection_mode": self.protocol_spec.selection_mode,
+                "pipeline_stages": stage_sequence,
+                "selected_candidates": len(selected),
+                "freq_requested": self.protocol_spec.freq_enabled,
+            },
+        )
+        stage_result = self.pipeline_executor.execute_handoff(
+            candidate_set=candidate_set,
+            runner=self._run_dft_opt_sp_for_candidates,
+        )
+        self.last_final_opt_sp_meta = dict(stage_result.stage_meta)
+        self._emit_s1_progress(
+            "final_opt_sp_completed",
+            {
+                "protocol": self.protocol_spec.name,
+                "energy_hartree": stage_result.best_energy,
+                "stage_meta": self.last_final_opt_sp_meta,
+            },
+        )
+        return stage_result.best_log, stage_result.best_energy, self.last_final_opt_sp_meta
+
+    def _run_protocol_funnel(self, initial_xyz: Path) -> CandidateSet:
+        from rph_core.steps.conformer_search.funnel import FunnelRunner
+
+        runner = FunnelRunner(self, self.protocol_spec)
+        candidate_set = runner.run(initial_xyz)
+        self._write_funnel_candidate_summary(candidate_set)
+        return candidate_set
+
+    def _run_shared_dft_handoff(self, candidate_set: CandidateSet) -> Tuple[Path, float, Dict[str, Any]]:
+        stage_result = self.pipeline_executor.execute_handoff(
+            candidate_set=candidate_set,
+            runner=self._run_dft_opt_sp_for_candidates,
+        )
+        stage_meta = dict(stage_result.stage_meta)
+        stage_meta.setdefault("stages_executed", list(candidate_set.metadata.get("stages_executed", [])))
+        stage_meta.setdefault("approx_thermo_applied", bool(candidate_set.metadata.get("approx_thermo_applied", False)))
+        stage_meta.setdefault("boltzmann_cutoff", candidate_set.metadata.get("boltzmann_cutoff"))
+        stage_meta.setdefault("window_count", int(candidate_set.metadata.get("window_count", len(candidate_set.candidates))))
+        stage_meta.setdefault("gap_rank1_rank2", candidate_set.metadata.get("gap_rank1_rank2"))
+        return stage_result.best_log, stage_result.best_energy, stage_meta
+
+    def _write_funnel_candidate_summary(self, candidate_set: CandidateSet) -> Path:
+        output = self.molecule_dir / "funnel_candidate_summary.json"
+        payload = {
+            "protocol": self.protocol_spec.name,
+            "ranking_basis": candidate_set.ranking_basis,
+            "ranking_unit": candidate_set.ranking_unit,
+            "total_count": candidate_set.total_count,
+            "selected_count_before_handoff": candidate_set.selected_count_before_handoff,
+            "metadata": dict(candidate_set.metadata),
+            "candidates": [
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "source_xyz": str(candidate.source_xyz),
+                    "source_stage": candidate.source_stage,
+                    "rank_initial": candidate.rank_initial,
+                    "xtb_energy": candidate.xtb_energy,
+                    "xtb_free_energy": candidate.xtb_free_energy,
+                    "prescreen_energy": candidate.prescreen_energy,
+                    "screening_energy": candidate.screening_energy,
+                    "rerank_energy": candidate.rerank_energy,
+                    "rerank_method": candidate.rerank_method,
+                    "ranking_history": dict(candidate.ranking_history),
+                    "included_by": list(candidate.included_by),
+                    "within_window": candidate.within_window,
+                    "cluster_id": candidate.cluster_id,
+                }
+                for candidate in candidate_set.candidates
+            ],
+        }
+        output.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        return output
+
+    def _run_dft_opt_sp_for_candidates(self, candidates: List[ConformerCandidate]) -> Tuple[Path, float]:
+        candidate_paths = [candidate.source_xyz for candidate in candidates]
+        best_log, best_energy, _records = self._step_dft_opt_sp_coupled(candidate_paths)
+        return best_log, best_energy
 
 
 
@@ -1437,6 +1604,52 @@ class ConformerEngine(LoggerMixin):
         except Exception as e:
             self.logger.error(f"      ❌ ORCA SP failed: {e}")
             return None
+
+    def _run_fast_sp_profile(
+        self,
+        xyz_file: Path,
+        *,
+        profile_name: str,
+        output_subdir: str,
+    ) -> Optional[float]:
+        profiles = self.step1_config.get("fast_sp_profiles", {}) if isinstance(self.step1_config, dict) else {}
+        profile_cfg = profiles.get(profile_name, {}) if isinstance(profiles, dict) else {}
+        profile_cfg = profile_cfg if isinstance(profile_cfg, dict) else {}
+        defaults = {
+            "prescreen_sp": {
+                "method": "PBEh-3c",
+                "basis": "",
+                "aux_basis": "",
+                "timeout": 1800,
+            },
+            "screening_sp": {
+                "method": "r2SCAN-3c",
+                "basis": "",
+                "aux_basis": "",
+                "timeout": 1800,
+            },
+        }
+        merged_profile = {**defaults.get(profile_name, {}), **profile_cfg}
+        output_dir = self.dft_dir / "fast_sp" / output_subdir / xyz_file.stem
+        output_dir.mkdir(parents=True, exist_ok=True)
+        fast_sp = ORCAInterface(
+            method=str(merged_profile.get("method", self.theory_sp.get("method", "r2SCAN-3c"))),
+            basis=str(merged_profile.get("basis", "")),
+            aux_basis=str(merged_profile.get("aux_basis", "")),
+            nprocs=int(merged_profile.get("nproc", self.theory_sp.get("nproc", 16))),
+            solvent=str(merged_profile.get("solvent", self.theory_sp.get("solvent", self.solvent))),
+            config=self.config,
+        )
+        result = fast_sp.single_point(
+            xyz_file=Path(xyz_file).resolve(),
+            output_dir=output_dir,
+            timeout=int(merged_profile.get("timeout", 1800)),
+            charge=int(self.theory_opt.get("charge", 0)),
+            spin=int(self.theory_opt.get("multiplicity", 1)),
+        )
+        if result.converged and result.energy is not None:
+            return float(result.energy)
+        return None
 
     def _generate_orca_sp_input(
         self,

@@ -19,9 +19,10 @@ import tempfile
 import json
 from pathlib import Path
 import numpy as np
+from typing import Optional
 
 
-def _write_min_xyz(path: Path, content: str = None) -> None:
+def _write_min_xyz(path: Path, content: Optional[str] = None) -> None:
     """Write minimal xyz file."""
     if content is None:
         content = "3\n\nC 0.0 0.0 0.0\nO 1.0 0.0 0.0\nH 0.0 1.0 0.0\n"
@@ -45,6 +46,20 @@ def _write_mock_fchk(path: Path, restricted: bool = True) -> None:
     """Write mock FCHK file with orbitals and charges."""
     if restricted:
         content = """Test FCHK (Restricted)
+Number of alpha electrons             I         10
+Number of beta electrons              I         10
+Orbital Energies                      R  N=10
+-1.0D+01 -8.0D+00 -6.0D+00 -4.0D+00 -2.0D+00
+-1.0D+00  1.0D+00  2.0D+00  3.0D+00  4.0D+00
+Mulliken Charges                       R  N=3
+  1  0.100000D+00
+  2 -0.100000D+00
+  3  0.050000D+00
+Atomic numbers                         I  N=3
+  6  8  1
+"""
+    else:
+        content = """Test FCHK (Unrestricted)
 Number of alpha electrons             I         10
 Number of beta electrons              I         10
 Orbital Energies                      R  N=10
@@ -259,7 +274,7 @@ class TestS4V62Integration:
                 reactant=reactant,
                 product=product,
                 output_dir=out_dir,
-                forming_bonds=[(0, 1)],  # Forming bond for GEDT
+                forming_bonds=((0, 1),),
                 fragment_indices=None,
                 sp_matrix_report=None,
                 ts_fchk=ts_fchk,
@@ -300,12 +315,9 @@ class TestS4V62Integration:
             _write_min_xyz(reactant)
             _write_min_xyz(product)
 
-            class MockArtifactsIndex:
-                pass
-
             context = FeatureContext(
                 s3_dir=tmpdir,
-                artifacts_index=MockArtifactsIndex(),
+                artifacts_index={},
                 forming_bonds=None,
             )
 
@@ -391,3 +403,72 @@ class TestS4V62FinalVerification:
 
             # All checks pass
             assert True
+
+    def test_zero_protocol_missing_freq_artifacts_is_protocol_aware(self):
+        from rph_core.steps.step4_features.feature_miner import FeatureMiner
+
+        with tempfile.TemporaryDirectory(prefix="test_zero_protocol_aware_") as tmp:
+            tmpdir = Path(tmp)
+
+            ts = tmpdir / "ts_final.xyz"
+            reactant = tmpdir / "reactant.xyz"
+            product = tmpdir / "product_min.xyz"
+            _write_min_xyz(ts)
+            _write_min_xyz(reactant)
+            _write_min_xyz(product)
+
+            s1_dir = tmpdir / "S1_ConfGeneration"
+            s1_dir.mkdir(parents=True, exist_ok=True)
+            (s1_dir / "provenance.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "s1_provenance_v1",
+                        "protocol_spec_version": "protocol_spec_v1",
+                        "protocol": "zero",
+                        "has_geometry_optimization": True,
+                        "final_opt_sp": {
+                            "freq_requested": False,
+                            "final_sp_requested": True,
+                        },
+                        "artifact_contract": {
+                            "product_geometry_level": "dft_optimized",
+                        },
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            out_dir = tmpdir / "S4_Data"
+            miner = FeatureMiner(config={})
+            miner.run(
+                ts_final=ts,
+                reactant=reactant,
+                product=product,
+                output_dir=out_dir,
+                forming_bonds=None,
+                fragment_indices=None,
+                sp_matrix_report=None,
+                ts_fchk=None,
+                ts_log=None,
+                ts_orca_out=None,
+                reactant_fchk=None,
+                reactant_orca_out=None,
+                product_fchk=None,
+                product_orca_out=None,
+                s1_dir=s1_dir,
+            )
+
+            meta = json.loads((out_dir / "feature_meta.json").read_text(encoding="utf-8"))
+            provenance = meta["meta"]["provenance"]
+            warnings = meta.get("warnings", [])
+
+            assert provenance["s1_protocol_summary"]["protocol"] == "zero"
+            assert provenance["s1_protocol_summary"]["freq_requested"] is False
+            assert "handoff_mode" in provenance["s1_protocol_summary"]
+            assert "funnel_search_mode" in provenance["s1_protocol_summary"]
+            assert provenance["protocol_expected_missing"]["frequency_artifacts_optional"] is True
+
+            warning_codes = {w.get("code") for w in warnings if isinstance(w, dict)}
+            assert "W_PROTOCOL_FREQ_DISABLED_MISSING_TS_LOG" in warning_codes
+            assert "W_PROTOCOL_FREQ_DISABLED_MISSING_TS_FCHK" in warning_codes

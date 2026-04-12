@@ -41,3 +41,17 @@ Core package: `orchestrator.py` wires S1→S4; `steps/` holds per-step business 
 - Treating `rph_output/` or `test_tmpdir/` as source code.
 - Forward scan: hardcoded scan params instead of `reaction_profiles` config
 - Forward scan: overwriting S2-derived `forming_bonds`
+
+## CODE MAP
+
+| Symbol | Type | Location | Role |
+|--------|------|----------|------|
+| `ReactionProfileHunter` | Class | `orchestrator.py:86` | Main pipeline; `run_pipeline()`, `run_batch()`, S0-S4 lazy engines |
+| `PipelineResult` | Dataclass | `orchestrator.py:39` | Carries artifacts: smiles, xyz paths, energies, fchk/log, features_csv |
+| `run_pipeline()` | Method | `orchestrator.py:938` | 500+ line S0→S1→S2→S3→S4 flow with checkpoint gates |
+| `_resolve_forming_bonds_for_s2()` | Method | `orchestrator.py:467` | S0/cleaner/config/SMARTS fallback chain for forming bonds |
+| `_resolve_s1_artifacts()` | Method | `orchestrator.py:1748` | v2.1/v3.0/v6.1 layout compatibility resolver |
+| `_resolve_forward_scan_config()` | Method | `orchestrator.py:276` | Merges reaction_profiles config with CLI args for xTB scan |
+| `main()` | Function | `orchestrator.py:2048` | CLI argparse (--smiles, --output, --config, --reaction-type, --skip-steps) |
+| `_run_tasks()` | Function | `orchestrator.py:1991` | Batch dispatcher; iterates dataset rows, calls run_pipeline() |
+| `_resolve_run_config()` | Function | `orchestrator.py:1895` | Merges CLI args + YAML config via _deep_merge_dict |

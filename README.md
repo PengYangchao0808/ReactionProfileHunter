@@ -6,7 +6,7 @@
 
 **Product-driven reaction mechanism exploration and feature extraction**
 
-[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](https://github.com/yourusername/ReactionProfileHunter)
+[![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)](https://github.com/yourusername/ReactionProfileHunter)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Code Style](https://img.shields.io/badge/code%20style-agents%20ready-success.svg)](AGENTS.md)
@@ -40,6 +40,13 @@ ReactionProfileHunter (RPH) is a product-driven automated reaction mechanism pip
 ---
 
 ## Key features
+
+### v2.1.0 release closure highlights
+
+- Protocol-aware Step1 contract finalized: `ext/default/lite/zero` all resolve through `ProtocolSpec` and are covered by protocol contract tests
+- Lite/zero closure semantics are now explicit and test-gated (`freq_requested`, `selection_mode`, fallback triggers, protocol-aware S4 degradation)
+- S4 final verification now includes protocol-aware provenance checks for zero mode missing frequency artifacts
+- Release closure docs and version are synchronized to `2.1.0`
 
 ### v2.0.0 highlights (forward-scan + major refactoring)
 
@@ -479,6 +486,9 @@ pytest tests/test_imports_step4_features.py tests/test_s4_no_qc_execution.py -v
 # S4 contract tests only
 pytest tests/test_s4_*.py tests/test_m2_*.py tests/test_m4_*.py -v
 
+# V2.1.0 closure gate (protocol + chain + S4)
+pytest tests/test_step1_protocol_contract.py tests/test_phase3c_chain_lite_zero.py tests/test_s4_v62_final_verification.py -v
+
 # With coverage
 pytest --cov=rph_core --cov-report=html
 ```
@@ -607,7 +617,7 @@ If you use ReactionProfileHunter in research, please cite:
   author = {Your Name},
   year = {2025},
   url = {https://github.com/yourusername/ReactionProfileHunter},
-  version = {2.0.0}
+  version = {2.1.0}
 }
 ```
 

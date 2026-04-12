@@ -1920,6 +1920,11 @@ def _resolve_run_config(config: dict[str, Any], args) -> dict[str, Any]:
             run_cfg["reaction_profile"] = reaction_profile
             run_cfg["reaction_type"] = reaction_profile
 
+    skip_steps_value = getattr(args, "skip_steps", None)
+    if skip_steps_value:
+        parsed = [s.strip().lower() for s in skip_steps_value.split(",") if s.strip()]
+        run_cfg["skip_steps"] = parsed
+
     rx_id_value = getattr(args, "rx_id", None)
     if rx_id_value:
         rx_id_text = str(rx_id_value).strip()
@@ -2009,6 +2014,7 @@ def _run_tasks(hunter: ReactionProfileHunter, run_cfg: dict[str, Any]) -> list[P
         hunter.logger.info(f"Global small molecule cache configured: {global_cache_dir}")
 
     results = []
+    skip_steps = run_cfg.get("skip_steps", [])
     for task in tasks:
         rx_id = sanitize_rx_id(task.rx_id)
         work_dir = output_root / run_cfg["workdir_naming"].format(rx_id=rx_id)
@@ -2028,7 +2034,7 @@ def _run_tasks(hunter: ReactionProfileHunter, run_cfg: dict[str, Any]) -> list[P
         result = hunter.run_pipeline(
             product_smiles=task.product_smiles,
             work_dir=work_dir,
-            skip_steps=[],
+            skip_steps=list(skip_steps),
             precursor_smiles=task.meta.get("precursor_smiles"),
             leaving_group_key=task.meta.get("leaving_small_molecule_key"),
             reaction_profile=task.meta.get("reaction_profile") or run_cfg.get("reaction_profile"),
@@ -2082,6 +2088,12 @@ def main():
         type=str,
         default=None,
         help='仅运行指定反应ID（可传 9422028 或 rx_9422028）'
+    )
+    parser.add_argument(
+        '--skip-steps',
+        type=str,
+        default=None,
+        help='跳过指定步骤，逗号分隔。例如: --skip-steps s2,s3,s4 仅运行 S1'
     )
 
     args = parser.parse_args()

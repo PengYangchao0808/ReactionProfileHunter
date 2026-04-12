@@ -179,6 +179,70 @@ Atomic numbers                         I  N=3
             # At minimum, the field exists
             assert 'warnings' in meta
 
+    def test_feature_meta_marks_protocol_driven_missing_for_zero(self):
+        with tempfile.TemporaryDirectory(prefix="test_meta_protocol_missing_") as tmp:
+            tmpdir = Path(tmp)
+
+            s1_dir = tmpdir / "S1_ConfGeneration"
+            s1_dir.mkdir(parents=True, exist_ok=True)
+            (s1_dir / "provenance.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "s1_provenance_v1",
+                        "protocol_spec_version": "protocol_spec_v1",
+                        "protocol": "zero",
+                        "has_geometry_optimization": True,
+                        "final_opt_sp": {
+                            "freq_requested": False,
+                            "final_sp_requested": True,
+                        },
+                        "artifact_contract": {"product_geometry_level": "dft_optimized"},
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            ts = tmpdir / "ts_final.xyz"
+            reactant = tmpdir / "reactant.xyz"
+            product = tmpdir / "product_min.xyz"
+            _write_min_xyz(ts)
+            _write_min_xyz(reactant)
+            _write_min_xyz(product)
+
+            out_dir = tmpdir / "S4_Data"
+            miner = FeatureMiner(config={})
+            miner.run(
+                ts_final=ts,
+                reactant=reactant,
+                product=product,
+                output_dir=out_dir,
+                s1_dir=s1_dir,
+                ts_fchk=None,
+                ts_log=None,
+                reactant_fchk=None,
+                product_fchk=None,
+                ts_orca_out=None,
+                reactant_orca_out=None,
+                product_orca_out=None,
+            )
+
+            meta = json.loads((out_dir / "feature_meta.json").read_text(encoding="utf-8"))
+            provenance = meta["meta"]["provenance"]
+            assert provenance["s1_protocol_summary"]["protocol"] == "zero"
+            assert provenance["s1_protocol_summary"]["freq_requested"] is False
+            assert "handoff_mode" in provenance["s1_protocol_summary"]
+            assert "funnel_search_mode" in provenance["s1_protocol_summary"]
+            assert provenance["protocol_expected_missing"]["frequency_artifacts_optional"] is True
+
+            artifact_presence = meta["meta"]["artifact_presence"]
+            assert artifact_presence["ts_log_required_by_protocol"] is False
+            assert artifact_presence["ts_fchk_required_by_protocol"] is False
+
+            warning_codes = {w.get("code") for w in meta.get("warnings", [])}
+            assert "W_PROTOCOL_FREQ_DISABLED_MISSING_TS_LOG" in warning_codes
+            assert "W_PROTOCOL_FREQ_DISABLED_MISSING_TS_FCHK" in warning_codes
+
 
 # =============================================================================
 # Tests for Warning Structure
