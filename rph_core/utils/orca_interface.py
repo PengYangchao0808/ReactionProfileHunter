@@ -180,12 +180,15 @@ class ORCAInterface:
             生成的 .inp 文件路径
         """
         # 构建路由行
-        route = f"! {self.method} {self.basis} {self.aux_basis} RIJCOSX tightSCF"
-        route += " noautostart miniprint nopop"
+        if self.method.upper().endswith("-3C"):
+            route = f"! {self.method} tightSCF noautostart miniprint nopop"
+        else:
+            route = f"! {self.method} {self.basis} {self.aux_basis} RIJCOSX tightSCF"
+            route += " noautostart miniprint nopop"
 
-        if self._is_double_hybrid():
-            c_basis = self.basis + "/C"
-            route += f" {c_basis}"
+            if self._is_double_hybrid():
+                c_basis = self.basis + "/C"
+                route += f" {c_basis}"
  
         cpcm_block = ""
         if self.solvent and self.solvent.upper() != "NONE":
@@ -715,9 +718,16 @@ class ORCAInterface:
         if cache_key:
             self._sp_cache_misses += 1
 
+        display_dir: object = output_dir
+        try:
+            display_dir = output_dir.resolve().relative_to(Path.cwd().resolve())
+        except Exception:
+            parts = output_dir.parts
+            if len(parts) >= 3:
+                display_dir = Path("...") / parts[-2] / parts[-1]
         self.logger.info(f"开始 ORCA 单点能计算: {xyz_file.name}")
         self.logger.info(f"  方法: {self.method}/{self.basis}")
-        self.logger.info(f"  输出目录: {output_dir}")
+        self.logger.info(f"  输出目录: {display_dir}")
 
         try:
             # 步骤 1: 生成输入文件
