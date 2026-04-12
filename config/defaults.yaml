@@ -122,6 +122,111 @@ optimization_control:
 
 # Step 1: Product Anchor (产物锚定)
 step1:
+  protocol: ext
+  shared_handoff:
+    enabled: true
+    dft_optfreq: true
+    final_sp: true
+    ranking_after_handoff: final_sp_minimum
+  fast_sp_profiles:
+    prescreen_sp:
+      method: PBEh-3c
+      basis: ""
+      aux_basis: ""
+      timeout: 1800
+    screening_sp:
+      method: r2SCAN-3c
+      basis: ""
+      aux_basis: ""
+      timeout: 1800
+  protocol_stack:
+    ext:
+      two_stage_enabled: true
+      ngeom_default: 3
+      ngeom_max: 6
+      funnel:
+        search_mode: crest_two_stage_gfn0_to_gfn2
+        clustering_mode: isostat
+        prescreen_mode: none
+        rerank_mode: none
+      handoff:
+        mode: optimize_all_candidates
+        fallback_mode: none
+        ranking_after_handoff: shermo_plus_sp_boltzmann
+    full:
+      two_stage_enabled: false
+      ngeom_default: 12
+      ngeom_max: 24
+      funnel:
+        search_mode: crest_gfn2
+        clustering_mode: isostat
+        prescreen_mode: low_cost_dft_sp
+        rerank_mode: r2scan3c_sp_plus_mrrho
+        prescreen_window_kcal: 4.0
+        screening_window_kcal: 3.5
+        survivor_window_kcal: 3.0
+      handoff:
+        mode: optimize_all_survivors_within_window
+        fallback_mode: none
+        ranking_after_handoff: final_sp_plus_boltzmann
+    lite:
+      two_stage_enabled: false
+      ngeom_default: 4
+      ngeom_max: 6
+      conformer_energy_window_kcal: 3.0
+      crest_energy_window_kcal: 3.0
+      funnel:
+        search_mode: crest_gfn2
+        clustering_mode: isostat
+        prescreen_mode: none
+        rerank_mode: r2scan3c_sp
+        use_mrrho_like_correction: true
+        optimize_limit: 1
+        top2_fallback_enabled: true
+        boltzmann_cutoff: 0.90
+      handoff:
+        mode: optimize_rank1
+        fallback_mode: optimize_top2_if_gap_small
+        small_gap_kcal: 1.0
+        ranking_after_handoff: final_sp_minimum
+      final_opt_sp:
+        enabled: true
+        method: r2SCAN-3c
+        freq: true
+        final_sp_enabled: true
+        selection_mode: single_lowest_energy
+        write_stage_meta: true
+        write_provenance_flags: true
+        final_sp_method: wB97X-D4
+        final_sp_basis: def2-TZVPP
+    zero:
+      two_stage_enabled: false
+      ngeom_default: 3
+      ngeom_max: 4
+      conformer_energy_window_kcal: 0.5
+      crest_energy_window_kcal: 0.5
+      funnel:
+        search_mode: crest_gfn2_or_skip
+        clustering_mode: minimal
+        prescreen_mode: none
+        rerank_mode: gfn2_energy
+        narrow_window_kcal: 0.5
+        optimize_limit: 1
+      handoff:
+        mode: optimize_rank1
+        fallback_mode: optimize_all_within_0p5_kcal
+        ranking_after_handoff: final_sp_minimum
+      final_opt_sp:
+        enabled: true
+        method: r2SCAN-3c
+        freq: true
+        final_sp_enabled: true
+        selection_mode: single_lowest_energy
+        write_stage_meta: true
+        write_provenance_flags: true
+        final_sp_method: wB97X-D4
+        final_sp_basis: def2-TZVPP
+
   # ==============================================================
   # 两阶段构象搜索配置 (v3.1 新增)
   # 策略: GFN0(快速粗筛) → ISOSTAT(聚类) → GFN2(精细优化)
@@ -184,6 +289,11 @@ step1:
 step2:
   forming_bonds_required: true
   forming_bonds_index_base: auto
+  pes_adapter:
+    enabled: true
+    mode: fallback
+    max_relax_iterations: 3
+    relax_method: r2SCAN-3c
   
   # 扫描策略配置
   scan:
