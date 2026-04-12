@@ -12,7 +12,7 @@ Updated: 2026-02-02 (V6.2: Step1/Step2 机理感知特征)
 import logging
 import json
 from pathlib import Path
-from typing import Optional, Tuple, List, Any
+from typing import Optional, Tuple, List, Any, Dict
 from datetime import datetime
 
 from rph_core.utils.log_manager import LoggerMixin
@@ -163,9 +163,27 @@ class FeatureMiner(LoggerMixin):
 
         typed_forming_bonds = None
         if forming_bonds is not None:
-            typed_forming_bonds = tuple(
-                (MolIdx(int(pair[0])), MolIdx(int(pair[1]))) for pair in forming_bonds
-            )
+            normalized_pairs = []
+            if isinstance(forming_bonds, str):
+                text = forming_bonds.strip()
+                if text:
+                    for token in text.split(","):
+                        part = token.strip()
+                        if not part:
+                            continue
+                        if "-" in part:
+                            left, right = part.split("-", 1)
+                        elif ":" in part:
+                            left, right = part.split(":", 1)
+                        else:
+                            continue
+                        normalized_pairs.append((int(left), int(right)))
+            else:
+                for pair in forming_bonds:
+                    if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+                        normalized_pairs.append((int(pair[0]), int(pair[1])))
+
+            typed_forming_bonds = tuple((MolIdx(i), MolIdx(j)) for i, j in normalized_pairs)
 
         context = FeatureContext(
             ts_xyz=ts_final,
@@ -241,11 +259,16 @@ class FeatureMiner(LoggerMixin):
         config_snapshot = self.config.get('step4', {}).get('step4_features', {})
         
         # Build provenance
-        provenance = {
+        provenance: Dict[str, Any] = {
             "extract_mode": "extract-only",
             "plugin_pipeline_version": "6.2",
             "multiwfn_status": "unknown"
         }
+
+        s1_provenance = self._load_s1_provenance(s1_dir)
+        protocol_summary = self._build_protocol_summary(s1_provenance)
+        if protocol_summary:
+            provenance["s1_protocol_summary"] = protocol_summary
         
         # Check Multiwfn status
         if 'multiwfn_features' in plugin_traces:
@@ -275,17 +298,6 @@ class FeatureMiner(LoggerMixin):
                 'detail': warning_msg,
             })
 
-        # Deduplicate warnings by (code, plugin)
-        seen_warnings = set()
-        deduped_warnings = []
-        for w in all_warnings:
-            key = (w.get('code'), w.get('plugin'))
-            if key not in seen_warnings:
-                seen_warnings.add(key)
-                deduped_warnings.append(w)
-        deduped_warnings_list = deduped_warnings  # For FeatureResult.warnings field
-        all_features["qc.warnings_count"] = len(deduped_warnings_list)
-
         # Set qc.sample_weight based on policy
         # Policy: 1.0 only when feature_status == OK AND TS validity is ok
         #        0.0 for INVALID_INPUTS / FAILED / TS invalid
@@ -310,6 +322,44 @@ class FeatureMiner(LoggerMixin):
             "s1_shermo_summary_file": s1_shermo_summary_file is not None and s1_shermo_summary_file.exists(),
             "s1_hoac_thermo_file": s1_hoac_thermo_file is not None and s1_hoac_thermo_file.exists(),
         }
+
+        if protocol_summary:
+            freq_requested = bool(protocol_summary.get("freq_requested", True))
+            artifact_presence["ts_log_required_by_protocol"] = freq_requested
+            artifact_presence["ts_fchk_required_by_protocol"] = freq_requested
+            provenance["protocol_expected_missing"] = {
+                "frequency_artifacts_optional": not freq_requested,
+            }
+            if not freq_requested:
+                if not artifact_presence["ts_log"]:
+                    all_warnings.append(
+                        {
+                            "code": "W_PROTOCOL_FREQ_DISABLED_MISSING_TS_LOG",
+                            "plugin": "protocol_contract",
+                            "severity": "info",
+                            "detail": "TS frequency log missing is expected because protocol disables frequency.",
+                        }
+                    )
+                if not artifact_presence["ts_fchk"]:
+                    all_warnings.append(
+                        {
+                            "code": "W_PROTOCOL_FREQ_DISABLED_MISSING_TS_FCHK",
+                            "plugin": "protocol_contract",
+                            "severity": "info",
+                            "detail": "TS fchk missing is expected because protocol disables frequency.",
+                        }
+                    )
+
+        # Deduplicate warnings by (code, plugin)
+        seen_warnings = set()
+        deduped_warnings = []
+        for w in all_warnings:
+            key = (w.get('code'), w.get('plugin'))
+            if key not in seen_warnings:
+                seen_warnings.add(key)
+                deduped_warnings.append(w)
+        deduped_warnings_list = deduped_warnings
+        all_features["qc.warnings_count"] = len(deduped_warnings_list)
 
         feature_result = FeatureResult(
             features=all_features,
@@ -417,3 +467,52 @@ class FeatureMiner(LoggerMixin):
             
         plugin_statuses = {name: trace.status for name, trace in traces.items()}
         return aggregate_plugin_status(plugin_statuses)
+
+    def _load_s1_provenance(self, s1_dir: Optional[Path]) -> Dict[str, Any]:
+        if s1_dir is None:
+            return {}
+
+        provenance_path = Path(s1_dir) / "provenance.json"
+        if not provenance_path.exists():
+            return {}
+
+        try:
+            data = json.loads(provenance_path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception as e:
+            self.logger.warning(f"Failed to read S1 provenance: {e}")
+            return {}
+
+    def _build_protocol_summary(self, s1_provenance: Dict[str, Any]) -> Dict[str, Any]:
+        if not s1_provenance:
+            return {}
+
+        final_opt_sp = s1_provenance.get("final_opt_sp", {})
+        artifact_contract = s1_provenance.get("artifact_contract", {})
+        funnel = s1_provenance.get("funnel", {})
+        handoff = s1_provenance.get("handoff", {})
+        summary: Dict[str, Any] = {
+            "protocol": str(s1_provenance.get("protocol", "unknown")),
+            "schema_version": str(s1_provenance.get("schema_version", "unknown")),
+            "protocol_spec_version": str(s1_provenance.get("protocol_spec_version", "unknown")),
+            "has_geometry_optimization": bool(s1_provenance.get("has_geometry_optimization", False)),
+            "freq_requested": bool(final_opt_sp.get("freq_requested", True)),
+            "final_sp_requested": bool(final_opt_sp.get("final_sp_requested", True)),
+            "product_geometry_level": str(artifact_contract.get("product_geometry_level", "unknown")),
+        }
+        if isinstance(funnel, dict):
+            summary["funnel_search_mode"] = str(funnel.get("search_mode", "unknown"))
+            summary["funnel_ranking_basis"] = str(funnel.get("ranking_basis", "unknown"))
+            summary["funnel_fallback_triggered"] = bool(funnel.get("fallback_triggered", False))
+            summary["funnel_candidate_total"] = int(funnel.get("candidate_total", 0))
+            summary["funnel_survivor_count"] = int(funnel.get("survivor_count", 0))
+            summary["funnel_window_count"] = int(funnel.get("window_count", 0))
+            summary["funnel_gap_rank1_rank2"] = funnel.get("gap_rank1_rank2")
+        if isinstance(handoff, dict):
+            summary["handoff_mode"] = str(handoff.get("mode", "unknown"))
+            summary["handoff_mode_requested"] = str(handoff.get("mode_requested", handoff.get("mode", "unknown")))
+            summary["handoff_mode_effective"] = str(handoff.get("mode_effective", handoff.get("mode", "unknown")))
+            summary["handoff_fallback_mode"] = str(handoff.get("fallback_mode", "none"))
+            summary["handoff_selected_candidate_count"] = int(handoff.get("selected_candidate_count", 0))
+            summary["handoff_fallback_trigger"] = bool(handoff.get("fallback_trigger", handoff.get("fallback_triggered", False)))
+        return summary
