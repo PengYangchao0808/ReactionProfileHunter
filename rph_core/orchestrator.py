@@ -96,14 +96,18 @@ class ReactionProfileHunter:
 
     串行流程:
     S1: AnchorPhase (分子锚定 + CREST + DFT OPT-SP 耦合)
-      → S2: RetroScanner (逆向扫描，从 S1_ConfGeneration/[Molecule]/dft 读取)
+      → S2: RetroScanner (逆向扫描，从 S1_ConfGeneration/[Molecule]/finalDFT 读取)
       → S3: TSOptimizer (TS优化，使用 LogParser 提取坐标)
       → S4: FeatureMiner (特征提取)
 
     v3.0 目录结构:
     S1_ConfGeneration/[Molecule_Name]/
         ├── crest/          # CREST 搜索结果
-        ├── dft/            # DFT OPT + SP (无子目录，扁平结构)
+        ├── xtb/            # 两阶段 xTB 子目录（ext 协议）
+        ├── cluster/        # 聚类输出
+        ├── prescan/        # full 协议快速 SP 预筛选
+        ├── fastsp/         # full/lite 协议快速 SP 筛选
+        ├── finalDFT/       # DFT OPT + SP (无子目录，扁平结构)
         └── [Molecule_Name]_global_min.xyz
     """
 
@@ -1324,9 +1328,14 @@ class ReactionProfileHunter:
                     result.product_log = product_data.get("log")
                     result.product_qm_output = product_data.get("qm_output")
 
-                    product_thermo_file = s1_work_dir / "product" / "dft" / "conformer_thermo.csv"
-                    if product_thermo_file.exists():
-                        result.product_thermo = product_thermo_file
+                    thermo_candidates = [
+                        s1_work_dir / "product" / "finalDFT" / "conformer_thermo.csv",
+                        s1_work_dir / "product" / "dft" / "conformer_thermo.csv",
+                    ]
+                    for product_thermo_file in thermo_candidates:
+                        if product_thermo_file.exists():
+                            result.product_thermo = product_thermo_file
+                            break
 
                     # 保存 checkpoint 路径（如果存在）
                     product_checkpoint = product_data.get("chk")
@@ -1873,9 +1882,14 @@ class ReactionProfileHunter:
             # Check in molecule subdirectories
             for mol_dir in s1_dir.iterdir():
                 if mol_dir.is_dir() and not mol_dir.name.startswith('.'):
-                    candidate = mol_dir / "dft" / "conformer_energies.json"
-                    if candidate.exists():
-                        conformer_energies = candidate
+                    candidate_new = mol_dir / "finalDFT" / "conformer_energies.json"
+                    if candidate_new.exists():
+                        conformer_energies = candidate_new
+                        break
+
+                    candidate_legacy = mol_dir / "dft" / "conformer_energies.json"
+                    if candidate_legacy.exists():
+                        conformer_energies = candidate_legacy
                         break
         if conformer_energies.exists():
             artifacts["s1_conformer_energies_file"] = conformer_energies
@@ -2013,34 +2027,215 @@ def _run_tasks(hunter: ReactionProfileHunter, run_cfg: dict[str, Any]) -> list[P
         global_cfg["small_molecule_cache_dir"] = str(global_cache_dir)
         hunter.logger.info(f"Global small molecule cache configured: {global_cache_dir}")
 
-    results = []
-    skip_steps = run_cfg.get("skip_steps", [])
+    from collections import defaultdict
+    import json
+    from rph_core.utils.path_manager import get_reaction_root
+    from rph_core.steps.condition_thermo import ConditionThermoCalculator
+    from rph_core.steps.condition_feature_merger import ConditionFeatureMerger
+
+    def _theory_signature_string(config: dict[str, Any]) -> str:
+        theory_opt = (config.get("theory", {}) or {}).get("optimization", {}) or {}
+        theory_sp = (config.get("theory", {}) or {}).get("single_point", {}) or {}
+        opt_method = str(theory_opt.get("method") or "").strip()
+        opt_basis = str(theory_opt.get("basis") or "").strip()
+        sp_method = str(theory_sp.get("method") or "").strip()
+        sp_basis = str(theory_sp.get("basis") or "").strip()
+
+        solvent_cfg = (config.get("solvent", {}) or {})
+        solvent_name = str(solvent_cfg.get("name") or "").strip().lower()
+        if not solvent_name:
+            solvent_name = str(theory_opt.get("solvent") or theory_sp.get("solvent") or "").strip().lower()
+        solvent_token = solvent_name or "dcm"
+
+        tokens = [t for t in [opt_method, opt_basis, sp_method, sp_basis] if t]
+        base = "_".join(tokens) if tokens else ""
+        if base:
+            return f"{base}_SMD_{solvent_token.upper()}"
+        return f"SMD_{solvent_token.upper()}"
+
+    def _to_float(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+
+    def _write_json(path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def _read_json(path: Path) -> dict[str, Any]:
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    grouped: dict[str, list[Any]] = defaultdict(list)
     for task in tasks:
-        rx_id = sanitize_rx_id(task.rx_id)
-        work_dir = output_root / run_cfg["workdir_naming"].format(rx_id=rx_id)
+        reaction_id = getattr(task, "reaction_id", None) or sanitize_rx_id(task.rx_id)
+        grouped[str(reaction_id)].append(task)
 
-        if run_cfg.get("dry_run", False):
-            hunter.logger.info(f"[dry-run] {task.rx_id} -> {work_dir}")
-            continue
+    results: list[PipelineResult] = []
+    skip_steps = run_cfg.get("skip_steps", [])
+    thermo_cfg = hunter.config.get("thermo", {}) or {}
+    default_temperature_k = _to_float(thermo_cfg.get("temperature_k")) or 298.15
 
-        if run_cfg.get("resume", True):
-            s4_dir = work_dir / "S4_Data"
-            if s4_dir.exists():
-                checkpoint_mgr = CheckpointManager(work_dir)
-                if checkpoint_mgr.is_step4_complete(s4_dir, hunter.config):
-                    hunter.logger.info(f"Skip {task.rx_id}: Step4 already complete")
-                    continue
+    for reaction_id, condition_tasks in grouped.items():
+        representative = condition_tasks[0]
+        reaction_root = get_reaction_root(output_root, reaction_id)
+        reaction_root.mkdir(parents=True, exist_ok=True)
 
-        result = hunter.run_pipeline(
-            product_smiles=task.product_smiles,
-            work_dir=work_dir,
-            skip_steps=list(skip_steps),
-            precursor_smiles=task.meta.get("precursor_smiles"),
-            leaving_group_key=task.meta.get("leaving_small_molecule_key"),
-            reaction_profile=task.meta.get("reaction_profile") or run_cfg.get("reaction_profile"),
-            cleaner_data=task.meta.get("cleaner_data") if isinstance(task.meta.get("cleaner_data"), dict) else None,
-        )
-        results.append(result)
+        row_ids = [str(getattr(t, "row_id", t.rx_id)) for t in condition_tasks]
+        condition_ids = [str(getattr(t, "condition_id", f"COND_{t.rx_id}")) for t in condition_tasks]
+        reaction_manifest = {
+            "version": "rph_v2.1.1",
+            "reaction_id": reaction_id,
+            "reactant_smiles_canon": (representative.meta or {}).get("reactant_smiles_canon", ""),
+            "product_smiles_canon": (representative.meta or {}).get("product_smiles_canon", ""),
+            "reaction_type": (representative.meta or {}).get("reaction_type") or "",
+            "cyclo_mode": str(((representative.meta or {}).get("cleaner_data") or {}).get("cyclo_mode") or "concerted"),
+            "topology": str(((representative.meta or {}).get("cleaner_data") or {}).get("topology") or ""),
+            "row_ids": row_ids,
+            "condition_ids": condition_ids,
+            "theory_signature": _theory_signature_string(hunter.config),
+            "status": "PENDING",
+        }
+        manifest_path = reaction_root / "reaction_manifest.json"
+        if manifest_path.exists():
+            try:
+                existing = _read_json(manifest_path)
+                if isinstance(existing, dict):
+                    for k, v in reaction_manifest.items():
+                        if k not in existing or existing.get(k) in (None, ""):
+                            existing[k] = v
+                    reaction_manifest = existing
+            except Exception:
+                pass
+        _write_json(manifest_path, reaction_manifest)
+
+        reaction_features_dir = reaction_root / "reaction_features"
+        geo_features_csv = reaction_features_dir / "geo_electronic_features.csv"
+        geo_features_json = reaction_features_dir / "geo_electronic_features.json"
+
+        if not run_cfg.get("dry_run", False):
+            if run_cfg.get("resume", True):
+                checkpoint_mgr = CheckpointManager(reaction_root)
+                s3_dir = reaction_root / "S3_TS"
+                if s3_dir.exists() and checkpoint_mgr.is_step3_complete(s3_dir, hunter.config):
+                    hunter.logger.info(f"Skip {reaction_id}: Step3 already complete")
+                else:
+                    skip_steps_reaction = [s for s in list(skip_steps) if str(s).strip()]
+                    if "s4" not in [str(s).lower() for s in skip_steps_reaction]:
+                        skip_steps_reaction.append("s4")
+                    result = hunter.run_pipeline(
+                        product_smiles=representative.product_smiles,
+                        work_dir=reaction_root,
+                        skip_steps=skip_steps_reaction,
+                        precursor_smiles=(representative.meta or {}).get("precursor_smiles"),
+                        leaving_group_key=(representative.meta or {}).get("leaving_small_molecule_key"),
+                        reaction_profile=(representative.meta or {}).get("reaction_profile") or run_cfg.get("reaction_profile"),
+                        cleaner_data=(representative.meta or {}).get("cleaner_data")
+                        if isinstance((representative.meta or {}).get("cleaner_data"), dict)
+                        else None,
+                    )
+                    results.append(result)
+            else:
+                skip_steps_reaction = [s for s in list(skip_steps) if str(s).strip()]
+                if "s4" not in [str(s).lower() for s in skip_steps_reaction]:
+                    skip_steps_reaction.append("s4")
+                result = hunter.run_pipeline(
+                    product_smiles=representative.product_smiles,
+                    work_dir=reaction_root,
+                    skip_steps=skip_steps_reaction,
+                    precursor_smiles=(representative.meta or {}).get("precursor_smiles"),
+                    leaving_group_key=(representative.meta or {}).get("leaving_small_molecule_key"),
+                    reaction_profile=(representative.meta or {}).get("reaction_profile") or run_cfg.get("reaction_profile"),
+                    cleaner_data=(representative.meta or {}).get("cleaner_data")
+                    if isinstance((representative.meta or {}).get("cleaner_data"), dict)
+                    else None,
+                )
+                results.append(result)
+
+            if not (geo_features_csv.exists() and geo_features_json.exists()):
+                try:
+                    reaction_features_dir.mkdir(parents=True, exist_ok=True)
+                    hunter.s4_engine.run(
+                        ts_final=None,
+                        reactant=None,
+                        product=None,
+                        output_dir=reaction_features_dir,
+                        forming_bonds=None,
+                        sp_matrix_report=None,
+                        feature_scope="reaction",
+                        disabled_plugins_override=["step1_activation"],
+                    )
+                except Exception as e:
+                    hunter.logger.warning(f"Reaction feature extraction failed for {reaction_id}: {e}")
+
+            try:
+                checkpoint_mgr = CheckpointManager(reaction_root)
+                s3_dir = reaction_root / "S3_TS"
+                s3_complete = s3_dir.exists() and checkpoint_mgr.is_step3_complete(s3_dir, hunter.config)
+                reaction_features_complete = geo_features_csv.exists() and geo_features_json.exists()
+
+                updated = _read_json(manifest_path) if manifest_path.exists() else {}
+                if isinstance(updated, dict):
+                    updated["status"] = "COMPLETE" if (s3_complete and reaction_features_complete) else "PARTIAL"
+                    if not updated.get("theory_signature"):
+                        updated["theory_signature"] = _theory_signature_string(hunter.config)
+                    _write_json(manifest_path, updated)
+            except Exception:
+                pass
+
+        for condition_task in condition_tasks:
+            condition_id = str(getattr(condition_task, "condition_id", f"COND_{condition_task.rx_id}"))
+            row_id = str(getattr(condition_task, "row_id", condition_task.rx_id))
+            condition_root = reaction_root / "conditions" / condition_id
+            condition_root.mkdir(parents=True, exist_ok=True)
+
+            cleaner_data = (condition_task.meta or {}).get("cleaner_data")
+            cleaner_data = cleaner_data if isinstance(cleaner_data, dict) else {}
+            temperature_c = _to_float(cleaner_data.get("temperature_c") or cleaner_data.get("temp_celsius"))
+            temperature_k = _to_float(cleaner_data.get("temperature_K") or cleaner_data.get("temperature_k"))
+            if temperature_k is None and temperature_c is not None:
+                temperature_k = temperature_c + 273.15
+            if temperature_k is None:
+                temperature_k = default_temperature_k
+
+            condition_manifest = {
+                "version": "rph_v2.1.1",
+                "condition_id": condition_id,
+                "reaction_id": reaction_id,
+                "row_id": row_id,
+                "temperature_c": temperature_c,
+                "temperature_K": temperature_k,
+                "solvent": cleaner_data.get("solvent") or "DCM",
+                "catalyst": cleaner_data.get("catalyst"),
+                "additive": cleaner_data.get("additive"),
+                "oxidant": cleaner_data.get("oxidant"),
+                "yield_pct": _to_float(cleaner_data.get("yield_pct") or cleaner_data.get("yield")),
+                "dr_major": _to_float(cleaner_data.get("dr_major")),
+                "dr_minor": _to_float(cleaner_data.get("dr_minor")),
+                "ee_pct": _to_float(cleaner_data.get("ee_pct") or cleaner_data.get("ee")),
+                "source_ref": cleaner_data.get("source_ref"),
+            }
+            _write_json(condition_root / "condition_manifest.json", condition_manifest)
+
+            if not run_cfg.get("dry_run", False):
+                try:
+                    ConditionThermoCalculator(
+                        config=hunter.config,
+                        reaction_root=reaction_root,
+                        condition_root=condition_root,
+                    ).run()
+                except Exception as e:
+                    hunter.logger.warning(f"Condition thermo failed for {condition_id}: {e}")
+
+                try:
+                    ConditionFeatureMerger(
+                        reaction_root=reaction_root,
+                        condition_root=condition_root,
+                    ).run()
+                except Exception as e:
+                    hunter.logger.warning(f"Condition merge failed for {condition_id}: {e}")
 
     return results
 
