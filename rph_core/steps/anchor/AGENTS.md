@@ -13,16 +13,19 @@ S1 anchor phase: conformer search + DFT OPT/SP for each molecule in the substrat
 Written to `S1_ConfGeneration/<molecule_name>/` (managed by `ConformerEngine`):
 ```
 <molecule_name>/
-├── xtb2/          # xTB conformer search (stage1_gfn0/, stage2_gfn2/ in two-stage mode)
+├── crest/         # CREST conformer-search outputs
+├── xtb/           # xTB stage outputs (stage1_gfn0/, stage2_gfn2/ in two-stage mode)
 ├── cluster/       # ISOSTAT clustering output
-└── dft/           # Gaussian/ORCA OPT+SP (conformer_thermo.csv, *.fchk, *.log)
+├── prescan/       # full-protocol fast-SP pre-screening
+├── fastsp/        # full/lite fast-SP screening
+└── finalDFT/      # Gaussian/ORCA OPT+SP (conformer_thermo.csv, *.fchk, *.log)
 ```
 
 Returned in `anchor_result.anchored_molecules[name]`:
 - `xyz` (Path): final minimum geometry
 - `e_sp` (float): single-point energy (Hartree)
 - `log`, `fchk`, `qm_output`, `checkpoint` (optional Paths)
-- `product_thermo` (optional Path): `dft/conformer_thermo.csv`
+- `product_thermo` (optional Path): `finalDFT/conformer_thermo.csv`
 
 ## CONVENTIONS
 - All paths via `pathlib.Path`; never hand-concatenate string paths here.

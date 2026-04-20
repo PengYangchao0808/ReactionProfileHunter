@@ -57,6 +57,8 @@ class PipelineState:
     # 各步骤状态
     steps: Dict[str, StepCheckpoint]
 
+    reaction_id: Optional[str] = None
+
     # 全局配置
     config_snapshot: Optional[Dict[str, Any]] = None
 

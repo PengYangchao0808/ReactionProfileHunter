@@ -6,7 +6,7 @@ S1 Unified Conformer Engine (UCE) v3.1: two-stage xTB conformer search (GFN0 coa
 ## TWO-STAGE WORKFLOW (default, v3.1)
 1. **Stage 1**: GFN0-xTB rapid sampling → ISOSTAT clustering → `stage1_gfn0/cluster/cluster.xyz`
 2. **Stage 2**: GFN2-xTB fine optimization of stage-1 cluster → ISOSTAT clustering → `stage2_gfn2/cluster/cluster.xyz`
-3. **DFT**: OPT+SP on stage-2 ensemble → `dft/` (Gaussian or ORCA)
+3. **DFT**: OPT+SP on stage-2 ensemble → `finalDFT/` (Gaussian or ORCA)
 
 **Single-stage mode** (set `two_stage_enabled: false`): direct GFN2-xTB → cluster → DFT.
 
@@ -32,7 +32,9 @@ S1 Unified Conformer Engine (UCE) v3.1: two-stage xTB conformer search (GFN0 coa
 **Two-stage mode:**
 ```
 S1_ConfGeneration/<molecule_name>/
-├── xtb2/
+├── crest/
+│   └── ensemble.xyz
+├── xtb/
 │   ├── stage1_gfn0/
 │   │   ├── crest_conformers.xyz
 │   │   └── cluster/
@@ -42,12 +44,13 @@ S1_ConfGeneration/<molecule_name>/
 │   │   ├── crest_ensemble.xyz
 │   │   └── cluster/
 │   │       └── cluster.xyz        # final ensemble → DFT
-│   └── ensemble.xyz               # copy of stage2/cluster/cluster.xyz
-├── cluster/                       # single-stage legacy (unused in two-stage)
-└── dft/                           # DFT OPT/SP outputs
+├── cluster/                       # single-stage clustering output
+├── prescan/                       # full-protocol fast-SP pre-screening
+├── fastsp/                        # full/lite fast-SP screening
+└── finalDFT/                      # DFT OPT/SP outputs
 ```
 
-**Single-stage mode:** `xtb2/crest_conformers.xyz` → `cluster/cluster.xyz` → `dft/`
+**Single-stage mode:** `crest/crest_conformers.xyz` → `cluster/cluster.xyz` → `finalDFT/`
 
 ## GOTCHAS
 - `engine.py` uses `subprocess.run(..., shell=True, cwd=...)` — path/escaping sensitive; prefer `utils` sandbox/toxic-path helpers when touching those calls.

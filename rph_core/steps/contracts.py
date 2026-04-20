@@ -31,6 +31,10 @@ class Step2Artifacts:
     step2_signature: Optional[Dict[str, Any]] = None
     scan_profile_json: Optional[Path] = None
 
+    @property
+    def dipolar_intermediate_xyz(self) -> Path:
+        return self.intermediate_xyz
+
 
 @dataclass
 class Step3Artifacts:

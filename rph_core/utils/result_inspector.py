@@ -145,6 +145,7 @@ class ResultInspector:
 
     def _select_sp_dir(self) -> Optional[Path]:
         candidates = [
+            self.work_dir / "S1_ConfGeneration" / "product" / "finalDFT",
             self.work_dir / "S1_ConfGeneration" / "product" / "dft",
         ]
         for candidate in candidates:

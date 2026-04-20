@@ -13,9 +13,12 @@ This version implements:
 
 Directory Structure:
     S1_ConfGeneration/[Molecule_Name]/
-        ├── xtb2/
+        ├── crest/
+        ├── xtb/
         ├── cluster/
-        ├── dft/
+        ├── prescan/
+        ├── fastsp/
+        ├── finalDFT/
         └── [Molecule_Name]_global_min.xyz
 
 Logic ported from: Original_Eddition/Conf_Search_20251222/config/confsearch.lib.sh
@@ -74,7 +77,10 @@ class ConformerEngine(LoggerMixin):
 
     Directory Structure (Two-Stage Mode):
         S1_ConfGeneration/[Molecule_Name]/
-            ├── xtb2/
+            ├── crest/
+            │   ├── crest_conformers.xyz
+            │   └── ensemble.xyz          # Final ensemble for downstream processing
+            ├── xtb/
             │   ├── stage1_gfn0/          # GFN0 coarse search
             │   │   ├── crest_conformers.xyz
             │   │   └── cluster/
@@ -83,11 +89,12 @@ class ConformerEngine(LoggerMixin):
             │   ├── stage2_gfn2/          # GFN2 refinement
             │   │   ├── crest_ensemble.xyz
             │   │   └── cluster/
-            │   │       ├── cluster.xyz   # Final ensemble
+            │   │       ├── cluster.xyz   # Final ensemble candidates
             │   │       └── isostat.log
-            │   └── ensemble.xyz          # Symlink to stage2/cluster/cluster.xyz
-            ├── cluster/                  # Legacy (for single-stage)
-            └── dft/                      # DFT OPT-SP jobs
+            ├── cluster/                  # Single-stage clustering output
+            ├── prescan/                  # FULL protocol fast SP pre-screening
+            ├── fastsp/                   # FULL/LITE protocol fast SP screening
+            └── finalDFT/                 # Final DFT OPT-SP jobs
 
     Note on enabled semantics:
     - ConformerEngine does not have an 'enabled' flag.
@@ -113,12 +120,17 @@ class ConformerEngine(LoggerMixin):
         self.molecule_dir = (work_dir / molecule_name).resolve()
         self.molecule_dir.mkdir(parents=True, exist_ok=True)
 
-        self.crest_dir = (self.molecule_dir / "xtb2").resolve()
+        self.crest_dir = (self.molecule_dir / "crest").resolve()
+        self.xtb_dir = (self.molecule_dir / "xtb").resolve()
         self.cluster_dir = (self.molecule_dir / "cluster").resolve()
-        self.dft_dir = (self.molecule_dir / "dft").resolve()
+        self.final_dft_dir = (self.molecule_dir / "finalDFT").resolve()
+        self.prescan_dir = (self.molecule_dir / "prescan").resolve()
+        self.fastsp_dir = (self.molecule_dir / "fastsp").resolve()
         self.crest_dir.mkdir(exist_ok=True)
         self.cluster_dir.mkdir(exist_ok=True)
-        self.dft_dir.mkdir(exist_ok=True)
+        self.final_dft_dir.mkdir(exist_ok=True)
+
+        self.dft_dir = self.final_dft_dir
         self.state_manager = ConformerStateManager(self.molecule_dir, self.molecule_name)
 
         self.logger.info(f"📁 S1 workspace: {self.molecule_dir.name}/")
@@ -495,7 +507,7 @@ class ConformerEngine(LoggerMixin):
             pm.enter_phase("S1", "Stage 2: CREST searching")
             pm.log_event("S1", "Stage 1 CREST GFN0 search started")
 
-        stage1_dir = self.crest_dir / "stage1_gfn0"
+        stage1_dir = self.xtb_dir / "stage1_gfn0"
         stage1_dir.mkdir(exist_ok=True)
         stage1_ensemble = stage1_dir / "crest_conformers.xyz"
         if self._is_valid_xyz(stage1_ensemble, min_size=500):
@@ -542,7 +554,7 @@ class ConformerEngine(LoggerMixin):
             pm.enter_phase("S1", "Stage 3: xTB optimization")
             pm.log_event("S1", "Stage 2 GFN2 xTB batch optimization started")
 
-        stage2_dir = self.crest_dir / "stage2_gfn2"
+        stage2_dir = self.xtb_dir / "stage2_gfn2"
         stage2_dir.mkdir(exist_ok=True)
         stage2_ensemble = stage2_dir / "crest_ensemble.xyz"
         if self._is_valid_xyz(stage2_ensemble, min_size=500):
@@ -747,7 +759,7 @@ class ConformerEngine(LoggerMixin):
         else:
             n_calc = min(result.n_within_window, self.max_conformers)
 
-        conformers = self._split_xyz_ensemble(result.cluster_xyz, self.dft_dir, limit=n_calc)
+        conformers = self._split_xyz_ensemble(result.cluster_xyz, self.final_dft_dir, limit=n_calc)
         self.logger.info(f"    - Found {len(conformers)} conformers from isostat (Limit: {n_calc}).")
         self.state_manager.mark_crest_stage(
             stage_name="dft_candidates",
@@ -893,8 +905,8 @@ class ConformerEngine(LoggerMixin):
             for attempt in range(2):
                 current_conf_name = f"{conf_name}_Res" if attempt > 0 else conf_name
 
-                gjf_file = self.dft_dir / f"{current_conf_name}.gjf"
-                log_file = self.dft_dir / f"{current_conf_name}.log"
+                gjf_file = self.final_dft_dir / f"{current_conf_name}.gjf"
+                log_file = self.final_dft_dir / f"{current_conf_name}.log"
 
                 from rph_core.utils.qc_interface import GaussianInterface
 
@@ -977,8 +989,8 @@ class ConformerEngine(LoggerMixin):
                 if final_symbols is None:
                     _, final_symbols = read_xyz(current_xyz_source)
 
-                sp_in_file = self.dft_dir / f"{current_conf_name}_SP.inp"
-                sp_out_file = self.dft_dir / f"{current_conf_name}_SP.out"
+                sp_in_file = self.final_dft_dir / f"{current_conf_name}_SP.inp"
+                sp_out_file = self.final_dft_dir / f"{current_conf_name}_SP.out"
 
                 sp_energy = self._run_orca_sp(
                     final_coords,
@@ -1009,7 +1021,7 @@ class ConformerEngine(LoggerMixin):
                 )
                 self._emit_s1_progress("sp_completed", {"conformer": conf_name, "energy_hartree": sp_energy})
 
-                shermo_out = self.dft_dir / f"{current_conf_name}_Shermo.sum"
+                shermo_out = self.final_dft_dir / f"{current_conf_name}_Shermo.sum"
                 thermo = run_shermo(
                     shermo_bin=self.shermo_bin,
                     freq_output=log_file,
@@ -1069,7 +1081,7 @@ class ConformerEngine(LoggerMixin):
                 best_log = record["log_file"]
                 best_sp_energy = record["sp_energy"]
 
-        output_file = self.dft_dir / "conformer_thermo.csv"
+        output_file = self.final_dft_dir / "conformer_thermo.csv"
         headers = [
             "name",
             "weight",
@@ -1180,7 +1192,7 @@ class ConformerEngine(LoggerMixin):
                     energies.append(float(sp_val) * HARTREE_TO_KCAL)
 
         if energies:
-            json_output = self.dft_dir / "conformer_energies.json"
+            json_output = self.final_dft_dir / "conformer_energies.json"
             with open(json_output, 'w') as f:
                 json.dump(energies, f, indent=2)
             self.logger.info(f"  ✅ Generated conformer_energies.json ({len(energies)} conformers)")
@@ -1362,7 +1374,7 @@ class ConformerEngine(LoggerMixin):
         import subprocess
 
         # [v3.0 FIX] Path Sanitization - Ensure absolute paths
-        dft_dir_abs = self.dft_dir.resolve()
+        dft_dir_abs = self.final_dft_dir.resolve()
         gjf_path_abs = Path(gjf_file).resolve()
         log_path_abs = Path(log_file).resolve()
         xyz_source_abs = Path(xyz_source).resolve() if xyz_source else None
@@ -1501,7 +1513,7 @@ class ConformerEngine(LoggerMixin):
             return fallback_xyz
 
         # Create rescue XYZ file in dft directory
-        rescue_xyz_path = self.dft_dir / f"{log_file.stem}_rescue.xyz"
+        rescue_xyz_path = self.final_dft_dir / f"{log_file.stem}_rescue.xyz"
 
         try:
             write_xyz(rescue_xyz_path, coords, symbols, title="Rescue Coordinates")
@@ -1539,7 +1551,7 @@ class ConformerEngine(LoggerMixin):
         symbols_list: List[str] = symbols
 
         # [v3.0 FIX] Path localization
-        dft_dir_abs = self.dft_dir.resolve()
+        dft_dir_abs = self.final_dft_dir.resolve()
         inp_path_abs = Path(inp_file).resolve()
         out_path_abs = Path(out_file).resolve()
 
@@ -1630,7 +1642,12 @@ class ConformerEngine(LoggerMixin):
             },
         }
         merged_profile = {**defaults.get(profile_name, {}), **profile_cfg}
-        output_dir = self.dft_dir / "fast_sp" / output_subdir / xyz_file.stem
+        if profile_name == "prescreen_sp":
+            output_dir = self.prescan_dir / xyz_file.stem
+        elif profile_name == "screening_sp":
+            output_dir = self.fastsp_dir / xyz_file.stem
+        else:
+            output_dir = self.final_dft_dir / "fast_sp" / output_subdir / xyz_file.stem
         output_dir.mkdir(parents=True, exist_ok=True)
         fast_sp = ORCAInterface(
             method=str(merged_profile.get("method", self.theory_sp.get("method", "r2SCAN-3c"))),

@@ -67,7 +67,7 @@ def setup_logger(
     
     console_handler.setLevel(level)
     logger.addHandler(console_handler)
-    logger.propagate = False
+    logger.propagate = True
 
     # 文件输出（如果指定）- 始终使用标准格式
     if log_file:
@@ -80,12 +80,6 @@ def setup_logger(
         file_formatter = logging.Formatter(format_string)
         file_handler.setFormatter(file_formatter)
         logger.addHandler(file_handler)
-
-    root_logger = logging.getLogger()
-    if not root_logger.handlers:
-        root_logger.setLevel(level)
-        for handler in logger.handlers:
-            root_logger.addHandler(handler)
 
     return logger
 

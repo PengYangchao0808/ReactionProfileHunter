@@ -48,7 +48,9 @@ def normalize_source_label(label: str) -> str:
 
 def get_intermediate_source_priority(config: Dict[str, Any]) -> List[str]:
     default = [SOURCE_S3_INTERMEDIATE, SOURCE_S2_INTERMEDIATE]
-    priority = config.get("intermediate_source_priority")
+    # P0-2 FIX: Also check dipole_source_priority key for backward compatibility
+    # Return ORIGINAL labels (not normalized) - normalization happens in _resolve_dipole_source
+    priority = config.get("dipole_source_priority") or config.get("intermediate_source_priority")
     if isinstance(priority, list):
-        return [normalize_source_label(item) for item in priority]
+        return list(priority)  # Return original, not normalized
     return default

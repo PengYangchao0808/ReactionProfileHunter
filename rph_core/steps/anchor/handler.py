@@ -251,14 +251,16 @@ class AnchorPhase(LoggerMixin):
                         self.logger.info(f"    ✓ Small molecule {name} found in cache, skipping")
                         local_mol_dir = self.base_work_dir / name
                         local_mol_dir.mkdir(parents=True, exist_ok=True)
-                        local_dft_dir = local_mol_dir / "dft"
+                        local_dft_dir = local_mol_dir / "finalDFT"
                         local_dft_dir.mkdir(parents=True, exist_ok=True)
 
                         cached_min_xyz = cache_dir / "molecule_min.xyz"
                         local_min_xyz = local_mol_dir / f"{name}_global_min.xyz"
                         shutil.copy(cached_min_xyz, local_min_xyz)
 
-                        cached_dft = cache_dir / "dft"
+                        cached_dft = cache_dir / "finalDFT"
+                        if not cached_dft.exists():
+                            cached_dft = cache_dir / "dft"
                         if cached_dft.exists():
                             for f in cached_dft.glob("*"):
                                 if f.is_file():
@@ -295,14 +297,16 @@ class AnchorPhase(LoggerMixin):
                                     self.logger.info(f"    ✓ Small molecule {name} found in cache after wait")
                                     local_mol_dir = self.base_work_dir / name
                                     local_mol_dir.mkdir(parents=True, exist_ok=True)
-                                    local_dft_dir = local_mol_dir / "dft"
+                                    local_dft_dir = local_mol_dir / "finalDFT"
                                     local_dft_dir.mkdir(parents=True, exist_ok=True)
 
                                     cached_min_xyz = cache_dir / "molecule_min.xyz"
                                     local_min_xyz = local_mol_dir / f"{name}_global_min.xyz"
                                     shutil.copy(cached_min_xyz, local_min_xyz)
 
-                                    cached_dft = cache_dir / "dft"
+                                    cached_dft = cache_dir / "finalDFT"
+                                    if not cached_dft.exists():
+                                        cached_dft = cache_dir / "dft"
                                     if cached_dft.exists():
                                         for f in cached_dft.glob("*"):
                                             if f.is_file():
@@ -353,9 +357,11 @@ class AnchorPhase(LoggerMixin):
                         if is_small:
                             cache_dir = self.small_mol_cache.get_or_create(smiles, name=name)
                             shutil.copy(best_sp_out, cache_dir / "molecule_min.xyz")
-                            mol_dft_dir = self.base_work_dir / name / "dft"
+                            mol_dft_dir = self.base_work_dir / name / "finalDFT"
+                            if not mol_dft_dir.exists():
+                                mol_dft_dir = self.base_work_dir / name / "dft"
                             if mol_dft_dir.exists():
-                                dest_dft = cache_dir / "dft"
+                                dest_dft = cache_dir / "finalDFT"
                                 if dest_dft.exists():
                                     shutil.rmtree(dest_dft)
                                 shutil.copytree(mol_dft_dir, dest_dft)
@@ -371,7 +377,9 @@ class AnchorPhase(LoggerMixin):
 
                 conformer_state = self.base_work_dir / name / "conformer_state.json"
 
-                mol_dir = self.base_work_dir / name / "dft"
+                mol_dir = self.base_work_dir / name / "finalDFT"
+                if not mol_dir.exists():
+                    mol_dir = self.base_work_dir / name / "dft"
                 log_file = None
                 chk_file = None
                 fchk_file = None
@@ -465,7 +473,9 @@ class AnchorPhase(LoggerMixin):
                 )
 
                 mol_dir = self.base_work_dir / name
-                potential_xyz = list((mol_dir / "dft").glob("*_SP.out"))
+                potential_xyz = list((mol_dir / "finalDFT").glob("*_SP.out"))
+                if not potential_xyz:
+                    potential_xyz = list((mol_dir / "dft").glob("*_SP.out"))
                 if potential_xyz:
                     anchored_molecules[name] = {
                         "xyz": potential_xyz[0],

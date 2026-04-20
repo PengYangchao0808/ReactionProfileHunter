@@ -1,7 +1,58 @@
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 from rph_core.steps.contracts import Step2Artifacts, Step3Artifacts, Step4Artifacts
+from rph_core.utils.data_types import MolIdx
+
+
+def _unpack_s2_engine_result(
+    result: Sequence[Any],
+) -> Tuple[Path, Path, Path, Tuple[Tuple[int, int], ...], Path, str, str, Tuple[str, ...], Optional[Path]]:
+    n = len(result)
+    if n == 8:
+        (
+            ts_guess_xyz,
+            substrate_xyz,
+            intermediate_xyz,
+            returned_forming_bonds,
+            scan_profile_json,
+            status,
+            ts_guess_confidence,
+            degraded_reasons,
+        ) = result
+        ts_guess_gau_xtb = None
+    elif n == 9:
+        (
+            ts_guess_xyz,
+            substrate_xyz,
+            intermediate_xyz,
+            returned_forming_bonds,
+            scan_profile_json,
+            status,
+            ts_guess_confidence,
+            degraded_reasons,
+            ts_guess_gau_xtb,
+        ) = result
+    else:
+        raise ValueError(f"Unexpected S2 engine return length: expected 8 or 9, got {n}")
+
+    normalized_bonds: list[tuple[int, int]] = []
+    for pair in returned_forming_bonds:
+        if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+            raise ValueError(f"Invalid forming bond pair from S2 engine: {pair!r}")
+        normalized_bonds.append((int(pair[0]), int(pair[1])))
+
+    return (
+        Path(ts_guess_xyz),
+        Path(substrate_xyz),
+        Path(intermediate_xyz),
+        tuple(normalized_bonds),
+        Path(scan_profile_json),
+        str(status),
+        str(ts_guess_confidence),
+        tuple(str(x) for x in degraded_reasons),
+        Path(ts_guess_gau_xtb) if ts_guess_gau_xtb else None,
+    )
 
 
 def _read_s1_provenance(work_dir: Path) -> Dict[str, Any]:
@@ -49,6 +100,9 @@ def _adapt_product_xyz_for_s2_if_needed(
     fallback_dir = Path(work_dir) / "S2_Retro" / "pes_adapter_fallback"
     fallback_dir.mkdir(parents=True, exist_ok=True)
     adapted_xyz = fallback_dir / "product_relaxed.xyz"
+    if not Path(product_xyz_file).exists():
+        raise FileNotFoundError(f"PES adapter source not found: {product_xyz_file}")
+
     shutil.copy2(product_xyz_file, adapted_xyz)
 
     meta = {
@@ -138,30 +192,52 @@ def run_step2(
         scan_config=s2_scan_cfg,
     )
 
-    path_search_enabled = step2_cfg.get("path_search", {}).get("enabled", False)
+    path_search_enabled = bool(step2_cfg.get("path_search", {}).get("enabled", False))
 
-    hunter.logger.info("[S2] S2.1: Running stretch search (retro_scan) to generate dipole intermediate")
-    
-    (
-        ts_guess_from_scan,
-        substrate_xyz,
-        intermediate_xyz,
-        returned_forming_bonds,
-        scan_profile_json,
-        status,
-        ts_guess_confidence,
-        degraded_reasons,
-        ts_guess_gau_xtb,
-    ) = hunter.s2_engine.run_retro_scan(
-        product_xyz=product_xyz_file,
-        output_dir=s2_scan_cfg["output_dir"],
-        forming_bonds=forming_bonds_map if forming_bonds_map else forming_bonds,
-        scan_config=s2_scan_cfg,
-        atom_map=atom_map,
-    )
-    
-    ts_guess_xyz = ts_guess_from_scan
-    generation_method = "retro_scan"
+    s2_strategy = str(profile_cfg.get("s2_strategy", "retro_scan")).strip().lower()
+
+    if s2_strategy == "forward_scan":
+        hunter.logger.info("[S2] Running forward_scan workflow")
+        engine_result = hunter.s2_engine.run_forward_scan(
+            product_xyz=product_xyz_file,
+            output_dir=s2_scan_cfg["output_dir"],
+            forming_bonds=forming_bonds_map if forming_bonds_map else forming_bonds,
+            scan_config=s2_scan_cfg,
+            atom_map=atom_map,
+        )
+        (
+            ts_guess_xyz,
+            substrate_xyz,
+            intermediate_xyz,
+            returned_forming_bonds,
+            scan_profile_json,
+            status,
+            ts_guess_confidence,
+            degraded_reasons,
+            ts_guess_gau_xtb,
+        ) = _unpack_s2_engine_result(engine_result)
+        generation_method = "forward_scan"
+    else:
+        hunter.logger.info("[S2] Running retro_scan workflow")
+        engine_result = hunter.s2_engine.run_retro_scan(
+            product_xyz=product_xyz_file,
+            output_dir=s2_scan_cfg["output_dir"],
+            forming_bonds=forming_bonds_map if forming_bonds_map else forming_bonds,
+            scan_config=s2_scan_cfg,
+            atom_map=atom_map,
+        )
+        (
+            ts_guess_xyz,
+            substrate_xyz,
+            intermediate_xyz,
+            returned_forming_bonds,
+            scan_profile_json,
+            status,
+            ts_guess_confidence,
+            degraded_reasons,
+            ts_guess_gau_xtb,
+        ) = _unpack_s2_engine_result(engine_result)
+        generation_method = "retro_scan"
     
     # Capture S2.1 results BEFORE path_search potentially overwrites scan_profile_json
     s1_scan_profile_json = scan_profile_json
@@ -353,7 +429,7 @@ def run_step2(
         ts_guess_xyz=ts_guess_xyz,
         substrate_xyz=substrate_xyz,
         intermediate_xyz=intermediate_xyz,
-        forming_bonds=tuple(returned_forming_bonds),
+        forming_bonds=tuple((MolIdx(int(i)), MolIdx(int(j))) for (i, j) in returned_forming_bonds),
         forming_bonds_map=None,
         generation_method=generation_method,
         status=status,
