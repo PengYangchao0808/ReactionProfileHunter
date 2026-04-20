@@ -108,6 +108,7 @@ class FeatureContext:
     # V6.2: S3 path handles for Step2 cyclization features
     s3_dir: Optional[Path] = None
     s3_intermediate_fchk: Optional[Path] = None
+    s3_reactant_fchk: Optional[Path] = None
     s3_ts_fchk: Optional[Path] = None
     s3_ts_log: Optional[Path] = None
     s3_intermediate_log: Optional[Path] = None
@@ -116,6 +117,8 @@ class FeatureContext:
 
     close_contacts_cutoff: float = 2.2
     temperature_K: float = 298.15
+
+    feature_scope: Literal["legacy", "reaction"] = "legacy"
 
     ts_fingerprint: Optional[Dict[str, Any]] = None
     intermediate_fingerprint: Optional[Dict[str, Any]] = None
@@ -133,6 +136,12 @@ class FeatureContext:
     job_run_policy: str = "disallow"
 
     plugin_traces: Dict[str, PluginTrace] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.s3_intermediate_fchk is None and self.s3_reactant_fchk is not None:
+            self.s3_intermediate_fchk = self.s3_reactant_fchk
+        if self.s3_reactant_fchk is None and self.s3_intermediate_fchk is not None:
+            self.s3_reactant_fchk = self.s3_intermediate_fchk
 
     def get_path(self, key: str) -> Optional[Path]:
         """Get a path from context by canonical key name.

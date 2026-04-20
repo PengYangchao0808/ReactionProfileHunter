@@ -86,6 +86,9 @@ class FeatureMiner(LoggerMixin):
         s1_hoac_thermo_file: Optional[Path] = None,
         s1_precursor_xyz: Optional[Path] = None,
         s1_conformer_energies_file: Optional[Path] = None,
+        feature_scope: Optional[str] = None,
+        enabled_plugins_override: Optional[List[str]] = None,
+        disabled_plugins_override: Optional[List[str]] = None,
     ) -> Path:
         """
         V6.1: 执行特征提取（extract-only插件管线）
@@ -185,6 +188,20 @@ class FeatureMiner(LoggerMixin):
 
             typed_forming_bonds = tuple((MolIdx(i), MolIdx(j)) for i, j in normalized_pairs)
 
+        from typing import Literal
+
+        feature_scope_candidate = (
+            str(feature_scope or "").strip().lower()
+            or str(self.config.get("step4", {}).get("feature_scope", "legacy")).strip().lower()
+            or "legacy"
+        )
+
+        resolved_feature_scope: Literal["legacy", "reaction"]
+        if feature_scope_candidate == "reaction":
+            resolved_feature_scope = "reaction"
+        else:
+            resolved_feature_scope = "legacy"
+
         context = FeatureContext(
             ts_xyz=ts_final,
             reactant_xyz=reactant,
@@ -212,9 +229,25 @@ class FeatureMiner(LoggerMixin):
             s1_hoac_thermo_file=s1_hoac_thermo_file,
             s1_precursor_xyz=s1_precursor_xyz,
             s1_conformer_energies_file=s1_conformer_energies_file,
+            feature_scope=resolved_feature_scope,
         )
 
-        enabled_plugins = self.config.get('step4', {}).get('enabled_plugins', None)
+        enabled_plugins_cfg = self.config.get('step4', {}).get('enabled_plugins', None)
+        enabled_plugins: Optional[List[str]]
+        if enabled_plugins_override is not None:
+            enabled_plugins = list(enabled_plugins_override)
+        elif enabled_plugins_cfg is not None:
+            enabled_plugins = list(enabled_plugins_cfg) if isinstance(enabled_plugins_cfg, list) else None
+        else:
+            enabled_plugins = None
+
+        disabled_plugins: List[str] = []
+        disabled_cfg = self.config.get('step4', {}).get('disabled_plugins', None)
+        if isinstance(disabled_cfg, list):
+            disabled_plugins.extend([str(x) for x in disabled_cfg if str(x).strip()])
+        if disabled_plugins_override is not None:
+            disabled_plugins.extend([str(x) for x in disabled_plugins_override if str(x).strip()])
+
         if enabled_plugins is None:
             self.logger.info("No enabled_plugins specified, using all registered extractors")
             extractors = list_extractors()
@@ -222,6 +255,10 @@ class FeatureMiner(LoggerMixin):
             extractors = list_extractors()
             self.logger.info(f"Enabled plugins: {enabled_plugins}")
             extractors = [e for e in extractors if e.get_plugin_name() in enabled_plugins]
+
+        if disabled_plugins:
+            disabled_set = {str(x).strip() for x in disabled_plugins if str(x).strip()}
+            extractors = [e for e in extractors if e.get_plugin_name() not in disabled_set]
 
         all_features = {}
         plugin_traces = {}
@@ -381,6 +418,9 @@ class FeatureMiner(LoggerMixin):
         features_mlr_csv = output_dir / "features_mlr.csv"
         feature_meta_json = output_dir / "feature_meta.json"
 
+        geo_electronic_csv = output_dir / "geo_electronic_features.csv"
+        geo_electronic_json = output_dir / "geo_electronic_features.json"
+
         self.logger.info("Writing 3-file output contract...")
 
         write_features_raw_csv(features_raw_csv, all_features)
@@ -418,6 +458,18 @@ class FeatureMiner(LoggerMixin):
             self.logger.info(f"✓ qa_metadata.csv: {len(qa_cols)} columns (Layer 3)")
 
         feature_result.to_json(feature_meta_json)
+
+        if context.feature_scope == "reaction":
+            import pandas as pd
+
+            excluded = {"schema_version", "schema_signature", "feature_status"}
+            reaction_features = {k: v for k, v in all_features.items() if k not in excluded}
+            df = pd.DataFrame([reaction_features])
+            df.to_csv(geo_electronic_csv, index=False)
+            geo_electronic_json.write_text(
+                json.dumps(reaction_features, indent=2, ensure_ascii=False, default=str),
+                encoding="utf-8",
+            )
 
         if all_warnings:
             self.logger.warning(f"Total warnings from plugins: {len(all_warnings)}")

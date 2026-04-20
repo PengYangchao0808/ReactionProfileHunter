@@ -400,9 +400,6 @@ def _resolve_dipole_source(s3_intermediate: Optional[Path], s2_reactant: Optiona
     Returns:
         Tuple of (resolved_path, source_label). Returns (None, "none") if no valid source found.
     """
-    # Normalize priority labels to new standard
-    normalized_priority = [normalize_source_label(l) for l in priority]
-    
     # Build candidate map for O(1) lookup
     candidates = {
         SOURCE_S3_INTERMEDIATE: s3_intermediate,
@@ -414,10 +411,12 @@ def _resolve_dipole_source(s3_intermediate: Optional[Path], s2_reactant: Optiona
     candidates['S2_reactant_complex'] = s2_reactant
 
     # Iterate through priority list and return first valid .xyz path
-    for label in normalized_priority:
-        path = candidates.get(label)
+    # P0-2 FIX: Normalize each label during lookup, but return original label
+    for orig_label in priority:
+        norm_label = normalize_source_label(orig_label)
+        path = candidates.get(norm_label)
         if path and path.exists() and path.suffix == ".xyz":
-            return path, label
+            return path, orig_label
 
     # No valid source found
     return None, "none"
@@ -429,7 +428,10 @@ def _resolve_s2_assets(s2_dir: Optional[Path]) -> Tuple[Optional[Path], Optional
         return None, None
 
     ts_guess = _first_existing([s2_dir / "ts_guess.xyz"])
-    intermediate = _first_existing([s2_dir / "intermediate.xyz"])
+    intermediate = _first_existing([
+        s2_dir / "intermediate.xyz",
+        s2_dir / "reactant_complex.xyz",
+    ])
 
     return ts_guess, intermediate
 
@@ -1321,12 +1323,12 @@ def pack_mechanism_assets(
         logger.warning("  ✗ S3 ts_final not available")
         assets['mech_step2_ts2'] = None
 
-    # Asset 2: mech_step2_reactant_intermediate.xyz (intermediate source)
+    # Asset 2: mech_step2_reactant_dipole.xyz (intermediate source)
     if intermediate_source:
-        target = out_dir / "mech_step2_reactant_intermediate.xyz"
+        target = out_dir / "mech_step2_reactant_dipole.xyz"
         if _copy_or_link_asset(intermediate_source, target, copy_mode):
-            assets['mech_step2_reactant_intermediate'] = AssetInfo(
-                filename="mech_step2_reactant_intermediate.xyz",
+            assets['mech_step2_reactant_dipole'] = AssetInfo(
+                filename="mech_step2_reactant_dipole.xyz",
                 source_path=intermediate_source,
                 source_step="S3" if "S3" in intermediate_label else "S2",
                 source_label=intermediate_label,
@@ -1335,13 +1337,13 @@ def pack_mechanism_assets(
             logger.info(f"  ✓ Created: {target}")
         else:
             logger.warning(f"  ✗ Failed to create: {target}")
-            assets['mech_step2_reactant_intermediate'] = None
+            assets['mech_step2_reactant_dipole'] = None
     else:
         if intermediate_label == "none":
             logger.warning("  ✗ Intermediate source not available: no .xyz file found in S3_intermediate or S2_intermediate")
         else:
             logger.warning(f"  ✗ Intermediate source not available: {intermediate_label}")
-        assets['mech_step2_reactant_intermediate'] = None
+        assets['mech_step2_reactant_dipole'] = None
 
     # Asset 3: mech_step2_product.xyz (from S1 product)
     if s1_product:

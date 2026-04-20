@@ -143,6 +143,9 @@ class ThermoExtractor(BaseExtractor):
 
         features = {}
 
+        feature_scope = getattr(context, "feature_scope", "legacy")
+        is_reaction_scope = str(feature_scope).strip().lower() == "reaction"
+
         # Extract Gibbs energies (kcal/mol)
         g_ts = getattr(sp_report, "g_ts", None)
         g_reactant = getattr(sp_report, "g_reactant", None)
@@ -160,6 +163,8 @@ class ThermoExtractor(BaseExtractor):
 
         def _best_product_shermo_sum(s1_dir: Path) -> Optional[Path]:
             patterns = [
+                s1_dir / "product" / "finalDFT" / "*_Shermo.sum",
+                s1_dir / "product" / "finalDFT" / "*Shermo*.sum",
                 s1_dir / "product" / "dft" / "*_Shermo.sum",
                 s1_dir / "product" / "dft" / "*Shermo*.sum",
                 s1_dir / "**" / "product" / "**" / "*_Shermo.sum",
@@ -224,6 +229,23 @@ class ThermoExtractor(BaseExtractor):
         e_ts = getattr(sp_report, "e_ts_final", None) or getattr(sp_report, "e_ts", None)
         e_reactant = getattr(sp_report, "e_reactant", None)
         e_product = getattr(sp_report, "e_product", None)
+
+        if is_reaction_scope:
+            # Electronic energy differences (always compute if available)
+            if e_ts is not None and e_reactant is not None:
+                features["thermo.dE_activation"] = (e_ts - e_reactant) * 627.509
+            else:
+                features["thermo.dE_activation"] = np.nan
+
+            if e_product is not None and e_reactant is not None:
+                features["thermo.dE_reaction"] = (e_product - e_reactant) * 627.509
+            else:
+                features["thermo.dE_reaction"] = np.nan
+
+            # Method and solvent
+            features["thermo.method"] = getattr(sp_report, "method", "")
+            features["thermo.solvent"] = getattr(sp_report, "solvent", "")
+            return features
 
         has_gibbs_activation = g_ts is not None and g_reactant is not None
         has_gibbs_reaction = g_product is not None and g_reactant is not None
