@@ -166,6 +166,7 @@ def check_s2_artifacts(s2_dir: Path) -> Dict[str, bool]:
     
     return {
         "ts_guess_exists": (s2_dir / "ts_guess.xyz").exists(),
-        "intermediate_exists": (s2_dir / "intermediate.xyz").exists(),
+        "reactant_complex_exists": (s2_dir / "reactant_complex.xyz").exists(),
+        "dipolar_intermediate_exists": (s2_dir / "intermediate.xyz").exists(),
         "scan_profile_exists": (s2_dir / "scan_profile.json").exists(),
     }
