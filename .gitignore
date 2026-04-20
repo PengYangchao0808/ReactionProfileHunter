@@ -36,6 +36,10 @@ test_tmpdir/
 
 # Phase A benchmark 运行产物
 benchmark/confsearch_phaseA/plans/
+benchmark_shit/
+
+# Backup files (single-file pattern)
+*.backup_*
 
 # Python bytecode / caches
 __pycache__/
