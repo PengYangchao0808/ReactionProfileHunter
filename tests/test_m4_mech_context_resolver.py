@@ -65,7 +65,7 @@ class TestResolveMechanismContext:
         assert context.s3_dir == s3_dir
         assert context.s1_product == s1_product
         assert context.s2_ts_guess == s2_ts_guess
-        assert context.s2_reactant_complex == s2_reactant
+        assert context.s2_intermediate == s2_reactant
         assert context.s3_ts_final == s3_ts_final
         assert context.s3_reactant_sp == s3_reactant
         assert context.s1_precursor_source == "none"

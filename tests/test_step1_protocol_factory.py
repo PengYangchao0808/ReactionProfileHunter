@@ -113,7 +113,7 @@ def test_anchor_phase_writes_phase1_provenance(monkeypatch, tmp_path: Path):
 
         def run(self, smiles: str):
             mol_dir = self.work_dir / self.molecule_name
-            dft_dir = mol_dir / "dft"
+            dft_dir = mol_dir / "finalDFT"
             dft_dir.mkdir(parents=True, exist_ok=True)
             xyz = mol_dir / f"{self.molecule_name}_global_min.xyz"
             xyz.write_text("3\nE=-1.234567\nC 0 0 0\nH 0 0 1\nH 0 1 0\n", encoding="utf-8")
@@ -181,7 +181,7 @@ def test_anchor_phase_protocol_lite_succeeds_in_phase2(monkeypatch, tmp_path: Pa
 
         def run(self, smiles: str):
             mol_dir = self.work_dir / self.molecule_name
-            dft_dir = mol_dir / "dft"
+            dft_dir = mol_dir / "finalDFT"
             dft_dir.mkdir(parents=True, exist_ok=True)
             xyz = mol_dir / f"{self.molecule_name}_global_min.xyz"
             xyz.write_text("3\nE=-2.000001\nC 0 0 0\nH 0 0 1\nH 0 1 0\n", encoding="utf-8")
@@ -240,7 +240,7 @@ def test_anchor_phase_protocol_zero_succeeds_in_phase3a(monkeypatch, tmp_path: P
 
         def run(self, smiles: str):
             mol_dir = self.work_dir / self.molecule_name
-            dft_dir = mol_dir / "dft"
+            dft_dir = mol_dir / "finalDFT"
             dft_dir.mkdir(parents=True, exist_ok=True)
             xyz = mol_dir / f"{self.molecule_name}_global_min.xyz"
             xyz.write_text("3\nE=-3.000001\nC 0 0 0\nH 0 0 1\nH 0 1 0\n", encoding="utf-8")

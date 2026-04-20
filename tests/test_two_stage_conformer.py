@@ -442,7 +442,7 @@ class TestConformerStateAndResume:
     def test_state_manager_persists_crest_status(self, tmp_path):
         manager = ConformerStateManager(tmp_path / "product", "product")
         manager.start_run("C1=CCCCC1", two_stage_enabled=True)
-        output = tmp_path / "product" / "xtb2" / "ensemble.xyz"
+        output = tmp_path / "product" / "crest" / "ensemble.xyz"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("3\nstate\nH 0 0 0\nH 0 0 1\nH 0 1 0\n")
         manager.mark_crest_stage("final_ensemble", "completed", output)
@@ -511,7 +511,7 @@ class TestConformerStateAndResume:
                  return_value=(np.array([[0.0, 0.0, 0.0]]), ["H"], None),
              ), \
              patch("rph_core.steps.conformer_search.engine.run_shermo", return_value=_FakeThermo()):
-            best_log, best_sp = engine._step_dft_opt_sp_coupled([conf0, conf1])
+            best_log, best_sp, _records = engine._step_dft_opt_sp_coupled([conf0, conf1])
 
         assert mock_opt.call_count == 1
         assert isinstance(best_log, Path)

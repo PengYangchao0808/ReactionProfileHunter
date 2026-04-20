@@ -130,9 +130,9 @@ def test_s1_confgeneration_directory_structure(tmp_path):
     
     expected_dirs = [
         engine.molecule_dir,           # S1_ConfGeneration/product/
-        engine.crest_dir,              # S1_ConfGeneration/product/xtb2/
+        engine.crest_dir,              # S1_ConfGeneration/product/crest/
         engine.cluster_dir,            # S1_ConfGeneration/product/cluster/
-        engine.dft_dir,                # S1_ConfGeneration/product/dft/
+        engine.dft_dir,                # S1_ConfGeneration/product/finalDFT/
     ]
     
     for d in expected_dirs:

@@ -181,6 +181,20 @@ def test_run_step2_uses_single_workflow(tmp_path: Path) -> None:
     hunter._s2_engine.run.return_value = runner_return
     hunter._s2_engine.run_forward_scan.return_value = runner_return
 
+    hunter._s2_engine.run_retro_scan.return_value = (
+        tmp_path / "ts_guess_seed.xyz",
+        tmp_path / "reactant_seed.xyz",
+        tmp_path / "intermediate_seed.xyz",
+        ((0, 1), (2, 3)),
+        tmp_path / "scan_profile_seed.json",
+        "COMPLETE",
+        "high",
+        tuple(),
+        None,
+    )
+
+    _write_product_xyz(tmp_path / "product.xyz", natoms=6)
+
     result = run_step2(
         hunter=hunter,
         product_xyz=tmp_path / "product.xyz",
@@ -225,6 +239,20 @@ def test_run_step2_uses_profile_strategy_for_generation_method(tmp_path: Path) -
     )
     hunter._s2_engine.run.return_value = runner_return
     hunter._s2_engine.run_retro_scan.return_value = runner_return
+
+    hunter._s2_engine.run_forward_scan.return_value = (
+        tmp_path / "ts_guess_seed.xyz",
+        tmp_path / "reactant_seed.xyz",
+        tmp_path / "intermediate_seed.xyz",
+        ((0, 1), (2, 3)),
+        tmp_path / "scan_profile_seed.json",
+        "COMPLETE",
+        "high",
+        tuple(),
+        None,
+    )
+
+    _write_product_xyz(tmp_path / "product.xyz", natoms=6)
 
     result = run_step2(
         hunter=hunter,

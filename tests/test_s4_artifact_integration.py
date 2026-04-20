@@ -52,9 +52,9 @@ def test_s4_artifact_parameter_passing():
             ts_fchk=work_dir / "S3_TS/ts.fchk",
             ts_log=work_dir / "S3_TS/ts.log",
             ts_qm_output=work_dir / "S3_TS/ts.out",
-            reactant_fchk=work_dir / "S3_TS/reactant.fchk",
-            reactant_log=work_dir / "S3_TS/reactant.log",
-            reactant_qm_output=work_dir / "S3_TS/reactant.out"
+            intermediate_fchk=work_dir / "S3_TS/intermediate.fchk",
+            intermediate_log=work_dir / "S3_TS/intermediate.log",
+            intermediate_qm_output=work_dir / "S3_TS/intermediate.out",
         )
 
         hunter = MagicMock(spec=ReactionProfileHunter)
@@ -79,7 +79,7 @@ def test_s4_artifact_parameter_passing():
             product_log=s1_dir / "product.log",
             product_qm_output=s1_dir / "product.out",
             ts_guess_xyz=work_dir / "S2_Retro/ts_guess.xyz",
-            reactant_xyz=work_dir / "S2_Retro/reactant.xyz",
+            intermediate_xyz=work_dir / "S2_Retro/intermediate.xyz",
             ts_final_xyz=s3_result.ts_final_xyz,
             features_csv=s4_dir / "features_raw.csv",
             forming_bonds=((1, 2), (3, 4)),
@@ -87,9 +87,9 @@ def test_s4_artifact_parameter_passing():
             ts_fchk=s3_result.ts_fchk,
             ts_log=s3_result.ts_log,
             ts_qm_output=s3_result.ts_qm_output,
-            reactant_fchk=s3_result.reactant_fchk,
-            reactant_log=s3_result.reactant_log,
-            reactant_qm_output=s3_result.reactant_qm_output
+            intermediate_fchk=s3_result.intermediate_fchk,
+            intermediate_log=s3_result.intermediate_log,
+            intermediate_qm_output=s3_result.intermediate_qm_output,
         )
 
         captured_params = {}
@@ -105,29 +105,29 @@ def test_s4_artifact_parameter_passing():
 
             feature_context = FeatureContext(
                 ts_xyz=pipeline_result.ts_final_xyz,
-                reactant_xyz=pipeline_result.reactant_xyz,
+                reactant_xyz=pipeline_result.intermediate_xyz,
                 product_xyz=pipeline_result.product_xyz,
                 sp_report=pipeline_result.sp_matrix_report,
                 forming_bonds=pipeline_result.forming_bonds,
                 ts_fchk=pipeline_result.ts_fchk,
-                reactant_fchk=pipeline_result.reactant_fchk,
+                reactant_fchk=pipeline_result.intermediate_fchk,
                 product_fchk=pipeline_result.product_fchk,
                 ts_qm_output=pipeline_result.ts_qm_output,
-                reactant_qm_output=pipeline_result.reactant_qm_output,
+                reactant_qm_output=pipeline_result.intermediate_qm_output,
                 product_qm_output=pipeline_result.product_qm_output,
                 ts_log=pipeline_result.ts_log,
-                reactant_log=pipeline_result.reactant_log,
+                reactant_log=pipeline_result.intermediate_log,
                 product_log=pipeline_result.product_log
             )
 
             assert feature_context.ts_fchk == s3_result.ts_fchk, "ts_fchk not passed correctly"
-            assert feature_context.reactant_fchk == s3_result.reactant_fchk, "reactant_fchk not passed correctly"
+            assert feature_context.reactant_fchk == s3_result.intermediate_fchk, "reactant_fchk not passed correctly"
             assert feature_context.product_fchk == pipeline_result.product_fchk, "product_fchk not passed correctly"
             assert feature_context.ts_qm_output == s3_result.ts_qm_output, "ts_qm_output not passed correctly"
-            assert feature_context.reactant_qm_output == s3_result.reactant_qm_output, "reactant_qm_output not passed correctly"
+            assert feature_context.reactant_qm_output == s3_result.intermediate_qm_output, "reactant_qm_output not passed correctly"
             assert feature_context.product_qm_output == pipeline_result.product_qm_output, "product_qm_output not passed correctly"
             assert feature_context.ts_log == s3_result.ts_log, "ts_log not passed correctly"
-            assert feature_context.reactant_log == s3_result.reactant_log, "reactant_log not passed correctly"
+            assert feature_context.reactant_log == s3_result.intermediate_log, "reactant_log not passed correctly"
             assert feature_context.product_log == pipeline_result.product_log, "product_log not passed correctly"
 
 
@@ -159,18 +159,18 @@ def test_degradation_missing_fchk_warning():
             work_dir=work_dir,
             product_xyz=work_dir / "S1_ConfGeneration/product_min.xyz",
             ts_final_xyz=work_dir / "S3_TS/ts_final.xyz",
-            reactant_xyz=work_dir / "S2_Retro/reactant.xyz",
+            intermediate_xyz=work_dir / "S2_Retro/intermediate.xyz",
             features_csv=output_dir / "features_raw.csv",
             forming_bonds=((1, 2), (3, 4)),
             sp_matrix_report=sp_report,
             ts_fchk=None,
-            reactant_fchk=None,
+            intermediate_fchk=None,
             product_fchk=None,
             ts_log=work_dir / "S3_TS/ts.log",
-            reactant_log=work_dir / "S3_TS/reactant.log",
+            intermediate_log=work_dir / "S3_TS/intermediate.log",
             product_log=work_dir / "S1_ConfGeneration/product.log",
             ts_qm_output=work_dir / "S3_TS/ts.out",
-            reactant_qm_output=work_dir / "S3_TS/reactant.out",
+            intermediate_qm_output=work_dir / "S3_TS/intermediate.out",
             product_qm_output=work_dir / "S1_ConfGeneration/product.out"
         )
 
@@ -181,8 +181,8 @@ def test_degradation_missing_fchk_warning():
             warnings_logged.append(warning_msg)
             logger.warning(warning_msg)
 
-        if pipeline_result.reactant_fchk is None:
-            warning_msg = "⚠️  WARNING: Reactant .fchk file not available (formchk may have failed)"
+        if pipeline_result.intermediate_fchk is None:
+            warning_msg = "⚠️  WARNING: Intermediate .fchk file not available (formchk may have failed)"
             warnings_logged.append(warning_msg)
             logger.warning(warning_msg)
 

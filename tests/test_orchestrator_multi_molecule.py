@@ -126,6 +126,9 @@ class TestOrchestratorMultiMolecule:
         # Mock task with meta
         task = TaskSpec(
             rx_id="test_rx",
+            row_id="test_rx",
+            reaction_id="RXN_deadbeef",
+            condition_id="COND_test_rx",
             product_smiles="C1CCCCC1",
             meta={
                 "precursor_smiles": "C=C",
@@ -136,7 +139,12 @@ class TestOrchestratorMultiMolecule:
         
         run_cfg = config["run"]
         run_cfg["output_root"] = str(tmp_path)
-        
+
+        reaction_root = tmp_path / task.reaction_id
+        (reaction_root / "reaction_features").mkdir(parents=True, exist_ok=True)
+        (reaction_root / "reaction_features" / "geo_electronic_features.csv").write_text("a\n1\n")
+        (reaction_root / "reaction_features" / "geo_electronic_features.json").write_text("{}")
+
         with patch.object(hunter, 'run_pipeline') as mock_run:
             mock_run.return_value = PipelineResult(success=True)
             _run_tasks(hunter, run_cfg)
@@ -146,7 +154,7 @@ class TestOrchestratorMultiMolecule:
             assert call_kwargs["product_smiles"] == "C1CCCCC1"
             assert call_kwargs["precursor_smiles"] == "C=C"
             assert call_kwargs["leaving_group_key"] == "AcOH"
-            assert call_kwargs["skip_steps"] == []
+            assert "s4" in [str(x).lower() for x in call_kwargs["skip_steps"]]
 
     @patch("rph_core.orchestrator.load_config")
     @patch("rph_core.orchestrator.normalize_qc_config")

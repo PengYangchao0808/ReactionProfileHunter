@@ -78,8 +78,8 @@ class TestShermoSummaryDerivation:
             tmpdir = Path(tmp)
 
             # Create mock .sum files
-            (tmpdir / "product" / "dft").mkdir(parents=True, exist_ok=True)
-            sum_file = tmpdir / "product" / "dft" / "precursor_Shermo.sum"
+            (tmpdir / "product" / "finalDFT").mkdir(parents=True, exist_ok=True)
+            sum_file = tmpdir / "product" / "finalDFT" / "precursor_Shermo.sum"
             _write_mock_sum_file(sum_file, g_sum=-500.0, h_sum=-490.0, u_sum=-495.0)
 
             hoac_sum = tmpdir / "hoac_Shermo.sum"
@@ -104,8 +104,8 @@ class TestShermoSummaryDerivation:
             s1_dir.mkdir(parents=True, exist_ok=True)
 
             # Create mock .sum file (no JSON)
-            (s1_dir / "product" / "dft").mkdir(parents=True, exist_ok=True)
-            sum_file = s1_dir / "product" / "dft" / "precursor_Shermo.sum"
+            (s1_dir / "product" / "finalDFT").mkdir(parents=True, exist_ok=True)
+            sum_file = s1_dir / "product" / "finalDFT" / "precursor_Shermo.sum"
             _write_mock_sum_file(sum_file, g_sum=-500.0, h_sum=-490.0, u_sum=-495.0)
 
             # Create minimal config file
