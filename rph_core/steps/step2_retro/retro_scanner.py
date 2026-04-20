@@ -61,6 +61,15 @@ class RetroScanner(LoggerMixin):
         self._seed_guard_result: Optional[Dict[str, Any]] = None
         self.logger.info("[S2] RetroScanner initialized (direct product scan)")
 
+    def _optimize_intermediate(
+        self,
+        seed: Path,
+        out_dir: Path,
+        forming_bonds: Tuple[Tuple[int, int], ...],
+        scan_start_distance: float,
+    ) -> Path:
+        return Path(seed)
+
     def _update_ui_status(self, output_dir: Path, status_text: str) -> None:
         pm = get_progress_manager()
         pm.update_step("s2", description=status_text)
@@ -382,6 +391,177 @@ class RetroScanner(LoggerMixin):
             ts_guess_confidence,
             tuple(degraded_reasons),
             ts_guess_s2_1_gau_xtb
+        )
+
+    def run(
+        self,
+        product_xyz: Path,
+        output_dir: Path,
+        forming_bonds: Sequence[Tuple[int, int]],
+        scan_config: Optional[Dict[str, Any]] = None,
+        atom_map: Optional[Dict[int, int]] = None,
+    ) -> Tuple[Path, Path, Path, Tuple[Tuple[int, int], ...], Path, str, str, Tuple[str, ...]]:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        bonds = self._map_bonds(forming_bonds, atom_map)
+        product_file = self._resolve_product_file(product_xyz)
+        params = self._resolve_scan_params(scan_config)
+
+        xtb_settings = self.step2_cfg.get("xtb_settings", {}) or {}
+        charge = int(xtb_settings.get("charge", 0))
+        spin = int(xtb_settings.get("multiplicity", 1))
+
+        coords, symbols, _ = LogParser.extract_last_converged_coords(product_file, engine_type="auto")
+        if coords is None or symbols is None:
+            coords, symbols = read_xyz(product_file)
+        assert symbols is not None
+
+        for pair in bonds:
+            dist = GeometryUtils.calculate_distance(coords, int(pair[0]), int(pair[1]))
+            if dist > 3.0:
+                self.logger.warning(
+                    f"[S2] possible index mapping error: Forming bond {pair} distance is {dist:.2f} Å in product geometry"
+                )
+
+        seed_targets: List[Tuple[Tuple[int, int], float]] = [
+            ((int(i), int(j)), float(params["scan_start_distance"])) for (i, j) in bonds
+        ]
+        seed_coords = self.bond_stretcher.stretch_bonds(coords, seed_targets)
+        seed_xyz = output_dir / "intermediate_seed.xyz"
+        write_xyz(seed_xyz, seed_coords, symbols, title="intermediate_seed")
+        intermediate_seed = self._optimize_intermediate(
+            seed_xyz,
+            output_dir,
+            bonds,
+            float(params["scan_start_distance"]),
+        )
+
+        try:
+            inter_coords, inter_symbols = read_xyz(intermediate_seed)
+            min_dist = float("inf")
+            for i in range(len(inter_symbols)):
+                for j in range(i + 1, len(inter_symbols)):
+                    d = GeometryUtils.calculate_distance(inter_coords, i, j)
+                    if d < min_dist:
+                        min_dist = d
+            if min_dist < 0.5:
+                self.logger.warning(
+                    f"[S2] Intermediate geometry warning: unusually short interatomic distance {min_dist:.2f} Å"
+                )
+        except Exception as exc:
+            self.logger.warning(f"[S2] Intermediate geometry warning: failed to validate intermediate ({exc})")
+
+        degraded_reasons: List[str] = []
+        status = "COMPLETE"
+        ts_guess_confidence = "high"
+
+        scan_dir = output_dir / "retro_scan"
+        scan_result, energies, max_idx, boundary_max, peak_ok = self._execute_scan(
+            start_xyz=product_file,
+            output_dir=scan_dir,
+            bonds=bonds,
+            params=params,
+            direction="outward",
+            charge=charge,
+            spin=spin,
+        )
+
+        reject_boundary = bool(params.get("reject_boundary_maximum", True))
+        retry_once = bool(params.get("boundary_retry_once", True))
+        allow_degradation = bool(params.get("allow_boundary_degradation", True))
+
+        if reject_boundary and boundary_max and retry_once:
+            params_retry = dict(params)
+            params_retry["scan_start_distance"] = float(params["scan_start_distance"]) + float(params.get("boundary_retry_delta", 0.3))
+            params_retry["scan_steps"] = int(params["scan_steps"]) + int(params.get("boundary_retry_extra_steps", 6))
+            retry_dir = output_dir / "retro_scan_retry"
+            scan_result, energies, max_idx, boundary_max, peak_ok = self._execute_scan(
+                start_xyz=product_file,
+                output_dir=retry_dir,
+                bonds=bonds,
+                params=params_retry,
+                direction="outward",
+                charge=charge,
+                spin=spin,
+            )
+
+            if boundary_max:
+                if allow_degradation:
+                    status = "DEGRADED"
+                    ts_guess_confidence = "low"
+                    degraded_reasons.append("boundary_maximum_persisted_after_retry")
+                else:
+                    raise RuntimeError("S2 boundary maximum persisted after retry")
+            params = params_retry
+        elif reject_boundary and boundary_max:
+            if allow_degradation:
+                status = "DEGRADED"
+                ts_guess_confidence = "low"
+                degraded_reasons.append("boundary_maximum_detected")
+            else:
+                raise RuntimeError("S2 boundary maximum detected")
+
+        if scan_result is None or getattr(scan_result, "ts_guess_xyz", None) is None:
+            raise RuntimeError("S2 scan did not provide ts_guess geometry")
+
+        ts_guess_xyz_final = output_dir / "ts_guess.xyz"
+        shutil.copy2(Path(scan_result.ts_guess_xyz), ts_guess_xyz_final)
+
+        dipolar_xyz = output_dir / INTERMEDIATE_XYZ
+        shutil.copy2(Path(intermediate_seed), dipolar_xyz)
+
+        reactant_xyz = output_dir / "reactant_complex.xyz"
+        shutil.copy2(dipolar_xyz, reactant_xyz)
+
+        scan_profile_json = output_dir / "scan_profile.json"
+        with open(scan_profile_json, "w") as f:
+            json.dump(
+                {
+                    "generation_method": "retro_scan",
+                    "product_xyz": str(product_file),
+                    "intermediate_xyz": str(dipolar_xyz),
+                    "forming_bonds": [list(pair) for pair in bonds],
+                    "scan_parameters": params,
+                    "scan_quality": {
+                        "max_energy_index": int(max_idx),
+                        "boundary_maximum": bool(boundary_max),
+                        "local_peak_ok": bool(peak_ok),
+                        "status": status,
+                        "ts_guess_confidence": ts_guess_confidence,
+                        "degraded_reasons": degraded_reasons,
+                    },
+                    "energies_hartree": energies,
+                },
+                f,
+                indent=2,
+            )
+
+        return (
+            ts_guess_xyz_final,
+            reactant_xyz,
+            dipolar_xyz,
+            bonds,
+            scan_profile_json,
+            status,
+            ts_guess_confidence,
+            tuple(degraded_reasons),
+        )
+
+    def run_forward_scan(
+        self,
+        product_xyz: Path,
+        output_dir: Path,
+        forming_bonds: Sequence[Tuple[int, int]],
+        scan_config: Optional[Dict[str, Any]] = None,
+        atom_map: Optional[Dict[int, int]] = None,
+    ) -> Tuple[Path, Path, Path, Tuple[Tuple[int, int], ...], Path, str, str, Tuple[str, ...], Optional[Path]]:
+        return self.run_retro_scan(
+            product_xyz=product_xyz,
+            output_dir=output_dir,
+            forming_bonds=forming_bonds,
+            scan_config=scan_config,
+            atom_map=atom_map,
         )
 
     def run_with_precursor(
