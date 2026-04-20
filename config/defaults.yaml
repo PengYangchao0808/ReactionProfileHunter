@@ -365,7 +365,7 @@ step2:
   # 官方文档: xtb start.xyz --path end.xyz --input path.inp
   path_search:
     # 是否启用 xTB 路径搜索 (true=使用 path search 精修 TS)
-    enabled: true
+    enabled: false
     # 路径搜索优化轮数
     nrun: 1
     # 初始路径点数
@@ -631,6 +631,7 @@ reaction_profiles:
   # [5+2] 环加成反应默认配置
   "[5+2]_default":
     forming_bond_count: 2
+    s2_strategy: retro_scan
     # 扫描参数
     scan:
       scan_start_distance: 3.5
@@ -644,6 +645,7 @@ reaction_profiles:
   # [4+3] 环加成反应默认配置
   "[4+3]_default":
     forming_bond_count: 2
+    s2_strategy: forward_scan
     # 扫描参数
     scan:
       scan_start_distance: 3.5
@@ -657,6 +659,7 @@ reaction_profiles:
   # 通用兜底配置
   "_universal":
     forming_bond_count: 2
+    s2_strategy: retro_scan
     scan:
       scan_start_distance: 3.5
       scan_end_distance: 1.8

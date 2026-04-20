@@ -33,3 +33,10 @@ test_ui_verify/rx_manual/
 
 # 测试运行时临时目录
 test_tmpdir/
+
+# Phase A benchmark 运行产物
+benchmark/confsearch_phaseA/plans/
+
+# Python bytecode / caches
+__pycache__/
+*.pyc
