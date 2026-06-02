@@ -10,16 +10,16 @@ Core package: `orchestrator.py` wires S1→S4; `steps/` holds per-step business 
 | CLI entry | `orchestrator.py:1287` | `main()` — argparse; flags: --smiles, --output, --config, --log-level, --reaction-type |
 | Module run | `__main__.py` | `python -m rph_core` → calls `orchestrator.main()` |
 | S1 anchor/conformer | `steps/anchor/`, `steps/conformer_search/` | Two-stage UCE v3.1 engine |
-| S2 retro scan | `steps/step2_retro/` | SMARTS matching + bond stretching; supports forward_scan (xTB $scan) |
+| S2 retro scan | `steps/step2_retro/` | SMARTS matching + bond stretching; retro_scan only |
 | S3 TS optimization | `steps/step3_opt/` | Berny + QST2 rescue + IRC + validation |
 | S4 feature extraction | `steps/step4_features/` | Plugin-based; 14 extractors |
 | QC facade | `utils/qc_interface.py` | ALL subprocess QC calls route here |
-| XTB scan (NEW) | `utils/qc_interface.py:991` | `XTBInterface.scan()` — forward scan facade |
+| XTB scan | `utils/qc_interface.py:991` | `XTBInterface.scan()` — xTB scan facade used by S2 |
 | Checkpoint/resume | `utils/checkpoint_manager.py` | Hash-validated step resume (603 lines) |
 | Forming bonds S3→S4 | `utils/forming_bonds_resolver.py` | Resolves forming bond indices post-S3 |
 
 ## KEY NEW FEATURES
-- `reaction_profiles` config drives forward_scan parameters: `scan_start_distance`, `scan_end_distance`, `scan_steps`, `scan_mode`, `scan_force_constant`
+- `reaction_profiles` config drives Step2 scan parameters: `scan_start_distance`, `scan_end_distance`, `scan_steps`, `scan_mode`, `scan_force_constant`
 - `--reaction-type` CLI arg selects reaction profile (e.g., `[4+3]_default`)
 - Forming bonds from S2 preserved through S3→S4 without recomputation
 
@@ -39,8 +39,8 @@ Core package: `orchestrator.py` wires S1→S4; `steps/` holds per-step business 
 - Direct `subprocess.run` for QC binaries inside steps — bypasses sandbox + logging.
 - Hardcoding layout assumptions outside `orchestrator._resolve_s1_artifacts()` or `path_compat.py`.
 - Treating `rph_output/` or `test_tmpdir/` as source code.
-- Forward scan: hardcoded scan params instead of `reaction_profiles` config
-- Forward scan: overwriting S2-derived `forming_bonds`
+- Step2 scan: hardcoded scan params instead of `reaction_profiles` config
+- Step2 scan: overwriting S2-derived `forming_bonds`
 
 ## CODE MAP
 
@@ -51,7 +51,6 @@ Core package: `orchestrator.py` wires S1→S4; `steps/` holds per-step business 
 | `run_pipeline()` | Method | `orchestrator.py:938` | 500+ line S0→S1→S2→S3→S4 flow with checkpoint gates |
 | `_resolve_forming_bonds_for_s2()` | Method | `orchestrator.py:467` | S0/cleaner/config/SMARTS fallback chain for forming bonds |
 | `_resolve_s1_artifacts()` | Method | `orchestrator.py:1748` | v2.1/v3.0/v6.1 layout compatibility resolver |
-| `_resolve_forward_scan_config()` | Method | `orchestrator.py:276` | Merges reaction_profiles config with CLI args for xTB scan |
 | `main()` | Function | `orchestrator.py:2048` | CLI argparse (--smiles, --output, --config, --reaction-type, --skip-steps) |
 | `_run_tasks()` | Function | `orchestrator.py:1991` | Batch dispatcher; iterates dataset rows, calls run_pipeline() |
 | `_resolve_run_config()` | Function | `orchestrator.py:1895` | Merges CLI args + YAML config via _deep_merge_dict |

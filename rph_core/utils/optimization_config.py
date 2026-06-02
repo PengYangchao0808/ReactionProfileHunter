@@ -6,16 +6,18 @@
 
 Author: QC Descriptors Team
 Date: 2026-01-13
-Purpose: ReactionProfileHunter v2.1 - 统一优化参数配置
+Purpose: ReactionProfileHunter v3.0 - 统一优化参数配置
 """
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
-from enum import Enum
+from copy import deepcopy
+from dataclasses import dataclass
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 import logging
 import re
 
 from rph_core.utils.keyword_translator import KeywordTranslator
+from rph_core.utils.method_registry import MethodRegistry
+from rph_core.utils.capability_validator import CapabilityValidator
 
 logger = logging.getLogger(__name__)
 
@@ -173,11 +175,6 @@ class OptimizationConfig:
         """
         lines = ["%geom"]
 
-        if is_ts:
-            lines.append("   Constraints")
-            lines.append("      {B} 2 1 2")  # 使用内坐标约束
-            lines.append("   end")
-
         if self.initial_hessian is None:
             lines.append("   Calc_Hess false")
         elif self.initial_hessian == "calcfc":
@@ -192,18 +189,14 @@ class OptimizationConfig:
             lines.append(f"   Recalc_Hess {self.recalc_hess_every}")
 
         if self.max_step != 30:
-            lines.append(f"   MaxStep {self.max_step / 100}")  # 转换为 Bohr
+            lines.append(f"   MaxStep {self.max_step / 100}")
 
         if self.trust_radius != 0.3:
             lines.append(f"   Trust {self.trust_radius}")
 
-        if self.adaptive_step:
-            lines.append("   Constraints true")
-
-        if is_ts:
-            lines.append(f"   TSMode {self.ts_follow_mode}")
-            if self.ts_step_type == "eigenvalue":
-                lines.append("   StepType Eigenvalue")
+        # ORCA OptTS already selects TS optimization from the simple keyword
+        # line. ORCA 5 rejects legacy/foreign-looking GEOM keys such as
+        # TSMode and StepType; keep the block to Hessian controls only.
 
         lines.append("end")
 
@@ -264,6 +257,112 @@ def build_gaussian_route_from_config(
     return " ".join(route_parts)
 
 
+THEORY_OVERRIDE_FIELDS = (
+    "method",
+    "basis",
+    "engine",
+    "dispersion",
+    "aux_basis",
+    "maxcore",
+    "route",
+    "rescue_route",
+    "route_extras",
+    "solvent",
+    "solvent_model",
+    "fallback_to_gaussian",
+    "fallback_method",
+    "fallback_basis",
+)
+
+
+def _apply_theory_method_overrides(target: Dict[str, Any], overrides: Mapping[str, Any]) -> None:
+    for field in THEORY_OVERRIDE_FIELDS:
+        value = overrides.get(field)
+        if value is None:
+            continue
+        if field == "dispersion" and isinstance(value, Mapping):
+            mapped = value.get("keyword") if value.get("mode") in {"external", "required"} else None
+            value = mapped
+        if isinstance(value, str) and not value.strip():
+            continue
+        target[field] = value
+
+
+def prepare_qc_method_config(
+    base_config: Mapping[str, Any],
+    *,
+    optimization: Optional[Mapping[str, Any]] = None,
+    single_point: Optional[Mapping[str, Any]] = None,
+    solvent: Optional[Mapping[str, Any]] = None,
+    auto_fix: bool = True,
+) -> Dict[str, Any]:
+    config = deepcopy(dict(base_config))
+    theory = config.setdefault("theory", {})
+    if not isinstance(theory, dict):
+        raise ValueError("Invalid theory block in QC config")
+
+    solvent_name = ""
+    solvent_model = ""
+    if isinstance(solvent, Mapping):
+        solvent_name = str(solvent.get("solvent", "") or "").strip()
+        solvent_model = str(solvent.get("model", "") or "").strip()
+        shared_solvent = theory.get("solvent")
+        if not isinstance(shared_solvent, dict):
+            shared_solvent = {}
+            theory["solvent"] = shared_solvent
+        for key, value in solvent.items():
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            shared_solvent[key] = value
+
+    if optimization is not None:
+        opt_cfg = theory.setdefault("optimization", {})
+        if not isinstance(opt_cfg, dict):
+            raise ValueError("Invalid theory.optimization block in QC config")
+        opt_raw = dict(opt_cfg)
+        opt_raw.update(dict(optimization))
+        if solvent_name:
+            opt_raw["solvent"] = solvent_name
+            opt_cfg["solvent"] = solvent_name
+        if solvent_model:
+            opt_raw["solvent_model"] = solvent_model
+            opt_cfg["solvent_model"] = solvent_model
+        _apply_theory_method_overrides(opt_cfg, optimization)
+        opt_engine = str(opt_cfg.get("engine", "") or "").strip().lower()
+        if opt_engine == "orca":
+            normalized_opt = MethodRegistry.normalize_spec(opt_raw, default_engine="orca")
+            opt_errors = CapabilityValidator.validate(normalized_opt, task_type="opt")
+            if opt_errors:
+                raise ValueError(f"Invalid ORCA optimization method config: {'; '.join(opt_errors)}")
+            opt_cfg["normalized_spec"] = normalized_opt.to_dict()
+
+    if single_point is not None:
+        sp_cfg = theory.setdefault("single_point", {})
+        if not isinstance(sp_cfg, dict):
+            raise ValueError("Invalid theory.single_point block in QC config")
+        sp_raw = dict(sp_cfg)
+        sp_raw.update(dict(single_point))
+        if solvent_name:
+            sp_raw["solvent"] = solvent_name
+            sp_cfg["solvent"] = solvent_name
+        if solvent_model:
+            sp_raw["solvent_model"] = solvent_model
+            sp_cfg["solvent_model"] = solvent_model
+        _apply_theory_method_overrides(sp_cfg, single_point)
+        sp_engine = str(sp_cfg.get("engine", "") or "").strip().lower()
+        if sp_engine == "orca":
+            normalized_sp = MethodRegistry.normalize_spec(sp_raw, default_engine="orca")
+            sp_errors = CapabilityValidator.validate(normalized_sp, task_type="sp")
+            if sp_errors:
+                raise ValueError(f"Invalid ORCA single-point method config: {'; '.join(sp_errors)}")
+            sp_cfg["normalized_spec"] = normalized_sp.to_dict()
+
+    normalized_config, _ = normalize_qc_config(config, auto_fix=auto_fix)
+    return normalized_config
+
+
 def _normalize_def2_in_route(route: str) -> str:
     pattern = re.compile(r"def2[-_]?([A-Za-z0-9]+)", re.IGNORECASE)
     return pattern.sub(lambda match: f"def2{match.group(1)}", route)
@@ -278,7 +377,7 @@ def _normalize_noeigentest_in_route(route: str) -> str:
     tokens = [token for token in route.split() if token != "NoEigenTest"]
     route_no_token = " ".join(tokens)
 
-    def _inject_noeigentest(match: re.Match) -> str:
+    def _inject_noeigentest(match: re.Match[str]) -> str:
         opt_value = match.group(1)
         return f"Opt=({opt_value},NoEigenTest)"
 

@@ -1,18 +1,17 @@
 # step2_retro/AGENTS.md
 
 ## OVERVIEW
-Retro scan: identifies forming bonds from product SMILES via SMARTS matching, then generates TS guess (bonds stretched to TS distances + constrained opt) and intermediate (bonds elongated to dissociation + relaxed opt). **Supports both retro_scan and forward_scan strategies.**
+Retro scan: identifies forming bonds from product SMILES via SMARTS matching, then generates TS guess (bonds stretched to TS distances + constrained opt) and intermediate (bonds elongated to dissociation + relaxed opt). **Only retro_scan is supported in v3.0.0+.**
 
 ## WHERE TO LOOK
 | File | Role |
 |------|------|
-| `retro_scanner.py` | Main engine; `run()` (retro) + `run_forward_scan()` (forward); handles v2.1/v3.0/v6.1 layouts |
+| `retro_scanner.py` | Main engine; `run()` / `run_retro_scan()`; handles v2.1/v3.0/v6.1 layouts |
 | `smarts_matcher.py` | SMARTS pattern matching + SMARTSTemplate registry ([5+2], [4+3], [4+2], [3+2]) |
 | `bond_stretcher.py` | Geometry manipulation: stretch_bonds() for arbitrary bond sets |
 
 ## KEY METHODS
 - `RetroScanner.run(product_xyz, output_dir)` — legacy retro scan
-- `RetroScanner.run_forward_scan(product_xyz, forming_bonds, config)` — xTB forward scan (NEW)
 - `SMARTSMatcher.find_reactive_bonds(product_xyz, cleaner_data=None)` — template registry + cleaner-first
 
 ## REQUIRED OUTPUTS (both mandatory)
@@ -23,7 +22,7 @@ Retro scan: identifies forming bonds from product SMILES via SMARTS matching, th
 ## CONVENTIONS
 - Internal atom indices are **0-based**; convert to **1-based** when writing constraint files for Gaussian.
 - Two input layout modes are supported inside `retro_scanner.py` (branch on presence of `S1_ConfGeneration/`); do not add a third layout without updating the orchestrator.
-- `run_forward_scan` parameters driven by `reaction_profiles` config: `scan_start_distance`, `scan_end_distance`, `scan_steps`, `scan_mode`, `scan_force_constant`.
+- `run_retro_scan` parameters are driven by `reaction_profiles` config: `scan_start_distance`, `scan_end_distance`, `scan_steps`, `scan_mode`, `scan_force_constant`.
 - Backward compatibility: both `intermediate.xyz` (new) and `reactant_complex.xyz` (legacy) are written
 
 ## FORMING BONDS NOTE

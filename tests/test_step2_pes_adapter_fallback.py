@@ -105,7 +105,6 @@ def test_run_step2_uses_fallback_adapted_product_path(tmp_path: Path) -> None:
     hunter._resolve_product_xyz_for_s2 = MagicMock(return_value=product)
     hunter._resolve_profile_key = MagicMock(return_value="[4+3]_default")
     hunter._resolve_forming_bonds_for_s2 = MagicMock(return_value=((0, 1), (2, 3)))
-    hunter._resolve_forward_scan_config = MagicMock(return_value={"scan_start_distance": 3.5, "scan_end_distance": 1.8})
     hunter._build_step2_signature = MagicMock(return_value={"ok": True})
     hunter.s2_engine = SimpleNamespace()
     hunter.s2_engine.run_retro_scan = MagicMock(
@@ -135,3 +134,133 @@ def test_run_step2_uses_fallback_adapted_product_path(tmp_path: Path) -> None:
     assert "pes_adapter_fallback_exception_path" in result.degraded_reasons
     called_product = hunter.s2_engine.run_retro_scan.call_args.kwargs["product_xyz"]
     assert Path(called_product).name == "product_relaxed.xyz"
+
+
+def test_run_step2_passes_resolved_xyz_bonds_without_map_override(tmp_path: Path) -> None:
+    s1_dir = tmp_path / "S1_ConfGeneration"
+    s1_dir.mkdir(parents=True, exist_ok=True)
+    (s1_dir / "provenance.json").write_text(
+        json.dumps({"protocol": "lite", "schema_version": "s1_provenance_v1", "has_geometry_optimization": True}, indent=2),
+        encoding="utf-8",
+    )
+
+    product = tmp_path / "product_min.xyz"
+    _write_xyz(product)
+
+    ts_guess = tmp_path / "ts_guess.xyz"
+    substrate = tmp_path / "reactant_complex.xyz"
+    intermediate = tmp_path / "intermediate.xyz"
+    _write_xyz(ts_guess)
+    _write_xyz(substrate)
+    _write_xyz(intermediate)
+
+    hunter = SimpleNamespace()
+    hunter.config = {
+        "step2": {
+            "pes_adapter": {"enabled": True, "mode": "fallback"},
+            "path_search": {"enabled": False},
+        }
+    }
+    hunter.logger = logging.getLogger("test_step2_runner_contract")
+    hunter._resolve_product_xyz_for_s2 = MagicMock(return_value=product)
+    hunter._resolve_profile_key = MagicMock(return_value="[4+3]_default")
+    hunter._resolve_forming_bonds_for_s2 = MagicMock(return_value=((0, 2), (1, 3)))
+    hunter._build_step2_signature = MagicMock(return_value={"ok": True})
+    hunter.s2_engine = SimpleNamespace()
+    hunter.s2_engine.run_retro_scan = MagicMock(
+        return_value=(
+            ts_guess,
+            substrate,
+            intermediate,
+            ((0, 2), (1, 3)),
+            tmp_path / "scan_profile.json",
+            "COMPLETE",
+            "high",
+            tuple(),
+            None,
+        )
+    )
+
+    run_step2(
+        hunter=hunter,
+        product_xyz=product,
+        work_dir=tmp_path,
+        reaction_profile="[4+3]_default",
+        cleaner_data={"formed_bond_map_pairs": "9-10;11-12"},
+    )
+
+    retro_kwargs = hunter.s2_engine.run_retro_scan.call_args.kwargs
+    assert retro_kwargs["forming_bonds"] == ((0, 2), (1, 3))
+    assert "atom_map" not in retro_kwargs
+
+
+def test_run_step2_path_search_reuses_resolved_xyz_bonds(tmp_path: Path) -> None:
+    s1_dir = tmp_path / "S1_ConfGeneration"
+    s1_dir.mkdir(parents=True, exist_ok=True)
+    (s1_dir / "provenance.json").write_text(
+        json.dumps({"protocol": "lite", "schema_version": "s1_provenance_v1", "has_geometry_optimization": True}, indent=2),
+        encoding="utf-8",
+    )
+
+    product = tmp_path / "product_min.xyz"
+    _write_xyz(product)
+
+    ts_guess = tmp_path / "ts_guess.xyz"
+    substrate = tmp_path / "reactant_complex.xyz"
+    intermediate = tmp_path / "intermediate.xyz"
+    path_ts_guess = tmp_path / "path_ts_guess.xyz"
+    _write_xyz(ts_guess)
+    _write_xyz(substrate)
+    _write_xyz(intermediate)
+    _write_xyz(path_ts_guess)
+
+    hunter = SimpleNamespace()
+    hunter.config = {
+        "step2": {
+            "pes_adapter": {"enabled": True, "mode": "fallback"},
+            "path_search": {"enabled": True},
+        }
+    }
+    hunter.logger = logging.getLogger("test_step2_runner_path_contract")
+    hunter._resolve_product_xyz_for_s2 = MagicMock(return_value=product)
+    hunter._resolve_profile_key = MagicMock(return_value="[4+3]_default")
+    hunter._resolve_forming_bonds_for_s2 = MagicMock(return_value=((0, 2), (1, 3)))
+    hunter._build_step2_signature = MagicMock(return_value={"ok": True})
+    hunter.s2_engine = SimpleNamespace()
+    hunter.s2_engine.run_retro_scan = MagicMock(
+        return_value=(
+            ts_guess,
+            substrate,
+            intermediate,
+            ((0, 2), (1, 3)),
+            tmp_path / "scan_profile.json",
+            "COMPLETE",
+            "high",
+            tuple(),
+            None,
+        )
+    )
+    hunter.s2_engine.run_path_search = MagicMock(
+        return_value=(
+            path_ts_guess,
+            substrate,
+            intermediate,
+            ((0, 2), (1, 3)),
+            tmp_path / "path_scan_profile.json",
+            "COMPLETE",
+            "high",
+            tuple(),
+            None,
+        )
+    )
+
+    run_step2(
+        hunter=hunter,
+        product_xyz=product,
+        work_dir=tmp_path,
+        reaction_profile="[4+3]_default",
+        cleaner_data={"formed_bond_map_pairs": "9-10;11-12"},
+    )
+
+    path_kwargs = hunter.s2_engine.run_path_search.call_args.kwargs
+    assert path_kwargs["forming_bonds"] == ((0, 2), (1, 3))

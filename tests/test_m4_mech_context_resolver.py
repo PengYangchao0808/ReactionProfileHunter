@@ -16,7 +16,7 @@ import tempfile
 import shutil
 from typing import Dict, Optional
 
-from rph_core.steps.step4_features.mech_packager import (
+from rph_features.mech_packager import (
     resolve_mechanism_context,
     S3_DIR_ALIASES,
     S2_DIR_ALIASES,

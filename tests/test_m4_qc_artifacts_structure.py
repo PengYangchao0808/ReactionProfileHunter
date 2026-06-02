@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from rph_core.steps.step4_features.mech_packager import (
+from rph_features.mech_packager import (
     _collect_qc_artifacts,
     QC_ARTIFACT_TARGETS,
     QC_ARTIFACT_PATTERNS,

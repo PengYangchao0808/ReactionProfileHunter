@@ -19,28 +19,36 @@ build/
 *.xyz
 *.gjf
 *.out
-!input.xyz  # 如果你希望保留名为 input.xyz 的模板，可以用 ! 排除
+!input.xyz
 
 # 运行输出目录
 Output/
 rph_output/
+rph_output_backup/
 test_ui_verify/rx_manual/
+
+# 外部数据 (ML 来源, 不入源码树)
+external_data/
+
+# 测试运行时临时目录
+test_tmpdir/
+tests/test_output/
 
 # 编辑器配置
 .vscode/
 .idea/
 .sisyphus/
 
-# 测试运行时临时目录
-test_tmpdir/
-
 # Phase A benchmark 运行产物
 benchmark/confsearch_phaseA/plans/
 benchmark_shit/
 
+# Gaussian checkpoint files (binary, large)
+*.chk
+
 # Backup files (single-file pattern)
 *.backup_*
 
-# Python bytecode / caches
-__pycache__/
-*.pyc
+# Compiled binaries (keep .f90 source)
+scripts/Gau_XTB/extderi
+scripts/Gau_XTB/genxyz

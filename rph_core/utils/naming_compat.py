@@ -6,8 +6,8 @@ TS_GUESS_XYZ = "ts_guess.xyz"
 PRODUCT_XYZ = "product_min.xyz"
 PRECURSOR_XYZ = "precursor_min.xyz"
 NEUTRAL_PRECURSOR_XYZ = "neutral_precursor.xyz"
-SUBSTRATE_XYZ = "substrate.xyz"
-REACTANT_COMPLEX_XYZ = INTERMEDIATE_XYZ
+SUBSTRATE_XYZ = "substrate.xyz"  # legacy, prefer INTERMEDIATE_XYZ
+REACTANT_COMPLEX_XYZ = INTERMEDIATE_XYZ  # deprecated alias
 
 DIR_S0_MECHANISM = "S0_Mechanism"
 DIR_S1_CONFORMATION = "S1_ConfGeneration"
@@ -17,7 +17,6 @@ DIR_S4_FEATURES = "S4_Data"
 
 DIR_INTERMEDIATE_OPT = "S3_intermediate_opt"
 DIR_TS_OPT = "ts_opt"
-DIR_SP_MATRIX = "ASM_SP_Mat"
 
 SOURCE_S1_SUBSTRATE = "S1_substrate"
 SOURCE_S2_INTERMEDIATE = "S2_intermediate"
@@ -26,6 +25,7 @@ SOURCE_S3_TS = "S3_ts"
 
 PREFIX_INTERMEDIATE = "intermediate_"
 PREFIX_SUBSTRATE = "substrate_"
+DIR_REACTANT_OPT = "reactant_opt"  # deprecated alias for DIR_INTERMEDIATE_OPT
 
 
 def resolve_intermediate_path(directory: Path) -> Tuple[Path, str]:

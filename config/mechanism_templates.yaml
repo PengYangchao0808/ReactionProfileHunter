@@ -151,9 +151,6 @@ defaults:
   # 默认反应类型
   default_mechanism: "[4+3]"
   
-  # 是否启用 dr 路径枚举
-  enable_dr_paths: false
-  
   # 是否生成中间体 SMILES
   generate_intermediates: false
   

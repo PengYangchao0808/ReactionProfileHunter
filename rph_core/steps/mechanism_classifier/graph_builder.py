@@ -24,6 +24,8 @@ from rph_core.steps.mechanism_classifier.models import (
     GraphNode,
     GraphEdge,
     PathwayInfo,
+    SmilesAtomMapping,
+    FormingBondNotation,
     NodeState,
     CycloMode,
     TopologyType,
@@ -41,7 +43,7 @@ class GraphBuilder:
     """
     
     # 环加成模式到节点/边配置的映射
-    CYCLO_MODE_CONFIG = {
+    CYCLO_MODE_CONFIG: Dict[str, Dict[str, Any]] = {
         "[4+3]": {
             "steps": 2,
             "ts_types": ["stepwise_first_C_C", "concerted"],
@@ -60,14 +62,14 @@ class GraphBuilder:
         },
     }
     
-    def __init__(self, config: Optional[Dict] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
         """
         初始化构建器
         
         Args:
             config: 可选配置字典
         """
-        self.config = config or {}
+        self.config: Dict[str, Any] = config or {}
     
     def build(self, record: CleanRecord) -> MechanismGraph:
         """
@@ -90,18 +92,25 @@ class GraphBuilder:
             cyclo_mode.value, 
             self.CYCLO_MODE_CONFIG["[4+3]"]
         )
+
+        smiles_atom_mapping = self._build_smiles_mapping(record)
         
         # 4. 创建节点
-        nodes = self._create_nodes(record, config)
+        nodes = self._create_nodes(record, config, smiles_atom_mapping)
         
+        semantic_forming_bonds = self._resolve_semantic_forming_bonds(record)
+
         # 5. 创建边
-        edges = self._create_edges(record, config)
+        edges = self._create_edges(record, config, semantic_forming_bonds)
+
+        forming_bonds_annotated = self._build_forming_bond_annotations(
+            record,
+            semantic_forming_bonds,
+            smiles_atom_mapping,
+        )
         
         # 6. 创建默认路径
         pathways = self._create_default_pathways(cyclo_mode)
-        
-        # 7. 组装模型
-        mechanism_name = f"{cyclo_mode.value}_{record.precursor_type or 'unknown'}"
         
         return MechanismGraph(
             reaction_id=record.reaction_id,
@@ -112,8 +121,222 @@ class GraphBuilder:
             nodes=nodes,
             edges=edges,
             pathways=pathways,
-            source_data=record.raw
+            source_data=record.raw,
+            smiles_atom_mapping=smiles_atom_mapping,
+            forming_bonds_annotated=forming_bonds_annotated or None,
         )
+
+    def _first_nonempty(self, *values: Any) -> Optional[str]:
+        for value in values:
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return None
+
+    def _get_raw(self, record: CleanRecord) -> Dict[str, Any]:
+        return dict(record.raw) if isinstance(record.raw, dict) else {}
+
+    def _get_precursor_mapping_smiles(self, record: CleanRecord) -> Optional[str]:
+        raw = self._get_raw(record)
+
+        # Extract mapped precursor from rxn_smiles_mapped (contains atom map numbers)
+        rxn_mapped = raw.get("rxn_smiles_mapped")
+        if rxn_mapped and ">>" in str(rxn_mapped):
+            precursor_mapped = str(rxn_mapped).split(">>")[0].strip()
+            if precursor_mapped and (":" in precursor_mapped or "[" in precursor_mapped):
+                return precursor_mapped
+
+        return self._first_nonempty(
+            raw.get("mapped_precursor_smiles"),
+            raw.get("precursor_smiles_mapped"),
+            raw.get("mapped_reactant_smiles"),
+            raw.get("reactant_smiles_mapped"),
+            record.precursor_smiles,
+        )
+
+    def _get_product_mapping_smiles(self, record: CleanRecord) -> Optional[str]:
+        raw = self._get_raw(record)
+
+        # Extract mapped product from rxn_smiles_mapped (contains atom map numbers)
+        rxn_mapped = raw.get("rxn_smiles_mapped")
+        if rxn_mapped and ">>" in str(rxn_mapped):
+            product_mapped = str(rxn_mapped).split(">>")[1].strip()
+            if product_mapped and (":" in product_mapped or "[" in product_mapped):
+                return product_mapped
+
+        return self._first_nonempty(
+            raw.get("mapped_product_smiles"),
+            raw.get("product_smiles_mapped"),
+            raw.get("mapped_product"),
+            record.product_smiles,
+        )
+
+    def _build_smiles_mapping(self, record: CleanRecord) -> SmilesAtomMapping:
+        mapping = SmilesAtomMapping()
+
+        try:
+            from rdkit import Chem
+        except ImportError:
+            logger.debug("RDKit unavailable; returning empty SMILES atom mapping")
+            return mapping
+
+        precursor_smiles = self._get_precursor_mapping_smiles(record)
+        if precursor_smiles:
+            try:
+                mol = Chem.MolFromSmiles(precursor_smiles)
+                if mol:
+                    for atom in mol.GetAtoms():
+                        map_num = int(atom.GetAtomMapNum())
+                        if map_num > 0:
+                            idx = int(atom.GetIdx())
+                            mapping.precursor_smiles_to_map[idx] = map_num
+                            mapping.map_to_precursor_smiles[map_num] = idx
+            except Exception as exc:
+                logger.debug(f"Failed to build precursor SMILES mapping: {exc}")
+
+        product_smiles = self._get_product_mapping_smiles(record)
+        if product_smiles:
+            try:
+                mol = Chem.MolFromSmiles(product_smiles)
+                if mol:
+                    for atom in mol.GetAtoms():
+                        map_num = int(atom.GetAtomMapNum())
+                        if map_num > 0:
+                            idx = int(atom.GetIdx())
+                            mapping.product_smiles_to_map[idx] = map_num
+                            mapping.map_to_product_smiles[map_num] = idx
+            except Exception as exc:
+                logger.debug(f"Failed to build product SMILES mapping: {exc}")
+
+        return mapping
+
+    def _build_forming_bond_annotations(
+        self,
+        record: CleanRecord,
+        semantic_forming_bonds: List[Tuple[int, int]],
+        mapping: SmilesAtomMapping,
+    ) -> List[FormingBondNotation]:
+        annotations: List[FormingBondNotation] = []
+
+        try:
+            from rdkit import Chem
+        except ImportError:
+            logger.debug("RDKit unavailable; skip forming bond annotations")
+            return annotations
+
+        precursor_mol = None
+        product_mol = None
+        precursor_smiles = self._get_precursor_mapping_smiles(record)
+        product_smiles = self._get_product_mapping_smiles(record)
+
+        if precursor_smiles:
+            try:
+                precursor_mol = Chem.MolFromSmiles(precursor_smiles)
+            except Exception as exc:
+                logger.debug(f"Failed to parse precursor SMILES for bond annotations: {exc}")
+        if product_smiles:
+            try:
+                product_mol = Chem.MolFromSmiles(product_smiles)
+            except Exception as exc:
+                logger.debug(f"Failed to parse product SMILES for bond annotations: {exc}")
+
+        seen_map_pairs: set[Tuple[int, int]] = set()
+
+        for map_i, map_j in semantic_forming_bonds:
+            map_pair = self._normalize_pair((map_i, map_j))
+            if map_pair is None or map_pair in seen_map_pairs:
+                continue
+            seen_map_pairs.add(map_pair)
+
+            product_idx_a = mapping.map_to_product_smiles.get(map_pair[0])
+            product_idx_b = mapping.map_to_product_smiles.get(map_pair[1])
+            product_pair: Optional[Tuple[int, int]] = None
+            if product_idx_a is not None and product_idx_b is not None:
+                product_pair = self._normalize_pair((product_idx_a, product_idx_b))
+
+            if product_pair is None:
+                continue
+
+            precursor_idx_a = mapping.map_to_precursor_smiles.get(map_pair[0])
+            precursor_idx_b = mapping.map_to_precursor_smiles.get(map_pair[1])
+            precursor_pair: Optional[Tuple[int, int]] = None
+            if precursor_idx_a is not None and precursor_idx_b is not None:
+                precursor_pair = self._normalize_pair((precursor_idx_a, precursor_idx_b))
+
+            annotations.append(FormingBondNotation(
+                map_space=map_pair,
+                product_smiles_idx=product_pair,
+                precursor_smiles_idx=precursor_pair,
+                bond_type_product=self._get_bond_type(product_mol, product_pair, default="UNKNOWN"),
+                bond_type_precursor=self._get_bond_type(precursor_mol, precursor_pair, default="NONE"),
+            ))
+
+        return annotations
+
+    def _resolve_semantic_forming_bonds(self, record: CleanRecord) -> List[Tuple[int, int]]:
+        bond_changes = record.core_bond_changes or {'forming': [], 'breaking': [], 'order_changed': []}
+        forming = list(bond_changes.get('forming', []))
+        order_changed = list(bond_changes.get('order_changed', []))
+
+        semantic_forming: List[Tuple[int, int]] = []
+        seen: set[Tuple[int, int]] = set()
+
+        for pair in forming:
+            normalized = self._normalize_pair(pair)
+            if normalized is None or normalized in seen:
+                continue
+            semantic_forming.append(normalized)
+            seen.add(normalized)
+
+        if len(semantic_forming) < 2 and order_changed:
+            needed = 2 - len(semantic_forming)
+            promoted: List[Tuple[int, int]] = []
+            for pair in order_changed:
+                normalized = self._normalize_pair(pair)
+                if normalized is None or normalized in seen:
+                    continue
+                semantic_forming.append(normalized)
+                promoted.append(normalized)
+                seen.add(normalized)
+                if len(promoted) >= needed:
+                    break
+
+            if promoted:
+                logger.info(
+                    f"Promoting {len(promoted)} order_changed bond(s) to semantic forming_bonds "
+                    f"for {record.reaction_id}: {promoted}"
+                )
+
+        return semantic_forming
+
+    def _normalize_pair(self, pair: Any) -> Optional[Tuple[int, int]]:
+        try:
+            left = int(pair[0])
+            right = int(pair[1])
+        except (TypeError, ValueError, IndexError):
+            return None
+        if left == right:
+            return None
+        return (min(left, right), max(left, right))
+
+    def _get_bond_type(
+        self,
+        mol: Any,
+        pair: Optional[Tuple[int, int]],
+        *,
+        default: str,
+    ) -> str:
+        if mol is None or pair is None:
+            return default
+        try:
+            bond = mol.GetBondBetweenAtoms(int(pair[0]), int(pair[1]))
+        except Exception:
+            bond = None
+        if bond is None:
+            return default
+        return str(bond.GetBondType())
     
     def _normalize_cyclo_mode(self, mode: str) -> CycloMode:
         """
@@ -166,7 +389,8 @@ class GraphBuilder:
     def _create_nodes(
         self, 
         record: CleanRecord,
-        config: Dict
+        config: Dict[str, Any],
+        mapping: SmilesAtomMapping,
     ) -> List[GraphNode]:
         """
         创建节点列表
@@ -187,7 +411,8 @@ class GraphBuilder:
             state_type=NodeState.REACTANT,
             role="reactants",
             charge=0,
-            multiplicity=1
+            multiplicity=1,
+            atom_map=dict(mapping.precursor_smiles_to_map) or None,
         ))
         
         # 2. 中间体节点 (如果是两步反应)
@@ -215,7 +440,8 @@ class GraphBuilder:
             state_type=NodeState.PRODUCT,
             role="product",
             charge=0,
-            multiplicity=1
+            multiplicity=1,
+            atom_map=dict(mapping.product_smiles_to_map) or None,
         ))
         
         return nodes
@@ -244,7 +470,8 @@ class GraphBuilder:
     def _create_edges(
         self,
         record: CleanRecord,
-        config: Dict
+        config: Dict[str, Any],
+        semantic_forming_bonds: List[Tuple[int, int]],
     ) -> List[GraphEdge]:
         """
         创建边列表
@@ -256,11 +483,10 @@ class GraphBuilder:
         Returns:
             GraphEdge 列表
         """
-        edges = []
-        bond_changes = record.core_bond_changes
-        
-        forming = bond_changes.get('forming', [])
+        edges: List[GraphEdge] = []
+        bond_changes = record.core_bond_changes or {'forming': [], 'breaking': [], 'order_changed': []}
         breaking = bond_changes.get('breaking', [])
+        forming = list(semantic_forming_bonds)
         
         if config["steps"] == 1:
             # 单步反应：Reactants → Product
@@ -319,7 +545,7 @@ class GraphBuilder:
         base_graph: MechanismGraph,
         dr_type: str,
         description: str,
-        stereochemistry: str = None
+        stereochemistry: Optional[str] = None
     ) -> MechanismGraph:
         """
         添加 dr (diastereomeric ratio) 路径
@@ -414,17 +640,18 @@ class GraphBuilder:
         Returns:
             摘要字典
         """
-        summary = {
+        summary_edges: List[Dict[str, Any]] = []
+        summary: Dict[str, Any] = {
             "reaction_id": graph.reaction_id,
             "cyclo_mode": graph.cyclo_mode.value,
             "topology": graph.topology.value,
             "n_nodes": len(graph.nodes),
             "n_edges": len(graph.edges),
-            "edges": []
+            "edges": summary_edges,
         }
         
         for edge in graph.edges:
-            summary["edges"].append({
+            summary_edges.append({
                 "source": edge.source,
                 "target": edge.target,
                 "forming_bonds": edge.forming_bonds,

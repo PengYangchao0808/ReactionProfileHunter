@@ -1,4 +1,5 @@
 import pytest
+import copy
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -32,6 +33,18 @@ def mock_config():
             }
         },
         "step3": {
+            "gaussian_keywords": {
+                "berny": "Opt=(TS, CalcFC, NoEigenTest) Freq",
+                "ts_rescue": "Opt=(TS, NoEigenTest, MaxStep=15, RecalcFC=5, MaxCycles=120) Freq",
+            },
+            "disable_qst2_rescue": True,
+            "ts_rescue_policy": {
+                "enabled": True,
+                "trigger_after_steps": 60,
+                "max_step_rescue": 15,
+                "recalc_fc_every": 5,
+                "max_cycles_rescue": 120,
+            },
             "reactant_opt": {
                 "charge": 0,
                 "multiplicity": 1,
@@ -244,6 +257,39 @@ class TestS3Checkpoint:
         assert "theory_optimization" in sig1
         assert "theory_single_point" in sig1
         assert "step3_reactant_opt" in sig1
+        assert "step3_ts_rescue" in sig1
+
+    def test_step3_signature_changes_when_ts_rescue_policy_changes(self, tmp_path: Path, mock_config):
+        mgr = CheckpointManager(tmp_path)
+
+        sig1 = mgr._compute_step3_signature(mock_config)
+        modified_config = copy.deepcopy(mock_config)
+        modified_config["step3"]["ts_rescue_policy"]["trigger_after_steps"] = 80
+        sig2 = mgr._compute_step3_signature(modified_config)
+
+        assert sig1 != sig2
+
+    def test_step3_signature_changes_when_ts_rescue_route_changes(self, tmp_path: Path, mock_config):
+        mgr = CheckpointManager(tmp_path)
+
+        sig1 = mgr._compute_step3_signature(mock_config)
+        modified_config = copy.deepcopy(mock_config)
+        modified_config["step3"]["gaussian_keywords"]["ts_rescue"] = (
+            "Opt=(TS, NoEigenTest, MaxStep=10, RecalcFC=5, MaxCycles=120) Freq"
+        )
+        sig2 = mgr._compute_step3_signature(modified_config)
+
+        assert sig1 != sig2
+
+    def test_step3_signature_changes_when_qst2_flag_changes(self, tmp_path: Path, mock_config):
+        mgr = CheckpointManager(tmp_path)
+
+        sig1 = mgr._compute_step3_signature(mock_config)
+        modified_config = copy.deepcopy(mock_config)
+        modified_config["step3"]["disable_qst2_rescue"] = False
+        sig2 = mgr._compute_step3_signature(modified_config)
+
+        assert sig1 != sig2
 
     def test_compute_file_hash(self, tmp_path: Path):
         mgr = CheckpointManager(tmp_path)
@@ -455,7 +501,8 @@ class TestS3ResumeJson:
             imaginary_count=0,
         )
         
-        assert optimizer._verify_reactant_result(mock_result, reactant_opt_dir) is True
+        verifier = getattr(optimizer, "_verify_reactant_result")
+        assert verifier(mock_result, reactant_opt_dir) is True
 
     def test_verify_reactant_result_with_imaginary(self, tmp_path: Path):
         from rph_core.steps.step3_opt.ts_optimizer import TSOptimizer
@@ -477,4 +524,5 @@ class TestS3ResumeJson:
             imaginary_count=1,
         )
         
-        assert optimizer._verify_reactant_result(mock_result, reactant_opt_dir) is False
+        verifier = getattr(optimizer, "_verify_reactant_result")
+        assert verifier(mock_result, reactant_opt_dir) is False

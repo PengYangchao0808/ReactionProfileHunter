@@ -1,0 +1,36 @@
+cases:
+  - rx_id: "1"
+    label: rigid_small_ring
+    smiles: "CC(C)(C)OC(=O)N1CCC[C@@]23C=C[C@@H](CC(=O)[C@H]12)O3"
+    source: reaxys
+    focus: baseline_accuracy
+    competitive_channel: false
+    seed_protocol: lite
+    confsearch_source: Output/benchmark/rx1
+
+  - rx_id: "3"
+    label: flexible_chain
+    smiles: "O=C1C[C@@H]2C=C[C@@]3(CCN(C(=O)OCc4ccccc4)[C@@H]13)O2"
+    source: reaxys
+    focus: dispersion_sensitivity
+    competitive_channel: false
+    seed_protocol: lite
+    confsearch_source: Output/benchmark/rx3
+
+  - rx_id: "8"
+    label: medium_polarity_async
+    smiles: "O=C1C[C@H]2C=C[C@]3(C[C@H]4COC(=O)N4[C@H]13)O2"
+    source: reaxys
+    focus: ts_geometry_sensitivity
+    competitive_channel: false
+    seed_protocol: lite
+    confsearch_source: Output/benchmark/rx8
+
+  - rx_id: "15"
+    label: steric_endo_exo
+    smiles: "O=C1C[C@H]2C=C[C@]3(CCCC[C@H]4COC(=O)N4[C@H]13)O2"
+    source: reaxys
+    focus: stereoselectivity_ddg
+    competitive_channel: true
+    seed_protocol: lite
+    confsearch_source: Output/benchmark/rx15

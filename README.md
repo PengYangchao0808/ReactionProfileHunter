@@ -4,9 +4,9 @@
 
 <div align="center">
 
-**Product-driven reaction mechanism exploration and feature extraction**
+**Product-driven DFT reaction mechanism pipeline (S0-S3)**
 
-[![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)](https://github.com/yourusername/ReactionProfileHunter)
+[![Version](https://img.shields.io/badge/version-3.0.0-blue.svg)](https://github.com/yourusername/ReactionProfileHunter)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Code Style](https://img.shields.io/badge/code%20style-agents%20ready-success.svg)](AGENTS.md)
@@ -19,15 +19,15 @@
 
 ## Overview
 
-ReactionProfileHunter (RPH) is a product-driven automated reaction mechanism pipeline designed for transition state search, geometry optimization, and feature extraction.
+ReactionProfileHunter (RPH) is a product-driven automated DFT reaction mechanism pipeline (S0-S3) for transition state search and geometry optimization. Feature extraction (S4) is handled by the companion [RPH_Postprocess](https://github.com/yourusername/RPH_Postprocess) package.
 
 ### Core capabilities
 
 - Product-driven strategy: start from products and search reaction pathways backward
-- Four-step pipeline: anchor/conformer search -> retro scan -> TS optimization -> feature extraction
+- Three-step DFT pipeline: anchor/conformer search -> retro scan -> TS optimization (S4 feature extraction via RPH_Postprocess)
 - Dual-level computation: xTB pre-optimization -> B3LYP geometry optimization -> wB97X-D3BJ high-accuracy single point
 - Multi-engine support: Gaussian, ORCA, xTB, CREST, Multiwfn
-- Feature engineering: reaction barriers, geometric parameters, electronic descriptors
+- Feature extraction: reaction barriers, geometric parameters, electronic descriptors (via RPH_Postprocess)
 - Checkpoint/resume support
 
 ### Use cases
@@ -35,28 +35,21 @@ ReactionProfileHunter (RPH) is a product-driven automated reaction mechanism pip
 - Mechanistic studies of organic reactions (cycloadditions, rearrangements, substitutions)
 - Transition state prediction and validation
 - Reaction dataset building and high-throughput screening
-- Machine-learning feature extraction for reaction properties
+- Machine-learning feature extraction for reaction properties (via RPH_Postprocess)
 
 ---
 
 ## Key features
 
-### v2.1.0 release closure highlights
+### v3.0.0 highlights — DFT/ML Split & Pure DFT Pipeline
 
-- Protocol-aware Step1 contract finalized: `ext/default/lite/zero` all resolve through `ProtocolSpec` and are covered by protocol contract tests
-- Lite/zero closure semantics are now explicit and test-gated (`freq_requested`, `selection_mode`, fallback triggers, protocol-aware S4 degradation)
-- S4 final verification now includes protocol-aware provenance checks for zero mode missing frequency artifacts
-- Release closure docs and version are synchronized to `2.1.0`
-
-### v2.0.0 highlights (forward-scan + major refactoring)
-
-- Step1 activation features: Boltzmann/Gibbs weighted energy, conformer entropy/flexibility, leaving-group geometry, alpha-H gating
-- Step2 cyclization features: kinetics/thermochemistry, TS geometry (forming bonds), CDFT metrics (Fukui/Dual Descriptor/QTAIM)
-- **Forward-scan TS search (NEW)**: xTB native `$scan` for arbitrary cycloadditions ([4+2], [4+3], [3+2], [5+2])
-- **Reaction profiles (NEW)**: configuration-driven scan parameters per reaction type
-- GEDT/CDFT enhancements: forming-bond-based charge transfer, eV unit locking, range validation
-- Multiwfn integration: tier-1 support (Fukui/Dual Descriptor/QTAIM), non-interactive batch, failure-tolerant, caching
-- Strict contract: feature_meta records config snapshot and provenance; missing features degrade with NaN + warning
+- **Architecture split**: RPH is now a pure DFT calculation tool (S0-S3). Feature extraction (S4) moved to [RPH_Postprocess](https://github.com/yourusername/RPH_Postprocess). ML training moved to `Training/`
+- **Pipeline stops at S3**: DFT pipeline completes after TS optimization; S4 feature extraction runs externally via `rph-features extract --rph-run <work_dir>`
+- **S0 mechanism classifier**: Optional mechanism classification and diastereomeric ratio (DR) branch planning
+- **S1 anchor/conformer search**: UCE v3.1 two-stage conformer engine with protocol-aware funnel (ext/default/lite/zero)
+- **S2 retro scan**: SMARTS-based forming bond detection + xTB constrained scan + Gau_XTB TS pre-optimization
+- **S3 TS optimization**: Berny + QST2 rescue + IRC validation + SP matrix with dual-level (B3LYP→wB97X-D3BJ)
+- **Checkpoint/resume**: Hash-validated step persistence with partial rehydration
 
 ### v1.x historical (legacy versions from v6.x era)
 
@@ -148,15 +141,15 @@ Option 3: Mixed (recommended)
 # Run a single reaction from a SMILES string
 bin/rph_run --smiles "C=C(C)C(=O)O" --output ./Output/rx_manual
 
-# Specify reaction type for forward-scan (NEW)
+# Specify reaction type/profile
 bin/rph_run --smiles "C=C(C)C(=O)O" --reaction-type "[4+3]_default" --output ./Output/rx_4p3
 ```
 
 Supported reaction types:
 - `[5+2]_default` - 5+2 cycloaddition (retro_scan, default)
-- `[4+3]_default` - 4+3 cycloaddition (forward_scan)
-- `[4+2]_default` - Diels-Alder (forward_scan)
-- `[3+2]_default` - 1,3-dipolar cycloaddition (forward_scan)
+- `[4+3]_default` - 4+3 cycloaddition (retro_scan)
+- `[4+2]_default` - Diels-Alder (retro_scan)
+- `[3+2]_default` - 1,3-dipolar cycloaddition (retro_scan)
 
 `rx_id` comes from the config (`run.single.rx_id`) or from the dataset id column.
 
@@ -192,7 +185,8 @@ result = hunter.run_pipeline(
 )
 
 if result.success:
-    print(f"OK: {result.features_csv}")
+    print(f"OK: pipeline completed (S3 outputs in {result.work_dir})")
+    print(f"Run RPH_Postprocess for feature extraction")
 else:
     print(f"Failed: {result.error_message}")
 ```
@@ -203,7 +197,7 @@ else:
 
 ### Architecture overview
 
-ReactionProfileHunter uses a sequential four-step pipeline:
+ReactionProfileHunter uses a sequential three-step DFT pipeline (S1-S3). Feature extraction (S4) runs as an external post-processing step via RPH_Postprocess:
 
 ```
 S1: Anchor/conformer search
@@ -212,18 +206,18 @@ S2: Retro scan
     -> (ts_guess.xyz, reactant_complex.xyz)
 S3: TS optimization/rescue
     -> (ts_final.xyz, reactant_opt/, NBO artifacts)
-S4: Feature extraction and packaging
-    -> (features_raw.csv, features_mlr.csv, feature_meta.json)
 ```
+
+**S4 (external):** See [RPH_Postprocess](https://github.com/yourusername/RPH_Postprocess) for feature extraction and packaging.
 
 #### Step breakdown
 
 | Step | Purpose | Core modules | Key outputs |
 |------|--------|--------------|-------------|
 | S1 | Build 3D structure from SMILES; conformer search; DFT optimization | `steps/anchor/`, `steps/conformer_search/` | `product_min.xyz`, `precursor_min.xyz` |
-| S2 | Retro/Forward scan from products; TS guess; reactant complex | `steps/step2_retro/` (retro_scan or forward_scan) | `ts_guess.xyz`, `reactant_complex.xyz` |
+| S2 | Retro scan from products; TS guess; reactant complex | `steps/step2_retro/` (retro_scan) | `ts_guess.xyz`, `reactant_complex.xyz` |
 | S3 | TS optimization and frequency analysis; reactant optimization; rescue strategies | `steps/step3_opt/` | `ts_final.xyz`, `reactant_opt/` |
-| S4 | Energy extraction; geometric features; NBO/FMO analysis | `steps/step4_features/` | `features_raw.csv`, `feature_meta.json` |
+| S4 | (External) Energy extraction; geometric features; NBO/FMO analysis | RPH_Postprocess/rph_features/ | `features_raw.csv`, `feature_meta.json` |
 
 ### Inputs and outputs
 
@@ -247,13 +241,13 @@ S4: Feature extraction and packaging
 - `S3_TS/reactant_sp.xyz` - optimized reactant geometry
 - `S3_TS/reactant_opt/standard/` or `S3_TS/reactant_opt/rescue/` - OPT+Freq run directory
 
-**S4 outputs (required)**
+**S4 outputs (external - produced by RPH_Postprocess)**
 - `S4_Data/features_raw.csv` - raw features
 - `S4_Data/features_mlr.csv` - ML-ready features
 - `S4_Data/feature_meta.json` - feature metadata (version, provenance)
 
 **S4 optional outputs (NBO)**
-- `S4_Data/qc_nbo.37` - NBO file (if found in S3)
+- `S4_Data/qc_nbo.37` - NBO file (collected from S3 artifacts by RPH_Postprocess)
 
 #### Example output tree
 
@@ -275,13 +269,27 @@ Output/rx_001/
 │           ├── input.gjf
 │           ├── output.log
 │           └── *.fchk
-├── S4_Data/
-│   ├── features_raw.csv
-│   ├── features_mlr.csv
-│   ├── feature_meta.json
-│   └── qc_nbo.37
 └── rph.log
 ```
+
+The `S4_Data/` directory (with features and NBO files) is produced by running RPH_Postprocess on this output tree.
+
+### Feature extraction (external)
+
+Feature extraction (S4) is no longer part of the core RPH pipeline. It is handled by the companion [RPH_Postprocess](https://github.com/yourusername/RPH_Postprocess) package.
+
+Run it after RPH completes:
+
+```bash
+rph-features extract --rph-run ./Output/rx_001 --output ./Output/rx_001/S4_Data
+```
+
+RPH_Postprocess consumes the S3 artifacts from RPH and produces:
+- `features_raw.csv` - all extracted features
+- `features_mlr.csv` - ML-ready feature matrix
+- `feature_meta.json` - provenance and config metadata
+
+The separation keeps RPH focused on DFT computation while RPH_Postprocess handles all post-hoc analysis, including geometric descriptors, NBO/FMO analysis, CDFT metrics, and ML dataset building.
 
 ### Configuration guide
 
@@ -324,7 +332,7 @@ resources:
 reaction_profiles:
   "[4+3]_default":
     forming_bond_count: 2
-    s2_strategy: forward_scan       # Use xTB $scan
+    s2_strategy: retro_scan         # Use Step2 retro scan
     scan:
       scan_start_distance: 1.8      # Initial bond distance (Å)
       scan_end_distance: 3.2       # Final bond distance (Å)
@@ -334,7 +342,7 @@ reaction_profiles:
 
   "[4+2]_default":
     forming_bond_count: 2
-    s2_strategy: forward_scan
+    s2_strategy: retro_scan
     scan:
       scan_start_distance: 2.0
       scan_end_distance: 3.5
@@ -346,7 +354,7 @@ reaction_profiles:
 
   "_universal":
     forming_bond_count: 2
-    s2_strategy: forward_scan
+    s2_strategy: retro_scan
     scan:
       scan_start_distance: 2.2
       scan_end_distance: 3.5
@@ -456,14 +464,13 @@ step3:
     enable_nbo: true
 ```
 
-NBO file collection rules:
+NBO file collection rules (used by RPH_Postprocess):
 - Search in `S3_TS` subdirectories:
   - `nbo_analysis/`
   - `nbo/`
   - `reactant_opt/standard/`
   - `reactant_opt/rescue/`
 - Recognized extensions: `*.37`, `*.nbo`, `*.nbo7`
-- Copy to `S4_Data/qc_nbo.37` (normalized name)
 
 ---
 
@@ -475,23 +482,16 @@ NBO file collection rules:
 pytest -v tests/
 
 # Single test file
-pytest tests/test_s4_no_qc_execution.py -v
+pytest tests/test_step1_protocol_contract.py -v
 
-# Single test function
-pytest tests/test_s4_no_qc_execution.py::test_extractor_degrades_gracefully -v
-
-# Fast CI gate (import smoke + no-QC tests)
-pytest tests/test_imports_step4_features.py tests/test_s4_no_qc_execution.py -v
-
-# S4 contract tests only
-pytest tests/test_s4_*.py tests/test_m2_*.py tests/test_m4_*.py -v
-
-# V2.1.0 closure gate (protocol + chain + S4)
-pytest tests/test_step1_protocol_contract.py tests/test_phase3c_chain_lite_zero.py tests/test_s4_v62_final_verification.py -v
+# DFT pipeline tests (S0-S3)
+pytest tests/test_s0_*.py tests/test_s1_*.py tests/test_s2_*.py tests/test_s3_*.py -v
 
 # With coverage
 pytest --cov=rph_core --cov-report=html
 ```
+
+S4 feature extraction tests are now in [RPH_Postprocess/tests/](https://github.com/yourusername/RPH_Postprocess).
 
 ### Import Style Check (CI Gate)
 ```bash
@@ -617,7 +617,7 @@ If you use ReactionProfileHunter in research, please cite:
   author = {Your Name},
   year = {2025},
   url = {https://github.com/yourusername/ReactionProfileHunter},
-  version = {2.1.0}
+  version = {3.0.0}
 }
 ```
 

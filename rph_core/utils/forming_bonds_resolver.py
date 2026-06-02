@@ -1,4 +1,15 @@
 """
+Forming Bonds Resolution — Single Source of Truth
+=================================================
+Source chain (in priority order):
+1. S2_Retro output → forming_bonds in mechanism_meta.json
+2. S3_TS/mechanism_meta.json → preserved from S2
+3. package_manifest.json → persisted forming_bonds
+4. Legacy fallback: config/SMARTS auto-detection
+
+Consumers (rph_features) MUST read from manifest first.
+Only re-compute if manifest is missing (legacy fallback).
+
 Forming bonds resolver
 ======================
 

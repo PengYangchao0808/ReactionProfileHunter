@@ -3,18 +3,22 @@ Checkpoint Manager - 断点续传支持
 ====================================
 
 管理Reaction Profile Hunter的断点续传功能
+P0/P1: atomic write, file locks, provenance rehydrate
 
 Author: QCcalc Team
-Date: 2026-01-10
+Date: 2026-01-10 / Updated 2026-05
 """
 
 import json
 import logging
+import os
+import time
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 
+from rph_core.utils.json_io import write_json as atomic_write_json
 from rph_core.utils.layout_contract import (
     canonical_output_files,
     check_step_minimal_complete,
@@ -25,6 +29,59 @@ from rph_core.utils.layout_contract import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class FileRunLock:
+    def __init__(self, lock_path: Path, stale_after_sec: int = 21600):
+        self.lock_path = Path(lock_path)
+        self.stale_after_sec = stale_after_sec
+        self._owned = False
+
+    def acquire(self) -> bool:
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.lock_path.exists():
+            if self._is_stale():
+                stale_path = self.lock_path.with_suffix(
+                    self.lock_path.suffix + f".stale.{int(time.time())}"
+                )
+                self.lock_path.rename(stale_path)
+                logger.warning("Stale lock replaced: %s -> %s", self.lock_path.name, stale_path.name)
+            else:
+                return False
+        try:
+            fd = os.open(str(self.lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w") as f:
+                json.dump({"pid": os.getpid(), "started_at": datetime.now().isoformat()}, f)
+            self._owned = True
+            return True
+        except FileExistsError:
+            return False
+
+    def release(self):
+        if not self._owned:
+            return
+        try:
+            if self.lock_path.exists():
+                self.lock_path.unlink()
+        except OSError:
+            pass
+        self._owned = False
+
+    def _is_stale(self) -> bool:
+        try:
+            mtime = self.lock_path.stat().st_mtime
+            return time.time() - mtime > self.stale_after_sec
+        except OSError:
+            return True
+
+    def __enter__(self):
+        if not self.acquire():
+            raise RuntimeError(f"Could not acquire lock: {self.lock_path}")
+        return self
+
+    def __exit__(self, *args):
+        self.release()
+        return False
 
 
 @dataclass
@@ -87,18 +144,42 @@ class CheckpointManager:
     """
 
     STATE_FILENAME = "pipeline.state"
+    PROVENANCE_S2_FILENAME = "step2_provenance.json"
+    PROVENANCE_S3_FILENAME = "step3_provenance.json"
 
     def __init__(self, work_dir: Path):
-        """
-        初始化Checkpoint管理器
-
-        Args:
-            work_dir: 工作目录
-        """
         self.work_dir = Path(work_dir)
         self.state_file = self.work_dir / self.STATE_FILENAME
+        self._state_lock_path = self.work_dir / f".{self.STATE_FILENAME}.lock"
+        self._run_lock_path = self.work_dir / ".rph_run.lock"
+        self._run_lock: Optional[FileRunLock] = None
 
         self.logger = logging.getLogger(f"{__name__}[{work_dir.name}]")
+
+    @property
+    def provenance_s2_path(self) -> Path:
+        return resolve_step_dir(self.work_dir, "s2") / self.PROVENANCE_S2_FILENAME
+
+    @property
+    def provenance_s3_path(self) -> Path:
+        return resolve_step_dir(self.work_dir, "s3") / self.PROVENANCE_S3_FILENAME
+
+    def acquire_run_lock(self) -> bool:
+        if self._run_lock is None:
+            self._run_lock = FileRunLock(self._run_lock_path)
+        return self._run_lock.acquire()
+
+    def release_run_lock(self):
+        if self._run_lock is not None:
+            self._run_lock.release()
+            self._run_lock = None
+
+    def _locked_update(self, updater):
+        with FileRunLock(self._state_lock_path, stale_after_sec=300):
+            state = self.load_state()
+            new_state = updater(state)
+            self.save_state(new_state)
+            return new_state
 
     def _ensure_seeded_steps(self, state: PipelineState) -> None:
         seeded = seed_steps_template()
@@ -113,18 +194,9 @@ class CheckpointManager:
                 )
 
     def save_state(self, state: PipelineState):
-        """
-        保存pipeline状态
-
-        Args:
-            state: PipelineState对象
-        """
         state.last_update = datetime.now().isoformat()
-
-        with open(self.state_file, 'w', encoding='utf-8') as f:
-            json.dump(state.to_dict(), f, indent=2, ensure_ascii=False)
-
-        self.logger.debug(f"✓ 状态已保存: {self.state_file}")
+        atomic_write_json(self.state_file, state.to_dict())
+        self.logger.debug("✓ 状态已保存: %s", self.state_file)
 
     def load_state(self) -> Optional[PipelineState]:
         """
@@ -272,6 +344,7 @@ class CheckpointManager:
         - theory.optimization: engine, method, basis, dispersion, route, rescue_route, nproc, mem
         - theory.single_point: engine, method, basis, aux_basis, solvent, nproc, maxcore
         - step3.reactant_opt: charge, multiplicity, enable_nbo (TSOptimizer 实际使用的配置)
+        - step3 TS rescue policy and Gaussian TS keywords
         - version: rph_core version
         """
         from rph_core.version import __version__
@@ -308,6 +381,14 @@ class CheckpointManager:
                 'charge': reactant_opt.get('charge', 0),
                 'multiplicity': reactant_opt.get('multiplicity', 1),
                 'enable_nbo': reactant_opt.get('enable_nbo', False),
+            },
+            'step3_ts_rescue': {
+                'gaussian_keywords': {
+                    'berny': step3_cfg.get('gaussian_keywords', {}).get('berny', ''),
+                    'ts_rescue': step3_cfg.get('gaussian_keywords', {}).get('ts_rescue', ''),
+                },
+                'disable_qst2_rescue': step3_cfg.get('disable_qst2_rescue', True),
+                'policy': step3_cfg.get('ts_rescue_policy', {}),
             }
         }
 
@@ -327,11 +408,17 @@ class CheckpointManager:
         if scan_config:
             scan_cfg.update(scan_config)
 
-        path_search_cfg = step2_cfg.get("path_search", {})
+        path_search_cfg = step2_cfg.get("path_search", {}) or {}
+        if path_search_cfg.get("enabled") is True:
+            path_search_mode = "always"
+        elif path_search_cfg.get("enabled") is False:
+            path_search_mode = "never"
+        else:
+            path_search_mode = str(path_search_cfg.get("mode", "rescue")).strip().lower()
         reaction_profiles = config.get("reaction_profiles", {}) or {}
         profile_cfg = reaction_profiles.get(str(reaction_profile), {}) if reaction_profile else {}
 
-        canonical_bonds = sorted((min(i, j), max(i, j)) for i, j in forming_bonds)
+        canonical_bonds = sorted((min(int(i), int(j)), max(int(i), int(j))) for i, j in forming_bonds)
         product_hash = self.compute_file_hash(product_xyz) or ""
 
         return {
@@ -351,7 +438,7 @@ class CheckpointManager:
                 "require_local_peak": scan_cfg.get("require_local_peak"),
             },
             "path_search": {
-                "enabled": path_search_cfg.get("enabled", False),
+                "mode": path_search_mode,
             },
         }
 
@@ -377,16 +464,98 @@ class CheckpointManager:
             self.logger.debug(f"Failed to compute hash for {file_path}: {e}")
             return None
 
+    def _rehydrate_from_provenance(
+        self,
+        product_smiles: str,
+        config: Dict[str, Any],
+    ) -> Optional[PipelineState]:
+        s2_prov = self._load_provenance(self.provenance_s2_path)
+        s3_prov = self._load_provenance(self.provenance_s3_path)
+
+        now = datetime.now().isoformat()
+        state = PipelineState(
+            product_smiles=product_smiles,
+            work_dir=str(self.work_dir),
+            start_time=now,
+            last_update=now,
+            steps={},
+            config_snapshot=config,
+        )
+        self._ensure_seeded_steps(state)
+
+        s2_complete = bool(s2_prov and check_step_minimal_complete(self.work_dir, "s2", config))
+        s3_complete = bool(s3_prov and check_step_minimal_complete(self.work_dir, "s3", config))
+        s4_path = resolve_step_dir(self.work_dir, "s4") / "features_raw.csv"
+
+        if s2_complete:
+            outputs = canonical_output_files(self.work_dir, "s2")
+            s2_prov_data = s2_prov or {}
+            meta = dict(s2_prov_data.get("metadata", {}) or {})
+            meta["step2_signature"] = s2_prov_data.get("step2_signature")
+            meta["forming_bonds"] = s2_prov_data.get("forming_bonds")
+            meta["_rehydrate_source"] = self.PROVENANCE_S2_FILENAME
+            state.steps["step_s2"] = StepCheckpoint(
+                step_name="s2", completed=True, timestamp=now,
+                output_files=outputs, metadata=meta,
+            )
+            self.logger.info("  ✓ 从 provenance 回填 Step2")
+
+        if s3_complete:
+            outputs = canonical_output_files(self.work_dir, "s3")
+            s3_prov_data = s3_prov or {}
+            meta = dict(s3_prov_data.get("metadata", {}) or {})
+            meta["step3_signature"] = s3_prov_data.get("step3_signature")
+            meta["input_hashes"] = s3_prov_data.get("input_hashes")
+            meta["upstream_step2_signature"] = s3_prov_data.get("upstream_step2_signature")
+            meta["_rehydrate_source"] = self.PROVENANCE_S3_FILENAME
+            state.steps["step_s3"] = StepCheckpoint(
+                step_name="s3", completed=True, timestamp=now,
+                output_files=outputs, metadata=meta,
+            )
+            self.logger.info("  ✓ 从 provenance 回填 Step3")
+
+        if s4_path.exists() and s4_path.stat().st_size > 0:
+            outputs = canonical_output_files(self.work_dir, "s4")
+            state.steps["step_s4"] = StepCheckpoint(
+                step_name="s4", completed=True, timestamp=now,
+                output_files=outputs, metadata={"_rehydrate_source": "features_raw.csv"},
+            )
+            self.logger.info("  ✓ 回填 Step4 (features_raw.csv)")
+
+        completed_any = s2_complete or s3_complete or (s4_path.exists() and s4_path.stat().st_size > 0)
+        if not completed_any:
+            return None
+
+        self.logger.info("✓ 从 provenance 精确恢复状态完成")
+        return state
+
+    @staticmethod
+    def _load_provenance(path: Path) -> Optional[Dict[str, Any]]:
+        if not path.exists():
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+
     def rehydrate_state_from_artifacts(
         self,
         product_smiles: str,
         config: Dict[str, Any],
         policy: str = "best_effort"
     ) -> Optional[PipelineState]:
-        """
-        V6.3: Reconstruct pipeline.state from existing artifact files.
-        """
-        self.logger.info(f"正在从物理产物回填状态 (Policy: {policy})...")
+        # P0-3: Provenance-first recovery
+        prov_state = self._rehydrate_from_provenance(product_smiles, config)
+        if prov_state is not None:
+            self.save_state(prov_state)
+            return prov_state
+
+        if policy != "best_effort":
+            return None
+
+        self.logger.info("Provenance 文件缺失，降级到 best-effort artifact scan...")
+        self.logger.info("正在从物理产物回填状态 (Policy: %s)...", policy)
 
         state = PipelineState(
             product_smiles=product_smiles,
@@ -512,33 +681,20 @@ class CheckpointManager:
         output_files: Dict[str, str],
         metadata: Optional[Dict[str, Any]] = None
     ):
-        """
-        标记步骤为已完成
-
-        Args:
-            step_name: 步骤名称 (s1, s2, s3, s4)
-            output_files: 输出文件字典
-            metadata: 额外的元数据
-        """
-        # 加载现有状态
-        state = self.load_state()
-
-        if state is None:
-            self.logger.warning("状态文件不存在，无法标记步骤")
-            return
-
-        # 更新步骤状态
-        step_key = f"step_{step_name}"
-        state.steps[step_key] = StepCheckpoint(
-            step_name=step_name,
-            completed=True,
-            timestamp=datetime.now().isoformat(),
-            output_files=output_files,
-            metadata=metadata or {}
-        )
-
-        # 保存状态
-        self.save_state(state)
+        def _do(state):
+            if state is None:
+                self.logger.warning("状态文件不存在，无法标记步骤")
+                return state
+            step_key = f"step_{step_name}"
+            state.steps[step_key] = StepCheckpoint(
+                step_name=step_name,
+                completed=True,
+                timestamp=datetime.now().isoformat(),
+                output_files=output_files,
+                metadata=metadata or {}
+            )
+            return state
+        self._locked_update(_do)
 
     def mark_step_in_progress(
         self,
@@ -547,30 +703,30 @@ class CheckpointManager:
         output_files: Optional[Dict[str, str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        state = self.load_state()
-        if state is None:
-            now = datetime.now().isoformat()
-            state = PipelineState(
-                product_smiles="",
-                work_dir=str(self.work_dir),
-                start_time=now,
-                last_update=now,
-                steps={},
-                config_snapshot={},
+        def _do(state):
+            if state is None:
+                now = datetime.now().isoformat()
+                state = PipelineState(
+                    product_smiles="",
+                    work_dir=str(self.work_dir),
+                    start_time=now,
+                    last_update=now,
+                    steps={},
+                    config_snapshot={},
+                )
+            self._ensure_seeded_steps(state)
+            step_key = f"step_{step_name}"
+            base_metadata = dict(metadata or {})
+            base_metadata["phase"] = phase
+            state.steps[step_key] = StepCheckpoint(
+                step_name=step_name,
+                completed=False,
+                timestamp=datetime.now().isoformat(),
+                output_files=output_files or {},
+                metadata=base_metadata,
             )
-
-        self._ensure_seeded_steps(state)
-        step_key = f"step_{step_name}"
-        base_metadata = dict(metadata or {})
-        base_metadata["phase"] = phase
-        state.steps[step_key] = StepCheckpoint(
-            step_name=step_name,
-            completed=False,
-            timestamp=datetime.now().isoformat(),
-            output_files=output_files or {},
-            metadata=base_metadata,
-        )
-        self.save_state(state)
+            return state
+        self._locked_update(_do)
 
     def mark_step_failed_partial(
         self,
@@ -621,32 +777,26 @@ class CheckpointManager:
         return metadata.get(meta_key)
 
     def initialize_state(self, product_smiles: str, config: Dict[str, Any]):
-        """
-        初始化pipeline状态
-
-        Args:
-            product_smiles: 产物SMILES
-            config: 配置字典
-        """
-        state = PipelineState(
-            product_smiles=product_smiles,
-            work_dir=str(self.work_dir),
-            start_time=datetime.now().isoformat(),
-            last_update=datetime.now().isoformat(),
-            steps={
-                "step_s0": StepCheckpoint("s0", False, "", {}),
-                "step_s1": StepCheckpoint("s1", False, "", {}),
-                "step_s2": StepCheckpoint("s2", False, "", {}),
-                "step_s3": StepCheckpoint("s3", False, "", {}),
-                "step_s4": StepCheckpoint("s4", False, "", {})
-            },
-            config_snapshot=config
-        )
-
-        self._ensure_seeded_steps(state)
-
-        self.save_state(state)
-        self.logger.info("✓ Pipeline状态已初始化")
+        def _do(_state):
+            state = PipelineState(
+                product_smiles=product_smiles,
+                work_dir=str(self.work_dir),
+                start_time=datetime.now().isoformat(),
+                last_update=datetime.now().isoformat(),
+                steps={
+                    "step_s0": StepCheckpoint("s0", False, "", {}),
+                    "step_s1": StepCheckpoint("s1", False, "", {}),
+                    "step_s2": StepCheckpoint("s2", False, "", {}),
+                    "step_s3": StepCheckpoint("s3", False, "", {}),
+                    "step_s4": StepCheckpoint("s4", False, "", {})
+                },
+                config_snapshot=config
+            )
+            self._ensure_seeded_steps(state)
+            self.save_state(state)
+            self.logger.info("✓ Pipeline状态已初始化")
+            return state
+        self._locked_update(_do)
 
 
 def load_checkpoint_state(work_dir: Path) -> Optional[PipelineState]:

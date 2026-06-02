@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from rph_core.steps.step4_features.mech_packager import (
+from rph_features.mech_packager import (
     _build_mech_index,
     migrate_mech_index,
     is_mech_index_up_to_date,

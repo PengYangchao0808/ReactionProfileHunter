@@ -548,33 +548,41 @@ class MultiwfnRunner:
             result.warnings.append(W_MULTIWFN_DISABLED)
             return result
 
-        # Run enabled modules
+        # Run enabled modules — per-atom for Fukui and dual descriptor
         try:
-            # Fukui analysis
+            # Fukui analysis per atom (run separately for A and B)
             if self.enabled_modules.get("fukui", False):
-                fukui_result, fukui_warnings = self.run_fukui_analysis(
-                    input_file, atom_a, atom_b
-                )
-                if fukui_result:
-                    result.fukui_fplus_a = fukui_result.get('fukui_fplus')
-                    result.fukui_fplus_b = fukui_result.get('fukui_fplus')
-                    result.fukui_fminus_a = fukui_result.get('fukui_fminus')
-                    result.fukui_fminus_b = fukui_result.get('fukui_fminus')
-                    result.fukui_f0_a = fukui_result.get('fukui_f0')
-                    result.fukui_f0_b = fukui_result.get('fukui_f0')
+                fukui_warnings: List[str] = []
+                # Run for atom_a only (pass atom_a as both args)
+                res_a, wa = self.run_fukui_analysis(input_file, atom_a, atom_a)
+                if res_a:
+                    result.fukui_fplus_a = res_a.get('fukui_fplus')
+                    result.fukui_fminus_a = res_a.get('fukui_fminus')
+                    result.fukui_f0_a = res_a.get('fukui_f0')
+                fukui_warnings.extend(wa)
+                # Run for atom_b only (pass atom_b as both args)
+                res_b, wb = self.run_fukui_analysis(input_file, atom_b, atom_b)
+                if res_b:
+                    result.fukui_fplus_b = res_b.get('fukui_fplus')
+                    result.fukui_fminus_b = res_b.get('fukui_fminus')
+                    result.fukui_f0_b = res_b.get('fukui_f0')
+                fukui_warnings.extend(wb)
                 result.warnings.extend(fukui_warnings)
 
-            # Dual descriptor analysis
+            # Dual descriptor analysis per atom
             if self.enabled_modules.get("dual_descriptor", False):
-                dd_result, dd_warnings = self.run_dual_descriptor_analysis(
-                    input_file, atom_a, atom_b
-                )
-                if dd_result is not None:
-                    result.dual_descriptor_a = dd_result
-                    result.dual_descriptor_b = dd_result
+                dd_warnings: List[str] = []
+                dd_a, wa = self.run_dual_descriptor_analysis(input_file, atom_a, atom_a)
+                if dd_a is not None:
+                    result.dual_descriptor_a = dd_a
+                dd_warnings.extend(wa)
+                dd_b, wb = self.run_dual_descriptor_analysis(input_file, atom_b, atom_b)
+                if dd_b is not None:
+                    result.dual_descriptor_b = dd_b
+                dd_warnings.extend(wb)
                 result.warnings.extend(dd_warnings)
 
-            # QTAIM BCP analysis
+            # QTAIM BCP analysis (bond between atom_a and atom_b — keep combined)
             if self.enabled_modules.get("qtaim_bcp", False):
                 qtaim_result, qtaim_warnings = self.run_qtaim_bcp_analysis(
                     input_file, atom_a, atom_b

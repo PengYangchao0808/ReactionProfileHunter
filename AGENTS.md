@@ -3,7 +3,9 @@
 **Project**: ReactionProfileHunter  
 **Language**: Python 3.8+  
 **Lines**: ~54k Python (212 .py files), 723 total files  
-**Purpose**: Product-driven reaction mechanism pipeline (S1→S4)
+**Purpose**: Product-driven DFT reaction mechanism pipeline (S0-S3); S4 feature extraction moved to [RPH_Postprocess](https://github.com/yourusername/RPH_Postprocess)
+
+> **DFT/ML split:** RPH handles DFT computation (S0-S3: conformer search, TS search, optimization). Feature extraction (S4) and ML training have moved to separate repos: RPH_Postprocess for features, Training/ for ML pipelines.
 
 ---
 
@@ -12,7 +14,7 @@
 | Task | Location | Notes |
 |------|----------|-------|
 | Add a new pipeline step | `rph_core/orchestrator.py` + `steps/runners.py` | Wire in `run_pipeline()`, add to checkpoint |
-| Add a new feature extractor | `rph_core/steps/step4_features/extractors/` | Subclass `BaseExtractor`, call `register_extractor()` |
+| Add a new feature extractor | Moved to RPH_Postprocess/rph_features/ | Subclass `BaseExtractor` in RPH_Postprocess |
 | Change QC theory level | `config/defaults.yaml` | Never hardcode — single source of truth |
 | Fix a path handling bug | `rph_core/utils/path_compat.py` | `normalize_path()` + `is_toxic_path()` |
 | Add a new Gaussian template | `config/templates/*.gjf` | Read at runtime, never hardcode |
@@ -25,33 +27,37 @@
 ## PIPELINE FLOW
 
 ```
-SMILES → S0 (classify) → S1 (anchor) → S2 (scan) → S3 (TS opt) → S4 (features)
-         mechanism_       product_      ts_guess     ts_final      features_raw.csv
-         summary.json     min.xyz       intermediate  sp_report     features_mlr.csv
-                                        .xyz                        feature_meta.json
+SMILES → S0 (classify) → S1 (anchor) → S2 (scan) → S3 (TS opt)
+         mechanism_       product_      ts_guess     ts_final
+         summary.json     min.xyz       intermediate  sp_report
+                                         .xyz
+                                       
+                                       ──→ S4 (external) → features_raw.csv
+                                                            features_mlr.csv
+                                                            feature_meta.json
 ```
 
 **Inter-step handoffs** (orchestrator wires these):
 - S0→S1: `mechanism_summary.json` (forming_bonds, reaction_type)
 - S1→S2: `product_min.xyz` (Path), `e_sp` (float), fchk/log/thermo
 - S2→S3: `ts_guess.xyz`, `intermediate.xyz`, forming_bonds indices
-- S3→S4 (via orchestrator): `ts_final.xyz`, SPMatrixReport, fchk/log, forming_bonds metadata
-- Forming bonds resolution runs **between S3 and S4** in orchestrator — not inside either step
+- S3 artifacts consumed by RPH_Postprocess for S4 feature extraction
+- Forming bonds metadata is written to `pipeline.state` for external consumption
 
 ## CODE MAP (Top Symbols)
 
 | Symbol | Type | Location | Role |
 |--------|------|----------|------|
-| `ReactionProfileHunter` | Class | `rph_core/orchestrator.py:86` | Pipeline orchestrator; owns S0-S4 engines + CheckpointManager |
+| `ReactionProfileHunter` | Class | `rph_core/orchestrator.py:86` | Pipeline orchestrator; owns S0-S3 engines + CheckpointManager |
 | `PipelineResult` | Dataclass | `rph_core/orchestrator.py:39` | Carries all stage artifacts through pipeline |
 | `ConformerEngine` | Class (LoggerMixin) | `rph_core/steps/conformer_search/engine.py:64` | UCE v3.1 two-stage conformer search |
 | `TSOptimizer` | Class (LoggerMixin) | `rph_core/steps/step3_opt/ts_optimizer.py:220` | Berny + QST2 rescue + IRC + validation |
-| `BaseExtractor` | ABC | `rph_core/steps/step4_features/extractors/base.py:40` | Plugin interface; 14 subclasses |
+| `BaseExtractor` | ABC | Moved to RPH_Postprocess/rph_features/extractors/base.py | Plugin interface; now in RPH_Postprocess |
 | `CheckpointManager` | Class | `rph_core/utils/checkpoint_manager.py` | Hash-validated step resume |
 | `LinuxSandbox` | Class | `rph_core/utils/qc_interface.py:671` | Context manager for safe QC execution |
 | `TaskKind` | Enum | `rph_core/utils/qc_interface.py:161` | OPTIMIZATION/SP/FREQ/TS/IRC/NBO/SCAN |
 | `MechanismGraph` | Dataclass | `rph_core/steps/mechanism_classifier/models.py:137` | Graph-based reaction classification |
-| `FeatureMiner` | Class | `rph_core/steps/step4_features/feature_miner.py:31` | Discovers plugins, builds context, runs extractors |
+| `FeatureMiner` | Class | Moved to RPH_Postprocess/rph_features/feature_miner.py | Discover plugins, build context, run extractors |
 
 ---
 
@@ -77,6 +83,8 @@ pytest tests/test_s4_*.py tests/test_m2_*.py tests/test_m4_*.py -v
 # With coverage
 pytest --cov=rph_core --cov-report=html
 ```
+
+> Note: S4 test files still in this repo test legacy extraction code. New S4 feature extraction tests are in [RPH_Postprocess/tests/](https://github.com/yourusername/RPH_Postprocess).
 
 ### Import Style Check (MANDATORY CI Gate)
 ```bash
@@ -145,8 +153,9 @@ python -m rph_core --smiles "C=C(C)C(=O)O" --output ./Output/rx_001
 - **NEVER fork `defaults.yaml`** — single source of truth (`.bak` files are frozen)
 - **Templates**: read at runtime from `config/templates/` — never hardcode in Python
 
-### S4 Extractor Plugins
-- **Subclass `BaseExtractor`** and implement required methods
+### S4 Extractor Plugins (Moved to RPH_Postprocess)
+- S4 feature extraction code has been moved to [RPH_Postprocess](https://github.com/yourusername/RPH_Postprocess)/rph_features/
+- **Subclass `BaseExtractor`** and implement required methods (in RPH_Postprocess)
 - **Call `register_extractor()`** at module level for discovery
 - **Return `FeatureResultStatus`** (COMPLETE / DEGRADED / FAILED)
 - **Missing data → degrade with NaN + warning** — never skip silently
@@ -158,10 +167,7 @@ python -m rph_core --smiles "C=C(C)C(=O)O" --output ./Output/rx_001
 ```
 rph_core/              # Core source — absolute imports only
 ├── orchestrator.py    # Main pipeline + CLI
-├── steps/             # S1-S4 implementations
-│   └── step4_features/
-│       ├── extractors/     # Plugin subclasses
-│       └── schema.py       # FIXED_COLUMNS contract
+├── steps/             # S1-S3 implementations
 └── utils/             # 41-file QC/IO/checkpoint infra
     ├── qc_interface.py     # ALL QC calls go here
     ├── config_loader.py    # defaults.yaml reader
@@ -181,7 +187,8 @@ scripts/               # Utility scripts
 ├── ci/
 │   └── check_imports.py   # Import style gate (exit 1 on violation)
 ├── run_g16_worker.sh  # Gaussian wrapper
-└── train_mlr_loocv.py # ML training script
+├── build_ml_dataset.py # ML dataset builder (single source of truth)
+└── train_yield_ml.py  # Stage 1 structured branch-yield training
 
 docs/                  # Supplementary documentation
 ```

@@ -27,6 +27,7 @@ from rph_core.steps.mechanism_classifier.models import (
 )
 from rph_core.steps.mechanism_classifier.clean_adapter import CleanAdapter, CleanRecord
 from rph_core.steps.mechanism_classifier.graph_builder import GraphBuilder
+from rph_core.steps.mechanism_classifier.dr_completion import build_dr_branch_plan
 
 __all__ = [
     "MechanismClassifier",
@@ -39,4 +40,5 @@ __all__ = [
     "CleanAdapter",
     "CleanRecord",
     "GraphBuilder",
+    "build_dr_branch_plan",
 ]

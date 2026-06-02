@@ -9,4 +9,4 @@ Version Scheme: Semantic Versioning (MAJOR.MINOR.PATCH)
 See VERSION_GUIDE.md for detailed version management policy.
 """
 
-__version__ = "2.1.0"
+__version__ = "3.0.0"

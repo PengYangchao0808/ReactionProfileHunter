@@ -124,12 +124,13 @@ step4:
 
 # ==================== 运行配置 ====================
 run:
-  source: single
-  single:
-    product_smiles: "O=C1C[C@H]2C=C[C@]3(C[C@H]4COC(=O)N4[C@H]13)O2"
-    rx_id: "rx_9422028"
-    precursor_smiles: "C=C=CN1C(=O)OCC1Cc1ccco1"
-    leaving_group_key: null
+  source: dataset
+  dataset:
+    format: "csv"
+    path: "data/reaxys_cleaned.csv"
+    product_smiles_col: "product_smiles_main"
+    precursor_smiles_col: "precursor_smiles"
+    id_col: "rx_id"
   
   output_root: "./rph_output"
   resume: false  # 验证时从头开始
@@ -140,7 +141,7 @@ run:
 reaction_profiles:
   "[4+3]_default":
     forming_bond_count: 2
-    s2_strategy: forward_scan
+    s2_strategy: retro_scan
     scan:
       scan_start_distance: 1.8
       scan_end_distance: 3.2
@@ -150,7 +151,7 @@ reaction_profiles:
   
   "[4+2]_default":
     forming_bond_count: 2
-    s2_strategy: forward_scan
+    s2_strategy: retro_scan
     scan:
       scan_start_distance: 2.0
       scan_end_distance: 3.5

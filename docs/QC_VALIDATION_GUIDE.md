@@ -195,7 +195,7 @@ run:
 reaction_profiles:
   "[4+3]_default":
     forming_bond_count: 2
-    s2_strategy: forward_scan
+    s2_strategy: retro_scan
     scan:
       scan_start_distance: 1.8
       scan_end_distance: 3.2

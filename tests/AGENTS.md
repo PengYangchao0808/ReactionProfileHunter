@@ -1,7 +1,7 @@
 # tests/AGENTS.md
 
 ## OVERVIEW
-**53 pytest files** covering import smoke tests, unit tests (mocked QC), integration tests, S4 degrade/contract tests, and path-compat/sandbox tests. External QC binaries (Gaussian/ORCA/xTB/CREST) are NOT required for most tests.
+**52 pytest files** covering import smoke tests, unit tests (mocked QC), integration tests, S4 degrade/contract tests, and path-compat/sandbox tests. External QC binaries (Gaussian/ORCA/xTB/CREST) are NOT required for most tests.
 
 > **Refactoring Note (2026-03-11)**: 已从75个文件精简到53个，删除了16个冗余测试文件（主要是重复的formchk测试）。详见 `TEST_REFACTOR_REPORT.md`。
 
@@ -9,7 +9,7 @@
 | Category | Files | Notes |
 |----------|-------|-------|
 | **Import smoke (fast CI)** | `test_imports_step4_features.py` | Import-only; no QC required; run first |
-| **Forward scan wiring (NEW)** | `test_forward_scan_wiring.py`, `test_xtb_scan_input.py` | Profile routing, cleaner_data, scan params |
+| **S2 routing / scan inputs** | `test_step2_path_compat.py`, `test_xtb_scan_input.py` | retro_scan routing, cleaner_data, scan params |
 | **S4 extractor behavior** | `test_s4_extractor_degrade_behavior.py`, `test_s4_no_qc_execution.py`, `test_s4_meta_warnings_and_weights.py`, `test_s4_v62_final_verification.py` | No QC binaries needed |
 | **S4 contracts** | `test_s4_mech_packager.py`, `test_s4_artifact_integration.py`, `test_s4_gedt_labeling.py`, `test_s4_path_compat.py`, `test_step4_cache_key.py` | Schema/contract checks |
 | **S4 schema versioning** | `test_m2_schema_versioning.py`, `test_m2_step4_resume_semantics.py`, `test_m2_precursor_fallback.py` | |

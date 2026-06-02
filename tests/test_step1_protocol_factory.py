@@ -1,5 +1,8 @@
 import json
+import threading
+import time
 from pathlib import Path
+from typing import Any, Dict
 
 import pytest
 
@@ -8,7 +11,7 @@ from rph_core.steps.anchor.handler import AnchorPhase
 from rph_core.steps.conformer_search.protocols import resolve_protocol_spec
 
 
-def _minimal_config(protocol: str = "ext"):
+def _minimal_config(protocol: str = "ext") -> Dict[str, Any]:
     return {
         "step1": {
             "protocol": protocol,
@@ -278,6 +281,72 @@ def test_anchor_phase_protocol_zero_succeeds_in_phase3a(monkeypatch, tmp_path: P
     assert data["handoff"]["fallback_mode"] == "optimize_all_within_0p5_kcal"
     assert data["handoff"]["mode_requested"] == "optimize_rank1"
     assert data["handoff"]["mode_effective"] == "optimize_rank1"
+
+
+def test_anchor_phase_runs_molecules_in_parallel_when_enabled(monkeypatch, tmp_path: Path):
+    config = _minimal_config("lite")
+    config["intra_reaction_parallel"] = {
+        "enabled": True,
+        "total_cores": 16,
+        "total_mem": "52GB",
+        "s1": {
+            "molecule_parallel": True,
+            "max_molecule_workers": 2,
+            "crest_cores": 8,
+        },
+    }
+
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    class FakeEngine:
+        def __init__(self, work_dir: Path, molecule_name: str):
+            self.work_dir = work_dir
+            self.molecule_name = molecule_name
+            self.last_final_opt_sp_meta = {
+                "stage": "final_opt_sp",
+                "stage_status": "completed",
+                "enabled": True,
+                "protocol": "lite",
+                "selection_mode": "single_lowest_energy",
+                "selected_candidate_count": 1,
+                "freq_requested": True,
+                "final_sp_requested": True,
+            }
+
+        def run(self, smiles: str):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                time.sleep(0.05)
+                mol_dir = self.work_dir / self.molecule_name
+                dft_dir = mol_dir / "finalDFT"
+                dft_dir.mkdir(parents=True, exist_ok=True)
+                xyz = mol_dir / f"{self.molecule_name}_global_min.xyz"
+                xyz.write_text("3\nE=-2.000001\nC 0 0 0\nH 0 0 1\nH 0 1 0\n", encoding="utf-8")
+                return xyz, -2.000001
+            finally:
+                with lock:
+                    active -= 1
+
+        def run_optimization_only(self, smiles: str):
+            return self.run(smiles)
+
+    def fake_create_s1_engine(*, protocol, config, work_dir, molecule_name):
+        return FakeEngine(work_dir=work_dir, molecule_name=molecule_name)
+
+    monkeypatch.setattr("rph_core.steps.anchor.handler.is_small_molecule", lambda smiles, threshold: False)
+    monkeypatch.setattr("rph_core.steps.anchor.handler.create_s1_engine", fake_create_s1_engine)
+
+    anchor = AnchorPhase(config=config, base_work_dir=tmp_path)
+    result = anchor.run({"product": "C=C", "precursor": "CC=C"})
+
+    assert result.success is True
+    assert set(result.anchored_molecules) == {"product", "precursor"}
+    assert max_active == 2
 
 
 def test_resolve_protocol_spec_ext_and_default_use_compatible_semantics() -> None:

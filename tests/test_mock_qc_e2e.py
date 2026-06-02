@@ -1,7 +1,7 @@
 import pytest
 import importlib
 
-from rph_core.steps.step4_features.mech_packager import pack_mechanism_assets
+from rph_features.mech_packager import pack_mechanism_assets
 
 
 def test_pack_mechanism_assets_importable() -> None:

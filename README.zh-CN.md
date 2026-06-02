@@ -6,7 +6,7 @@
 
 **产物驱动的反应机理探索与特征提取工具**
 
-[![Version](https://img.shields.io/badge/version-6.2.0-blue.svg)](https://github.com/yourusername/ReactionProfileHunter)
+[![Version](https://img.shields.io/badge/version-3.0.0-blue.svg)](https://github.com/yourusername/ReactionProfileHunter)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Code Style](https://img.shields.io/badge/code%20style-agents%20ready-success.svg)](AGENTS.md)
@@ -141,15 +141,15 @@ ReactionProfileHunter (RPH) 是一个**产物驱动**的自动化反应机理探
 # 使用 SMILES 字符串运行单个反应
 bin/rph_run --smiles "C=C(C)C(=O)O" --output ./Output/rx_manual
 
-# 指定反应类型使用正向扫描 (NEW)
+# 指定反应类型/配置档
 bin/rph_run --smiles "C=C(C)C(=O)O" --reaction-type "[4+3]_default" --output ./Output/rx_4p3
 ```
 
 支持的反应类型：
 - `[5+2]_default` - 5+2 环加成 (retro_scan，默认)
-- `[4+3]_default` - 4+3 环加成 (forward_scan)
-- `[4+2]_default` - Diels-Alder 反应 (forward_scan)
-- `[3+2]_default` - 1,3-偶极环加成 (forward_scan)
+- `[4+3]_default` - 4+3 环加成 (retro_scan)
+- `[4+2]_default` - Diels-Alder 反应 (retro_scan)
+- `[3+2]_default` - 1,3-偶极环加成 (retro_scan)
 
 `rx_id` 来自配置（`run.single.rx_id`）或数据集的 ID 列。
 
@@ -215,7 +215,7 @@ S4: 特征提取与打包
 | 步骤 | 功能 | 核心模块 | 关键输出 |
 |------|------|----------|----------|
 | **S1** | 从 SMILES 生成 3D 结构<br>构象搜索<br>DFT 优化 | `steps/anchor/`<br>`steps/conformer_search/` | `product_min.xyz`<br>`precursor_min.xyz` |
-| **S2** | 逆向/正向扫描<br>生成 TS 初猜<br>识别反应物 | `steps/step2_retro/`<br>(retro_scan 或 forward_scan) | `ts_guess.xyz`<br>`reactant_complex.xyz` |
+| **S2** | 逆向扫描<br>生成 TS 初猜<br>识别反应物 | `steps/step2_retro/`<br>(retro_scan) | `ts_guess.xyz`<br>`reactant_complex.xyz` |
 | **S3** | TS 优化与频率分析<br>反应物优化<br>救援策略 | `steps/step3_opt/` | `ts_final.xyz`<br>`reactant_opt/` |
 | **S4** | 能量提取<br>几何特征计算<br>NBO/FMO 分析 | `steps/step4_features/` | `features_raw.csv`<br>`feature_meta.json` |
 
@@ -327,7 +327,7 @@ resources:
 reaction_profiles:
   "[4+3]_default":
     forming_bond_count: 2
-    s2_strategy: forward_scan       # 使用 xTB $scan
+    s2_strategy: retro_scan         # 使用 Step2 逆向扫描
     scan:
       scan_start_distance: 1.8      # 初始键长 (Å)
       scan_end_distance: 3.2       # 终止键长 (Å)
@@ -337,7 +337,7 @@ reaction_profiles:
 
   "[4+2]_default":
     forming_bond_count: 2
-    s2_strategy: forward_scan
+    s2_strategy: retro_scan
     scan:
       scan_start_distance: 2.0
       scan_end_distance: 3.5
@@ -349,7 +349,7 @@ reaction_profiles:
 
   "_universal":
     forming_bond_count: 2
-    s2_strategy: forward_scan
+    s2_strategy: retro_scan
     scan:
       scan_start_distance: 2.2
       scan_end_distance: 3.5
@@ -619,7 +619,7 @@ bin/rph_run --smiles "..." --log-level DEBUG
   author = {Your Name},
   year = {2024},
   url = {https://github.com/yourusername/ReactionProfileHunter},
-  version = {6.2.0}
+  version = {3.0.0}
 }
 ```
 

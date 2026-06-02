@@ -28,6 +28,7 @@ CONTRACTS: Dict[str, StepContract] = {
         {
             "mechanism_graph_json": "mechanism_graph.json",
             "mechanism_summary_json": "mechanism_summary.json",
+            "dr_branch_plan_json": "dr_branch_plan.json",
         },
     ),
     "s1": StepContract("s1", {"product_xyz": "product_min.xyz"}),

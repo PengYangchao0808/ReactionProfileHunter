@@ -32,6 +32,7 @@ import shutil
 import subprocess
 import json
 import math
+import threading
 import numpy as np
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
@@ -53,7 +54,6 @@ from rph_core.utils.qc_task_runner import QCTaskRunner
 from rph_core.utils.qc_runner import run_with_timeout, QCTimeoutError
 from rph_core.utils.optimization_config import build_gaussian_route_from_config
 from rph_core.utils.isostat_runner import run_isostat
-from rph_core.utils.shermo_runner import run_shermo
 from rph_core.utils.ui import get_progress_manager
 from rph_core.utils.constants import HARTREE_TO_KCAL
 from rph_core.steps.conformer_search.state_manager import ConformerStateManager
@@ -61,8 +61,16 @@ from rph_core.steps.conformer_search.candidates import CandidateSet, ConformerCa
 from rph_core.steps.conformer_search.pipeline.executor import PipelineExecutor
 from rph_core.steps.conformer_search.protocols import ProtocolSpec, resolve_protocol_spec
 
+from rph_core.utils.intra_reaction_scheduler import (
+    IntraReactionScheduler,
+    ParallelQCJob,
+    ResourceLane,
+    ParallelResult,
+)
+
 
 logger = logging.getLogger(__name__)
+_STATE_MANAGER_LOCK = threading.Lock()
 
 class ConformerEngine(LoggerMixin):
     """
@@ -126,9 +134,12 @@ class ConformerEngine(LoggerMixin):
         self.final_dft_dir = (self.molecule_dir / "finalDFT").resolve()
         self.prescan_dir = (self.molecule_dir / "prescan").resolve()
         self.fastsp_dir = (self.molecule_dir / "fastsp").resolve()
-        self.crest_dir.mkdir(exist_ok=True)
-        self.cluster_dir.mkdir(exist_ok=True)
-        self.final_dft_dir.mkdir(exist_ok=True)
+        self.crest_dir.mkdir(parents=True, exist_ok=True)
+        self.cluster_dir.mkdir(parents=True, exist_ok=True)
+        self.xtb_dir.mkdir(parents=True, exist_ok=True)
+        self.final_dft_dir.mkdir(parents=True, exist_ok=True)
+        self.prescan_dir.mkdir(parents=True, exist_ok=True)
+        self.fastsp_dir.mkdir(parents=True, exist_ok=True)
 
         self.dft_dir = self.final_dft_dir
         self.state_manager = ConformerStateManager(self.molecule_dir, self.molecule_name)
@@ -222,6 +233,9 @@ class ConformerEngine(LoggerMixin):
             solvent=self.theory_sp.get('solvent', 'acetone'),
             config=config
         )
+
+        # Intra-reaction parallel scheduler (P2)
+        self._parallel_scheduler = IntraReactionScheduler(config)
 
     def _display_path(self, path: Path) -> str:
         path = Path(path)
@@ -348,6 +362,9 @@ class ConformerEngine(LoggerMixin):
             if pm:
                 pm.log_event("S1", f"{self._protocol_progress_label()} → {len(candidates)} DFT candidates")
 
+            self._write_crest_ensemble_energies_json()
+            self._write_fastsp_ensemble_energies_json()
+
             if not candidates:
                 raise RuntimeError("No valid conformers found after CREST processing.")
 
@@ -422,11 +439,42 @@ class ConformerEngine(LoggerMixin):
         if pm:
             pm.log_event("S1", f"RDKit 3D embedding started (num_conf={num_conf})")
         mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            raise ValueError(f"Invalid SMILES for RDKit embedding: {smiles}")
         mol = Chem.AddHs(mol)
 
         params = rdDistGeom.ETKDG()
-        rdDistGeom.EmbedMolecule(mol, params)
-        rdForceFieldHelpers.MMFFOptimizeMolecule(mol)
+        embed_status = rdDistGeom.EmbedMolecule(mol, params)
+
+        if embed_status != 0:
+            self.logger.warning(
+                f"[S1] ETKDG embedding failed for {self.molecule_name}; "
+                "retrying with random coordinates"
+            )
+            params = rdDistGeom.ETKDGv3()
+            params.useRandomCoords = True
+            embed_status = rdDistGeom.EmbedMolecule(mol, params)
+
+        if embed_status != 0:
+            raise RuntimeError(
+                f"RDKit embedding failed for {self.molecule_name} "
+                f"(SMILES: {smiles}); stereochemistry may be geometrically unrealizable"
+            )
+
+        try:
+            rdForceFieldHelpers.MMFFOptimizeMolecule(mol)
+        except Exception as exc:
+            self.logger.warning(
+                f"[S1] MMFF optimization failed for {self.molecule_name}: {exc}; "
+                "falling back to UFF"
+            )
+            try:
+                rdForceFieldHelpers.UFFOptimizeMolecule(mol)
+            except Exception as uff_exc:
+                self.logger.warning(
+                    f"[S1] UFF fallback also failed for {self.molecule_name}: {uff_exc}; "
+                    "using unoptimized coordinates"
+                )
 
         output_path = self.crest_dir / f"{self.molecule_name}_init.xyz"
 
@@ -508,7 +556,7 @@ class ConformerEngine(LoggerMixin):
             pm.log_event("S1", "Stage 1 CREST GFN0 search started")
 
         stage1_dir = self.xtb_dir / "stage1_gfn0"
-        stage1_dir.mkdir(exist_ok=True)
+        stage1_dir.mkdir(parents=True, exist_ok=True)
         stage1_ensemble = stage1_dir / "crest_conformers.xyz"
         if self._is_valid_xyz(stage1_ensemble, min_size=500):
             gfn0_ensemble = stage1_ensemble
@@ -555,7 +603,7 @@ class ConformerEngine(LoggerMixin):
             pm.log_event("S1", "Stage 2 GFN2 xTB batch optimization started")
 
         stage2_dir = self.xtb_dir / "stage2_gfn2"
-        stage2_dir.mkdir(exist_ok=True)
+        stage2_dir.mkdir(parents=True, exist_ok=True)
         stage2_ensemble = stage2_dir / "crest_ensemble.xyz"
         if self._is_valid_xyz(stage2_ensemble, min_size=500):
             gfn2_ensemble = stage2_ensemble
@@ -716,7 +764,7 @@ class ConformerEngine(LoggerMixin):
             Path to cluster.xyz (representative structures)
         """
         cluster_dir = output_dir / "cluster"
-        cluster_dir.mkdir(exist_ok=True)
+        cluster_dir.mkdir(parents=True, exist_ok=True)
 
         # Copy ensemble to cluster directory
         isomers_xyz = cluster_dir / "isomers.xyz"
@@ -857,6 +905,9 @@ class ConformerEngine(LoggerMixin):
         return selected
 
     def _step_dft_opt_sp_coupled(self, candidates: List[Path]) -> Tuple[Path, float, List[Dict[str, Any]]]:
+        if self._parallel_scheduler.s1_conformer_parallel:
+            return self._step_dft_opt_sp_coupled_parallel(candidates)
+
         self.logger.info(f"[S1]   [4/5] DFT OPT-SP Coupled Loop (Total {len(candidates)} conformers)...")
 
         pm = get_progress_manager()
@@ -864,9 +915,6 @@ class ConformerEngine(LoggerMixin):
         if pm:
             pm.enter_phase("S1", "Stage 4: DFT optimization")
             pm.log_event("S1", f"DFT OPT-SP loop started for {total_confs} conformers")
-        best_weight = -1.0
-        best_log = None
-        best_sp_energy = None
         records: List[Dict[str, Any]] = []
 
         for idx, xyz_file in enumerate(candidates):
@@ -1021,32 +1069,13 @@ class ConformerEngine(LoggerMixin):
                 )
                 self._emit_s1_progress("sp_completed", {"conformer": conf_name, "energy_hartree": sp_energy})
 
-                shermo_out = self.final_dft_dir / f"{current_conf_name}_Shermo.sum"
-                thermo = run_shermo(
-                    shermo_bin=self.shermo_bin,
-                    freq_output=log_file,
-                    sp_energy=sp_energy,
-                    output_file=shermo_out,
-                    temperature_k=self.thermo_config.get('temperature_k', 298.15),
-                    pressure_atm=self.thermo_config.get('pressure_atm', 1.0),
-                    scl_zpe=self.thermo_config.get('scl_zpe', 0.9905),
-                    ilowfreq=self.thermo_config.get('ilowfreq', 2),
-                    imagreal=self.thermo_config.get('imagreal', 0),
-                    conc=self.thermo_config.get('conc')
-                )
-
-                g_used = thermo.g_conc if thermo.g_conc is not None else thermo.g_sum
-
+                # Shermo removed — conformer ranking now uses electronic energy (sp_energy).
+                # Gibbs/Boltzmann averaging at condition temperature is done in ConditionThermoEngine.
                 record = {
                     "name": current_conf_name,
-                    "g_used": g_used,
-                    "g_sum": thermo.g_sum,
-                    "g_conc": thermo.g_conc,
-                    "h_sum": thermo.h_sum,
-                    "u_sum": thermo.u_sum,
-                    "s_total": thermo.s_total,
+                    "g_used": sp_energy,  # Was Gibbs, now electronic energy for backward compat
                     "sp_energy": sp_energy,
-                    "log_file": log_file
+                    "log_file": log_file,
                 }
                 records.append(record)
                 self.state_manager.mark_conformer_completed(conf_name, self._serialize_record_for_state(record))
@@ -1061,10 +1090,376 @@ class ConformerEngine(LoggerMixin):
                     {"conformer": conf_name, "reason": conf_failed_reason or "conformer_failed"},
                 )
 
-        if not records:
+        return self._finalize_conformer_results(records, total_confs, pm)
+
+    def _step_dft_opt_sp_coupled_parallel(self, candidates: List[Path]) -> Tuple[Path, float, List[Dict[str, Any]]]:
+        """Parallel variant of _step_dft_opt_sp_coupled for dual-lane conformer optimization.
+
+        Processes conformers in pairs using IntraReactionScheduler.
+        Falls back to sequential for odd-numbered last conformer.
+        """
+        self.logger.info(
+            f"[S1]   [4/5] DFT OPT-SP Coupled Loop — PARALLEL MODE "
+            f"({len(candidates)} conformers, {self._parallel_scheduler.s1_max_conformer_workers} workers)"
+        )
+
+        pm = get_progress_manager()
+        total_confs = len(candidates)
+        if pm:
+            pm.enter_phase("S1", "Stage 4: DFT optimization (parallel)")
+            pm.log_event("S1", f"DFT OPT-SP parallel loop started for {total_confs} conformers")
+
+        records: List[Dict[str, Any]] = []
+        max_workers = max(1, int(self._parallel_scheduler.s1_max_conformer_workers))
+        lane: ResourceLane = self._parallel_scheduler.get_s1_conformer_lane()
+
+        idx = 0
+        while idx < total_confs:
+            batch_end = min(idx + max_workers, total_confs)
+            batch = candidates[idx:batch_end]
+
+            to_run: List[Tuple[int, Path]] = []
+            for j, xyz_file in enumerate(batch):
+                conf_idx = idx + j
+                conf_name = f"conf_{conf_idx:03d}"
+                xyz_path = Path(xyz_file).resolve()
+
+                with _STATE_MANAGER_LOCK:
+                    self.state_manager.upsert_conformer(conf_name, xyz_path, conf_idx)
+                    cached_record = self.state_manager.get_conformer_record(conf_name)
+                    is_cached = self.state_manager.is_conformer_completed(conf_name)
+
+                if is_cached and isinstance(cached_record, dict):
+                    cached_log_file = Path(str(cached_record.get("log_file", "")))
+                    if cached_log_file.exists():
+                        self.logger.info(
+                            f"[S1]     ⏭️ [{conf_idx+1}/{total_confs}] Reusing cached conformer: {conf_name}"
+                        )
+                        if pm:
+                            pm.log_event("S1", f"Conformer cached {conf_idx+1}/{total_confs}: {conf_name}")
+                        self._emit_s1_progress(
+                            "conformer_skipped",
+                            {"conformer": conf_name, "index": conf_idx + 1, "total": total_confs},
+                        )
+                        restored_record = self._restore_record_from_state(cached_record)
+                        restored_record.setdefault("conf_name", conf_name)
+                        restored_record.setdefault("g_energy", restored_record.get("g_used"))
+                        restored_record["source_index"] = conf_idx
+                        records.append(restored_record)
+                        continue
+
+                to_run.append((conf_idx, xyz_path))
+
+            if not to_run:
+                idx = batch_end
+                continue
+
+            if len(to_run) == 1:
+                record = self._run_single_conformer_dft(*to_run[0], total_confs, pm)
+                if not record.get("failed"):
+                    records.append(record)
+            else:
+                jobs: List[ParallelQCJob] = []
+                for conf_idx, xyz_path in to_run:
+                    conf_name = f"conf_{conf_idx:03d}"
+                    jobs.append(
+                        ParallelQCJob(
+                            job_id=conf_name,
+                            lane=lane,
+                            func=self._run_single_conformer_dft,
+                            args=(conf_idx, xyz_path, total_confs, pm),
+                            description=f"DFT OPT-SP for {conf_name}",
+                        )
+                    )
+
+                parallel_results: List[ParallelResult] = self._parallel_scheduler.run_parallel(jobs)
+                for pr in parallel_results:
+                    if pr.success and isinstance(pr.result, dict):
+                        if pr.result.get("failed"):
+                            self.logger.warning(
+                                f"[S1]     ❌ Parallel conformer job {pr.job_id} failed: "
+                                f"{pr.result.get('error', 'conformer_failed')}"
+                            )
+                            continue
+                        records.append(pr.result)
+                        continue
+
+                    error_message = pr.error or "parallel_conformer_job_failed"
+                    self.logger.warning(f"[S1]     ❌ Parallel conformer job {pr.job_id} failed: {error_message}")
+                    with _STATE_MANAGER_LOCK:
+                        self.state_manager.mark_conformer_failed(pr.job_id, error_message)
+                    self._emit_s1_progress(
+                        "conformer_failed",
+                        {"conformer": pr.job_id, "reason": error_message},
+                    )
+
+            idx = batch_end
+
+        return self._finalize_conformer_results(records, total_confs, pm)
+
+    def _run_single_conformer_dft(self, idx: int, xyz_file: Path, total_confs: int, pm: Any) -> Dict[str, Any]:
+        """Run DFT OPT+SP for a single conformer. Thread-safe for parallel execution."""
+        conf_name = f"conf_{idx:03d}"
+        current_xyz_source = Path(xyz_file).resolve()
+        s1_parallel_config = self._get_s1_parallel_config()
+        opt_nproc = int(s1_parallel_config.get("opt_cores_per_job", self.theory_opt.get("nproc", 16)))
+        opt_mem = str(s1_parallel_config.get("opt_mem_per_job", self.theory_opt.get("mem", "16GB")))
+        sp_interface = self._build_parallel_orca_sp_interface()
+
+        if pm:
+            progress = 55 + int(((idx + 1) / max(total_confs, 1)) * 40)
+            pm.update_step(
+                "s1",
+                completed=min(progress, 95),
+                description=f"S1: [{self.molecule_name}] Opt conformer {idx+1}/{total_confs}",
+            )
+            pm.set_subtask("S1", "DFT Conformers", idx + 1, total_confs)
+            pm.log_event("S1", f"Optimizing conformer {idx+1}/{total_confs}: {conf_name}")
+
+        self.logger.info(f"[S1]     🔄 [{idx+1}/{total_confs}] DFT handoff on conformer: {conf_name}")
+        with _STATE_MANAGER_LOCK:
+            self.state_manager.mark_conformer_running(conf_name)
+        self._emit_s1_progress("conformer_started", {"conformer": conf_name, "index": idx + 1, "total": total_confs})
+
+        converged_this_conf = False
+        conf_failed_reason = ""
+        successful_record: Optional[Dict[str, Any]] = None
+
+        for attempt in range(2):
+            current_conf_name = f"{conf_name}_Res" if attempt > 0 else conf_name
+            gjf_file = self.final_dft_dir / f"{current_conf_name}.gjf"
+            log_file = self.final_dft_dir / f"{current_conf_name}.log"
+
+            if attempt > 0:
+                rescue_route = self.theory_opt.get('rescue_route') or build_gaussian_route_from_config(
+                    self.config,
+                    rescue=True,
+                )
+                gauss_int = GaussianInterface(
+                    charge=self.theory_opt.get('charge', 0),
+                    multiplicity=self.theory_opt.get('multiplicity', 1),
+                    nprocshared=opt_nproc,
+                    mem=opt_mem,
+                    config=self.config,
+                )
+                gauss_int.write_input_file(
+                    current_xyz_source,
+                    gjf_file,
+                    route=rescue_route,
+                    title=f"{self.molecule_name}_{current_conf_name}_Rescue",
+                )
+            else:
+                gauss_int = GaussianInterface(
+                    charge=self.theory_opt.get('charge', 0),
+                    multiplicity=self.theory_opt.get('multiplicity', 1),
+                    nprocshared=opt_nproc,
+                    mem=opt_mem,
+                    config=self.config,
+                )
+                gauss_int.write_input_file(
+                    current_xyz_source,
+                    gjf_file,
+                    route=self.theory_opt.get('route') or build_gaussian_route_from_config(
+                        self.config,
+                        rescue=False,
+                    ),
+                    title=f"{self.molecule_name}_{current_conf_name}",
+                )
+
+            opt_converged, next_xyz = self._run_gaussian_opt(
+                gjf_file,
+                log_file,
+                xyz_source=current_xyz_source,
+                attempt=attempt,
+            )
+
+            if opt_converged:
+                with _STATE_MANAGER_LOCK:
+                    self.state_manager.mark_opt_attempt(conf_name, attempt, "converged", log_file)
+                self._emit_s1_progress("opt_converged", {"conformer": conf_name, "attempt": attempt})
+            else:
+                with _STATE_MANAGER_LOCK:
+                    self.state_manager.mark_opt_attempt(
+                        conf_name,
+                        attempt,
+                        "failed",
+                        log_file,
+                        note="gaussian_opt_not_converged",
+                    )
+                self._emit_s1_progress("opt_failed", {"conformer": conf_name, "attempt": attempt})
+
+            if not opt_converged:
+                if attempt == 0:
+                    if next_xyz and next_xyz.exists():
+                        current_xyz_source = next_xyz
+                    conf_failed_reason = "opt_failed_attempt_0"
+                    continue
+                conf_failed_reason = "opt_failed_after_rescue"
+                break
+
+            final_coords, final_symbols, parse_error = LogParser.extract_last_converged_coords(
+                log_file,
+                engine_type='gaussian',
+            )
+
+            if final_coords is None:
+                conf_failed_reason = "opt_parse_failed"
+                self.logger.warning(f"      ⚠️  Failed to parse converged coordinates for {current_conf_name}: {parse_error}")
+                if attempt == 0:
+                    continue
+                break
+
+            if final_symbols is None:
+                _, final_symbols = read_xyz(current_xyz_source)
+
+            sp_in_file = self.final_dft_dir / f"{current_conf_name}_SP.inp"
+            sp_out_file = self.final_dft_dir / f"{current_conf_name}_SP.out"
+            sp_energy = self._run_orca_sp(
+                final_coords,
+                final_symbols,
+                sp_in_file,
+                sp_out_file,
+                orca_interface=sp_interface,
+            )
+
+            if sp_energy is None:
+                with _STATE_MANAGER_LOCK:
+                    self.state_manager.mark_sp_result(
+                        conf_name,
+                        status="failed",
+                        output_file=sp_out_file,
+                        note="orca_sp_failed",
+                    )
+                self._emit_s1_progress("sp_failed", {"conformer": conf_name, "output": str(sp_out_file)})
+                self.logger.warning(
+                    "      ⚠️  ORCA SP failed after converged OPT; skipping rescue OPT retry and moving on"
+                )
+                conf_failed_reason = "sp_failed"
+                break
+
+            with _STATE_MANAGER_LOCK:
+                self.state_manager.mark_sp_result(
+                    conf_name,
+                    status="completed",
+                    output_file=sp_out_file,
+                    sp_energy=sp_energy,
+                )
+            self._emit_s1_progress("sp_completed", {"conformer": conf_name, "energy_hartree": sp_energy})
+
+            # Shermo removed — conformer ranking now uses electronic energy (sp_energy).
+            # Gibbs/Boltzmann averaging at condition temperature is done in ConditionThermoEngine.
+            successful_record = {
+                "conf_name": conf_name,
+                "name": current_conf_name,
+                "source_index": idx,
+                "g_energy": sp_energy,
+                "g_used": sp_energy,  # Was Gibbs, now electronic energy for backward compat
+                "sp_energy": sp_energy,
+                "log_file": log_file,
+            }
+            with _STATE_MANAGER_LOCK:
+                self.state_manager.mark_conformer_completed(
+                    conf_name,
+                    self._serialize_record_for_state(successful_record),
+                )
+            self._emit_s1_progress("conformer_completed", {"conformer": conf_name, "energy_hartree": sp_energy})
+            converged_this_conf = True
+            break
+
+        if not converged_this_conf:
+            failure_reason = conf_failed_reason or "conformer_failed"
+            with _STATE_MANAGER_LOCK:
+                self.state_manager.mark_conformer_failed(conf_name, failure_reason)
+            self._emit_s1_progress(
+                "conformer_failed",
+                {"conformer": conf_name, "reason": failure_reason},
+            )
+            return {
+                "conf_name": conf_name,
+                "name": conf_name,
+                "source_index": idx,
+                "g_energy": float("nan"),
+                "g_used": float("nan"),
+                "sp_energy": float("nan"),
+                "log_file": self.final_dft_dir / f"{conf_name}.log",
+                "failed": True,
+                "error": failure_reason,
+            }
+
+        if successful_record is None:
+            raise RuntimeError(f"Conformer record missing for {conf_name}")
+
+        return successful_record
+
+    def _get_s1_parallel_config(self) -> Dict[str, Any]:
+        intra_config = self.config.get("intra_reaction_parallel", {})
+        if not isinstance(intra_config, dict):
+            return {}
+        s1_config = intra_config.get("s1", {})
+        return s1_config if isinstance(s1_config, dict) else {}
+
+    def _build_parallel_orca_sp_interface(self) -> ORCAInterface:
+        s1_parallel_config = self._get_s1_parallel_config()
+        return ORCAInterface(
+            method=self.theory_sp.get("method", "M062X"),
+            basis=self.theory_sp.get("basis", "def2-TZVPP"),
+            aux_basis=self.theory_sp.get("aux_basis", getattr(self.orca_sp, "aux_basis", "def2/J")),
+            nprocs=int(s1_parallel_config.get("sp_cores_per_job", getattr(self.orca_sp, "nprocs", 16))),
+            maxcore=s1_parallel_config.get("sp_maxcore_per_job", getattr(self.orca_sp, "maxcore", None)),
+            solvent=self.theory_sp.get("solvent", getattr(self.orca_sp, "solvent", "acetone")),
+            route_extras=self.theory_sp.get("route_extras", ""),
+            config=self.config,
+        )
+
+    def _finalize_conformer_results(
+        self,
+        records: List[Dict[str, Any]],
+        total_confs: int,
+        pm: Any,
+    ) -> Tuple[Path, float, List[Dict[str, Any]]]:
+        def _record_sort_key(item: Tuple[int, Dict[str, Any]]) -> int:
+            source_index = item[1].get("source_index")
+            if isinstance(source_index, int):
+                return source_index
+            if isinstance(source_index, str):
+                try:
+                    return int(source_index)
+                except ValueError:
+                    pass
+            return item[0]
+
+        successful_records: List[Dict[str, Any]] = []
+        for record in records:
+            g_used = record.get("g_used")
+            sp_energy = record.get("sp_energy")
+            try:
+                if g_used is None or sp_energy is None:
+                    continue
+                if not math.isfinite(float(g_used)) or not math.isfinite(float(sp_energy)):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            successful_records.append(record)
+
+        if not successful_records:
             raise RuntimeError("所有 OPT-SP 循环均失败。")
 
-        values = [record["g_used"] for record in records]
+        successful_records = [
+            record
+            for _, record in sorted(
+                enumerate(successful_records),
+                key=_record_sort_key,
+            )
+        ]
+
+        best_weight = -1.0
+        best_log: Optional[Path] = None
+        best_sp_energy: Optional[float] = None
+
+        # NOTE: After Shermo centralization, g_used is electronic energy (sp_energy).
+        # Boltzmann weighting here is for conformer population estimation only.
+        # Temperature-dependent Gibbs/Boltzmann is computed in ConditionThermoEngine.
+        values = [float(record["g_used"]) for record in successful_records]
         min_value = min(values)
         rt = 0.0019872041 * float(self.thermo_config.get("temperature_k", 298.15))
         weights = [float(np.exp(-(value - min_value) / rt)) for value in values]
@@ -1074,12 +1469,12 @@ class ConformerEngine(LoggerMixin):
         else:
             weights = [0.0 for _ in weights]
 
-        for record, weight in zip(records, weights):
+        for record, weight in zip(successful_records, weights):
             record["weight"] = weight
             if weight > best_weight:
                 best_weight = weight
-                best_log = record["log_file"]
-                best_sp_energy = record["sp_energy"]
+                best_log = Path(str(record["log_file"]))
+                best_sp_energy = float(record["sp_energy"])
 
         output_file = self.final_dft_dir / "conformer_thermo.csv"
         headers = [
@@ -1092,10 +1487,10 @@ class ConformerEngine(LoggerMixin):
             "u_sum",
             "s_total",
             "sp_energy",
-            "log_file"
+            "log_file",
         ]
         lines = [",".join(headers)]
-        for record in records:
+        for record in successful_records:
             lines.append(",".join([
                 str(record.get("name", "")),
                 f"{record.get('weight', 0.0):.6f}",
@@ -1105,12 +1500,11 @@ class ConformerEngine(LoggerMixin):
                 f"{record.get('h_sum', 0.0):.8f}",
                 "" if record.get("s_total") is None else f"{record.get('s_total'):.6f}",
                 f"{record.get('sp_energy', 0.0):.8f}",
-                str(record.get("log_file", ""))
+                str(record.get("log_file", "")),
             ]))
         output_file.write_text("\n".join(lines))
 
-        # Generate conformer_energies.json for S4 Step1 activation extractor
-        self._write_conformer_energies_json(records)
+        self._write_conformer_energies_json(successful_records)
 
         if best_log is None or best_sp_energy is None:
             raise RuntimeError("无法确定最佳构象。")
@@ -1119,18 +1513,27 @@ class ConformerEngine(LoggerMixin):
         self._emit_s1_progress(
             "best_conformer_selected",
             {
-                "conformer": Path(best_log).stem,
+                "conformer": best_log.stem,
                 "weight": best_weight,
                 "energy_hartree": best_sp_energy,
             },
         )
         if pm:
-            pm.log_event("S1", f"Best conformer selected: {best_log.name} (weight={best_weight:.4f})")
+            pm.log_event(
+                "S1",
+                f"Best conformer selected after evaluating {len(successful_records)}/{total_confs} conformers: "
+                f"{best_log.name} (weight={best_weight:.4f})",
+            )
 
-        return best_log, best_sp_energy, records
+        return best_log, best_sp_energy, successful_records
+
+    def _state_manager_call(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
+        with _STATE_MANAGER_LOCK:
+            method = getattr(self.state_manager, method_name)
+            return method(*args, **kwargs)
 
     def _emit_s1_progress(self, event: str, payload: Optional[Dict[str, Any]] = None) -> None:
-        summary = self.state_manager.get_summary()
+        summary = self._state_manager_call("get_summary")
         message: Dict[str, Any] = {
             "schema": "s1_progress_v1",
             "event": event,
@@ -1196,6 +1599,202 @@ class ConformerEngine(LoggerMixin):
             with open(json_output, 'w') as f:
                 json.dump(energies, f, indent=2)
             self.logger.info(f"  ✅ Generated conformer_energies.json ({len(energies)} conformers)")
+
+    def _write_crest_ensemble_energies_json(self) -> None:
+        """Write crest/conformer_ensemble_energies.json from CREST GFN2 ensemble.
+
+        Reads crest.energies (produced by CREST in the output directory),
+        extracts relative GFN2-xTB energies for ALL conformers, and writes
+        a structured JSON for the S4 conformer ensemble feature extractors.
+
+        Search order:
+        1. self.crest_dir / "crest.energies"           (single-stage)
+        2. self.xtb_dir / "stage2_gfn2" / "crest.energies" (two-stage GFN2)
+        3. self.xtb_dir / "stage1_gfn0" / "crest.energies" (two-stage GFN0 fallback)
+
+        Output: crest/conformer_ensemble_energies.json with structure:
+        {
+            "source": "crest_gfn2",
+            "n_conformers": N,
+            "energies": [...],  // relative energies in kcal/mol
+            "energy_unit": "kcal/mol",
+            "temperature_K": 298.15
+        }
+        """
+        import json
+
+        search_dirs = [
+            self.crest_dir,
+            self.xtb_dir / "stage2_gfn2",
+            self.xtb_dir / "stage1_gfn0",
+        ]
+
+        crest_energies_path = None
+        for search_dir in search_dirs:
+            candidate = search_dir / "crest.energies"
+            if candidate.exists():
+                crest_energies_path = candidate
+                break
+
+        if crest_energies_path is None:
+            self.logger.debug("  crest.energies not found in any CREST output directory")
+            return
+
+        energies_kcal = []
+        try:
+            with open(crest_energies_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        try:
+                            # Format: <index> <energy_kcal>
+                            energy = float(parts[1])
+                            energies_kcal.append(energy)
+                        except (ValueError, IndexError):
+                            continue
+                    elif len(parts) == 1:
+                        try:
+                            energy = float(parts[0])
+                            energies_kcal.append(energy)
+                        except ValueError:
+                            continue
+        except Exception as e:
+            self.logger.warning(f"  Failed to parse crest.energies: {e}")
+            return
+
+        if not energies_kcal:
+            self.logger.warning("  crest.energies found but no valid energies parsed")
+            return
+
+        # Convert to relative energies (subtract global minimum)
+        min_energy = min(energies_kcal)
+        relative_energies = [e - min_energy for e in energies_kcal]
+
+        thermo_config = self.config.get('thermo', {}) or {}
+        temperature_k = float(thermo_config.get('temperature_k', 298.15))
+
+        payload = {
+            "source": "crest_gfn2",
+            "n_conformers": len(relative_energies),
+            "energies": relative_energies,
+            "energy_unit": "kcal/mol",
+            "temperature_K": temperature_k,
+            "source_file": str(crest_energies_path),
+        }
+
+        json_output = self.crest_dir / "conformer_ensemble_energies.json"
+        with open(json_output, 'w') as f:
+            json.dump(payload, f, indent=2)
+        self.logger.info(
+            f"  ✅ Generated crest/conformer_ensemble_energies.json "
+            f"({len(relative_energies)} conformers, E_span={max(relative_energies):.3f} kcal/mol)"
+        )
+
+        csv_output = self.crest_dir / "conformer_thermo.csv"
+        with open(csv_output, 'w', newline='') as f:
+            f.write("index,energy_kcal_mol,rel_energy_kcal_mol\n")
+            for i, (abs_energy, rel_energy) in enumerate(
+                zip(energies_kcal, relative_energies), start=1
+            ):
+                f.write(f"{i},{abs_energy:.6f},{rel_energy:.6f}\n")
+        self.logger.info(
+            f"  ✅ Generated crest/conformer_thermo.csv "
+            f"({len(relative_energies)} conformers, full ensemble)"
+        )
+
+    def _write_fastsp_ensemble_energies_json(self) -> None:
+        """Write fastsp/conformer_ensemble_energies.json from fastSP screening.
+
+        Scans all fastsp/conf_*/ directories for ORCA SP output files,
+        extracts converged SP energies, and writes a structured JSON
+        for the S4 conformer ensemble feature extractors.
+
+        Output: fastsp/conformer_ensemble_energies.json with structure:
+        {
+            "source": "fastsp_dft",
+            "n_conformers": N,
+            "energies": [...],  // SP energies in kcal/mol (Hartree converted)
+            "energy_unit": "kcal/mol",
+            "temperature_K": 298.15
+        }
+        """
+        import json
+        import re
+
+        if not self.fastsp_dir.exists():
+            return
+
+        # ORCA SP energy pattern: "FINAL SINGLE POINT ENERGY" followed by a float
+        # Also try Gaussian SCF Done pattern as fallback
+        energy_patterns = [
+            re.compile(r"FINAL SINGLE POINT ENERGY\s+([-+]?\d+\.\d+)"),
+            re.compile(r"SCF Done:\s+E\([^)]+\)\s*=\s*([-+]?\d+\.\d+)"),
+        ]
+
+        energies_hartree = []
+        conf_dirs = sorted(
+            [d for d in self.fastsp_dir.iterdir() if d.is_dir()],
+            key=lambda d: d.name,
+        )
+
+        for conf_dir in conf_dirs:
+            # Search for .log or .out files
+            for log_path in sorted(conf_dir.glob("*.log")) + sorted(conf_dir.glob("*.out")):
+                try:
+                    content = log_path.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+
+                for pattern in energy_patterns:
+                    matches = pattern.findall(content)
+                    if matches:
+                        try:
+                            # Use the last match (final energy)
+                            energy = float(matches[-1])
+                            energies_hartree.append(energy)
+                            break
+                        except (ValueError, IndexError):
+                            continue
+                else:
+                    continue
+                break  # Found energy for this conformer, move to next
+
+        if not energies_hartree:
+            self.logger.debug("  No fastSP energies extracted from fastsp/")
+            return
+
+        # Convert Hartree to kcal/mol
+        relative_energies = [
+            (e - min(energies_hartree)) * HARTREE_TO_KCAL
+            for e in energies_hartree
+        ]
+
+        thermo_config = self.config.get('thermo', {}) or {}
+        temperature_k = float(thermo_config.get('temperature_k', 298.15))
+
+        payload = {
+            "source": "fastsp_dft",
+            "n_conformers": len(relative_energies),
+            "energies": relative_energies,
+            "energy_unit": "kcal/mol",
+            "temperature_K": temperature_k,
+            "screening_method": str(
+                self.step1_config.get("fast_sp_profiles", {}).get(
+                    "screening_sp", {}
+                ).get("method", "r2SCAN-3c")
+            ) if isinstance(self.step1_config, dict) else "r2SCAN-3c",
+        }
+
+        json_output = self.fastsp_dir / "conformer_ensemble_energies.json"
+        with open(json_output, 'w') as f:
+            json.dump(payload, f, indent=2)
+        self.logger.info(
+            f"  ✅ Generated fastsp/conformer_ensemble_energies.json "
+            f"({len(relative_energies)} conformers from fastSP screening)"
+        )
 
     def run_optimization_only(self, smiles: str) -> Tuple[Path, float]:
         """
@@ -1528,7 +2127,8 @@ class ConformerEngine(LoggerMixin):
         coords: np.ndarray,
         symbols: Optional[List[str]],
         inp_file: Path,
-        out_file: Path
+        out_file: Path,
+        orca_interface: Optional[ORCAInterface] = None,
     ) -> Optional[float]:
         """
         [v3.0 FIX] Run ORCA single-point calculation with path localization.
@@ -1549,6 +2149,7 @@ class ConformerEngine(LoggerMixin):
 
         # Ensure symbols is List[str]
         symbols_list: List[str] = symbols
+        sp_interface = orca_interface or self.orca_sp
 
         # [v3.0 FIX] Path localization
         dft_dir_abs = self.final_dft_dir.resolve()
@@ -1560,27 +2161,33 @@ class ConformerEngine(LoggerMixin):
         local_out = dft_dir_abs / out_path_abs.name
 
         env = os.environ.copy()
-        if hasattr(self.orca_sp, "_build_orca_runtime_env"):
-            env = self.orca_sp._build_orca_runtime_env()
+        if hasattr(sp_interface, "_build_orca_runtime_env"):
+            env = sp_interface._build_orca_runtime_env()
 
-        nprocs_configured = int(getattr(self.orca_sp, "nprocs", 1) or 1)
+        nprocs_configured = int(getattr(sp_interface, "nprocs", 1) or 1)
         nprocs_for_sp = self._check_mpirun_compatibility(nprocs_configured, env)
 
         # Generate ORCA input directly (write to local path)
-        self._generate_orca_sp_input(coords, symbols_list, local_inp, nprocs_for_sp)
+        self._generate_orca_sp_input(
+            coords,
+            symbols_list,
+            local_inp,
+            nprocs_for_sp,
+            orca_interface=sp_interface,
+        )
 
         if not local_inp.exists():
             self.logger.error(f"      ❌ ORCA input not created: {local_inp}")
             return None
 
-        if self.orca_sp.orca_binary is None:
+        if sp_interface.orca_binary is None:
             self.logger.error("      ❌ ORCA binary not found")
             return None
 
         self.logger.info(f"      🔄 Running ORCA SP: {local_inp.name}")
 
         try:
-            local_out = self.orca_sp._run_orca(
+            local_out = sp_interface._run_orca(
                 local_inp,
                 dft_dir_abs,
                 timeout=self.theory_sp.get('timeout', 3600)
@@ -1673,7 +2280,8 @@ class ConformerEngine(LoggerMixin):
         coords: np.ndarray,
         symbols: List[str],
         inp_file: Path,
-        nprocs: int
+        nprocs: int,
+        orca_interface: Optional[ORCAInterface] = None,
     ):
         """
         Generate ORCA SP input file from coordinates.
@@ -1683,15 +2291,31 @@ class ConformerEngine(LoggerMixin):
             symbols: Element symbols list
             inp_file: Output ORCA input file path
         """
-        route = f"! {self.orca_sp.method} {self.orca_sp.basis} {self.orca_sp.aux_basis} RIJCOSX tightSCF"
-        route += " noautostart miniprint nopop"
+        sp_interface = orca_interface or self.orca_sp
+        route = sp_interface.render_simple_keywords(task_type="sp")
+        rendered_blocks = sp_interface.render_blocks()
+        block_text = ""
+        if rendered_blocks:
+            ordered_keys = ("basis", "method", "scf", "mdci")
+            chunks = []
+            for key in ordered_keys:
+                value = rendered_blocks.get(key)
+                if value:
+                    chunks.append(value.rstrip())
+            for key, value in rendered_blocks.items():
+                if key in ordered_keys:
+                    continue
+                if value:
+                    chunks.append(value.rstrip())
+            if chunks:
+                block_text = "\n" + "\n".join(chunks) + "\n"
 
         cpcm_block = ""
-        if self.orca_sp.solvent and self.orca_sp.solvent.upper() != "NONE":
+        if sp_interface.solvent and sp_interface.solvent.upper() != "NONE":
             cpcm_block = f"""
 %cpcm
    smd true
-   SMDsolvent "{self.orca_sp.solvent}"
+   SMDsolvent "{sp_interface.solvent}"
 end
 """
 
@@ -1705,9 +2329,9 @@ end
         pal_block = f"%pal nprocs {nprocs} end\n" if nprocs > 1 else ""
 
         inp_content = f"""{route}
-%maxcore {self.orca_sp.maxcore}
+%maxcore {sp_interface.maxcore}
 {pal_block}
-{cpcm_block}
+        {cpcm_block}{block_text}
  * xyz 0 1
 {coord_content}
  *

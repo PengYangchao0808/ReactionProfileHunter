@@ -15,18 +15,17 @@ except ImportError:
 
 from rph_core.steps.step2_retro import RetroScanner
 from rph_core.steps.step3_opt import TSOptimizer
-from rph_core.steps.step4_features import FeatureMiner
+
+# S4 (FeatureMiner) moved to rph_features package
 
 if anchor_available:
     __all__ = [
         "AnchorPhase",
         "RetroScanner",
         "TSOptimizer",
-        "FeatureMiner",
     ]
 else:
     __all__ = [
         "RetroScanner",
         "TSOptimizer",
-        "FeatureMiner",
     ]

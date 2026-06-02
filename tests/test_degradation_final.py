@@ -13,7 +13,7 @@ def _write_min_xyz(path: Path) -> None:
 
 
 def test_step4_generates_features_without_fchk() -> None:
-    from rph_core.steps.step4_features.feature_miner import FeatureMiner
+    from rph_features.feature_miner import FeatureMiner
 
     with tempfile.TemporaryDirectory(prefix="test_degradation_") as tmp:
         tmpdir = Path(tmp)
@@ -29,7 +29,7 @@ def test_step4_generates_features_without_fchk() -> None:
         miner = FeatureMiner(config={})
         features_raw_csv = miner.run(
             ts_final=ts,
-            reactant=reactant,
+            intermediate=reactant,
             product=product,
             output_dir=out_dir,
             forming_bonds=None,
@@ -37,8 +37,8 @@ def test_step4_generates_features_without_fchk() -> None:
             sp_matrix_report=None,
             ts_fchk=None,
             ts_orca_out=None,
-            reactant_fchk=None,
-            reactant_orca_out=None,
+            intermediate_fchk=None,
+            intermediate_orca_out=None,
             product_fchk=None,
             product_orca_out=None,
         )
@@ -49,7 +49,7 @@ def test_step4_generates_features_without_fchk() -> None:
 
 
 def test_step4_handles_missing_forming_bonds() -> None:
-    from rph_core.steps.step4_features.feature_miner import FeatureMiner
+    from rph_features.feature_miner import FeatureMiner
 
     with tempfile.TemporaryDirectory(prefix="test_degradation_") as tmp:
         tmpdir = Path(tmp)
@@ -65,7 +65,7 @@ def test_step4_handles_missing_forming_bonds() -> None:
         miner = FeatureMiner(config={})
         features_raw_csv = miner.run(
             ts_final=ts,
-            reactant=reactant,
+            intermediate=reactant,
             product=product,
             output_dir=out_dir,
             forming_bonds=None,

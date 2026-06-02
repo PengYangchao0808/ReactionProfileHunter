@@ -24,7 +24,7 @@ executables:
   isostat:
     path: "/opt/software/molclus/isostat"
   shermo:
-    path: "Shermo"
+    path: "/opt/software/shermo/Shermo"
 
 # ==================== 热力学配置 (Thermodynamics) ====================
 # Shermo 热力学校正参数，用于 S1 构象搜索和 S3 Gibbs 计算
@@ -39,10 +39,10 @@ thermo:
 # ==================== 资源配置 (Resources) ====================
 # 内存配置格式："32GB", "16GB", "4096MB" 等
 resources:
-  mem: "32GB"  # 总内存
-  nproc: 16     # 并行核数
+  mem: "48GB"  # 总内存（60GB 物理，留 12GB 给 OS/缓存）
+  nproc: 16   # 并行核数（7950X 16核）
   # 派生值（maxcore 等）由代码根据 mem/nproc 自动计算
-  orca_maxcore_safety: 0.2  # ORCA maxcore 安全系数（避免内存溢出）
+  orca_maxcore_safety: 0.65  # ORCA MaxCore = mem × safety / nproc ≈ 2600 MB/core
 
 # 全局理论水平配置 (Theory Levels)
 # ================================
@@ -63,9 +63,9 @@ theory:
   # 几何优化级别 (用于 S1 产物优化, S3 TS 优化, 受限优化)
   # 注意: nproc 和 mem 从 resources 配置中自动派生
   optimization:
-    method: B3LYP
+    method: M062X
     basis: def2-SVP
-    dispersion: GD3BJ
+    dispersion: null
     engine: gaussian  # 可选: gaussian, orca
     solvent: acetone
 
@@ -73,11 +73,11 @@ theory:
   # 用于 S1 产物精修, S3 TS/Reactant/Fragments 精修
   # 注意: nproc 从 resources 配置中自动派生
   single_point:
-    method: wB97X-D4  # 改用 wB97X-D3BJ (比 WB97M-V 更稳定)
+    method: wB97M-V
     basis: def2-TZVPP
     aux_basis: def2/J
     engine: orca  # 可选: orca, gaussian
-    maxcore: 1000
+    maxcore: 2600     # 48GB × 0.65 / 12核 ≈ 2600 MB/core
     solvent: acetone
     fallback_to_gaussian: false  # ORCA 失败时是否降级到 Gaussian
     fallback_method: B3LYP
@@ -122,7 +122,7 @@ optimization_control:
 
 # Step 1: Product Anchor (产物锚定)
 step1:
-  protocol: ext
+  protocol: lite
   shared_handoff:
     enabled: true
     dft_optfreq: true
@@ -197,7 +197,7 @@ step1:
         selection_mode: single_lowest_energy
         write_stage_meta: true
         write_provenance_flags: true
-        final_sp_method: wB97X-D4
+        final_sp_method: wB97M-V
         final_sp_basis: def2-TZVPP
     zero:
       two_stage_enabled: false
@@ -224,7 +224,7 @@ step1:
         selection_mode: single_lowest_energy
         write_stage_meta: true
         write_provenance_flags: true
-        final_sp_method: wB97X-D4
+        final_sp_method: wB97M-V
         final_sp_basis: def2-TZVPP
 
   # ==============================================================
@@ -232,8 +232,8 @@ step1:
   # 策略: GFN0(快速粗筛) → ISOSTAT(聚类) → GFN2(精细优化)
   # ==============================================================
   conformer_search:
-    # 主开关: true=两阶段模式, false=单阶段GFN2(向后兼容)
-    two_stage_enabled: true
+    # 两阶段开关由 protocol_stack.<protocol>.two_stage_enabled 控制
+    # 顶层值对 lite/zero/full 协议无效，仅作为 ext/default 的 fallback
 
     # Stage 1: GFN0 粗筛 (快速覆盖构象空间)
     stage1_gfn0:
@@ -263,19 +263,21 @@ step1:
     # 通用构象搜索参数 (单阶段/两阶段共用)
     common:
       solvent: acetone
-      threads: 16
-      ngeom_default: 3   # 默认筛选构象数
-      ngeom_max: 6     # 最大筛选构象数
+      threads: 16       # CREST -T (V3 串行模式下独占全 16 核)
+      ngeom_default: 3
+      ngeom_max: 6
 
   # ==============================================================
   # 遗留配置 (单阶段模式或向后兼容)
+  # ⚠️  以下配置仅在以下条件下生效:
+  #    1. conformer_search.two_stage_enabled = false (单阶段模式)
+  #    2. 向后兼容旧的 RPH 配置文件
   # ==============================================================
-  # CREST 构象搜索配置 (单阶段模式使用)
   crest:
     gfn_level: 2  # GFN-xTB 方法级别 (0, 1, 2)
     solvent: acetone
     energy_window: 6.0  # kcal/mol, 构象能量窗口
-    threads: 16
+    threads: 16       # CREST -T (与 conformer_search.common.threads 一致)
 
   # 是否启用 DFT 优化 (在 CREST 之后)
   enable_dft_opt: true  # 默认使用DFT精修产物构象
@@ -289,6 +291,7 @@ step1:
 step2:
   forming_bonds_required: true
   forming_bonds_index_base: auto
+  engine_policy: xtb_path_first
   pes_adapter:
     enabled: true
     mode: fallback
@@ -303,6 +306,7 @@ step2:
     # policy_b: 单侧自由 (仅约束键A, 镜像)
     # concerted: 传统强双约束 (fixed, k=0.5)
     scan_policy: policy_c
+    nproc: 16
     
     # ===== 扫描距离参数 (单位: Angstrom) =====
     # 扫描起点距离 - 通常设为产物形成键距离的1.2-1.5倍
@@ -364,8 +368,12 @@ step2:
   # 使用 xTB 官方路径搜索替代 relaxed scan
   # 官方文档: xtb start.xyz --path end.xyz --input path.inp
   path_search:
-    # 是否启用 xTB 路径搜索 (true=使用 path search 精修 TS)
-    enabled: false
+    mode: "rescue"          # "always" | "rescue" | "never"
+    nproc: 16
+    # rescue = trigger only when retro_scan is DEGRADED/FAILED
+    # always = always execute (legacy enabled=true behavior)
+    # never = never execute (legacy enabled=false behavior)
+    # Backward compat: "enabled: true" is treated as mode="always"
     # 路径搜索优化轮数
     nrun: 1
     # 初始路径点数
@@ -390,9 +398,16 @@ step2:
     # 溶剂模型 (用于隐式溶剂化计算)
     solvent: acetone
     # 并行核数
-    nproc: 8
+    nproc: 16          # xTB GFN2 扫描
     # 电子温度 (null 表示使用默认, 可设如 300)
     etemp: null
+
+  crest_rescue:
+    enabled: false
+    trigger: path_or_scan_failed
+    threads: 16
+    gfn_level: 2
+    constraints_from_forming_bonds: true
 
   # Gaussian+XTB 混合 TS 优化配置 (NEW)
   # 使用 Gaussian 调用 XTB 进行梯度计算，实现更精确的 TS 优化
@@ -429,11 +444,25 @@ step3:
   # Gaussian 关键词模板
   gaussian_keywords:
     berny: "Opt=(TS, CalcFC, NoEigenTest) Freq"
+    ts_rescue: "Opt=(TS, CalcAll, NoEigenTest, MaxCycles=80) Freq"
     qst2: "Opt=(QST2, CalcFC) Freq"
     irc: "IRC=(CalcFC, MaxPoints=50, StepSize=10)"
   
   # 严格禁用 QST2 救援策略（只使用 Berny）
   disable_qst2_rescue: true
+
+  # TS rescue policy: 失败分型 → 选择合适 rescue 起点 → 小步长 Berny rescue
+  ts_rescue_policy:
+    enabled: true
+    trigger_after_steps: 60           # 超过此步数视为振荡/步数超限
+    max_step_rescue: null             # rescue 时 MaxStep (null=Gaussian 默认 30)
+    recalc_fc_every: null            # rescue 时 RecalcFC 频率 (null=不使用，CalcAll 替代)
+    max_cycles_rescue: 80            # rescue 时 MaxCycles (CalcAll 每步成本高，减少总步数)
+    # 失败分型对应的 rescue 起点
+    oscillation_uses_last_geometry: true     # 振荡/步数超限 → 用中断结构
+    step_exceeded_uses_last_geometry: true   # 同上
+    no_imag_uses_original_guess: true        # 0 虚频 → 回原始 TS guess
+    multi_imag_uses_failed_geometry: true    # 多虚频 → 从该结构继续
 
   # 片段处理配置
   fragments:
@@ -444,7 +473,10 @@ step3:
     # VRM 默认强制单核运行以禁用 MPI，提升稳定性（可按需调大）。
     vrm_sp_nproc: 1
 
-# Step 4: Feature Miner (特征提取)
+# Step 4: Feature Miner — MOVED to RPH_Postprocess/rph_features/
+# This config section is preserved for backward compatibility.
+# The DFT pipeline now stops at S3. Feature extraction runs separately via:
+#   rph-features extract --rph-run <work_dir> --output <features_dir>
 step4:
   enable_buried_volume: false
   enabled_plugins:
@@ -455,6 +487,9 @@ step4:
     - step1_activation
     - step2_cyclization
     - multiwfn_features
+    - conformational_population
+    - conformational_preorganization
+    - torsion_flexibility
   features:
     - dG_activation
     - dG_reaction
@@ -484,7 +519,6 @@ step4:
       - s1_Sconf
       - s1_E_avg_weighted
       - s1_E_std
-      - s1_tau_CH_C_O
       - s2_eps_homo
       - s2_eps_lumo
       - s2_mu
@@ -516,7 +550,7 @@ step4:
         charge_priority: ["NBO", "CM5", "MULLIKEN"]
         fragment_rule: "forming_bonds_graph_cut_v1"
     multiwfn:
-      enabled: false
+      enabled: true
       cache_dir: ".cache/step4_multiwfn"
       timeout_sec: 120
       modules:
@@ -527,13 +561,9 @@ step4:
 
 # 运行模式配置 (Run Mode)
 # ========================
-# 控制程序运行模式：single (单分子) / batch (批量) / dataset (数据集)
+# 控制程序运行模式：dataset (数据集) — 唯一入口
 run:
-  source: dataset  # single: 单分子模式; batch: 批量CSV模式; dataset: 数据集模式
-  # single 模式配置 (当 source=single 时使用)
-  single:
-    product_smiles: ""  # 产物SMILES字符串，空字符串表示需要通过命令行--smiles传入
-    rx_id: "manual"     # 反应ID标识
+  source: dataset  # dataset: 数据集模式（唯一支持的模式）
   # batch 模式配置 (当 source=batch 时使用)
   batch:
     input_file: ""      # 输入CSV文件路径
@@ -541,9 +571,10 @@ run:
   # dataset 模式配置 (当 source=dataset 时使用)
   # JSON 文件会被自动识别 (通过 .json 后缀检测)
   dataset:
-    path: "E:/Calculations/AI4S_ML_Studys/[4+3] Mechain learning/ReactionProfileHunter/data/reaxys_cleaned.csv"  # CSV 数据集文件路径
+    path: "data/reaxys_cleaned.csv"  # CSV 数据集文件路径 (相对路径)
     product_smiles_col: "product_smiles_main"  # 产物SMILES列名
     precursor_smiles_col: "precursor_smiles"  # 前体SMILES列名
+    small_molecular_primary_col: "ylide_leaving_group"  # 小分子key列 (主, 逗号分隔)
     id_col: "rx_id"                           # ID列名
     delimiter: ","                            # CSV分隔符
   # 通用运行选项
@@ -554,14 +585,21 @@ run:
   resume_rehydrate_policy: best_effort
   resume_partial_enabled: true
   dry_run: false      # 干运行模式（仅显示任务，不执行）
-  max_tasks: 1        # 最大任务数 (0=无限制, 1=只读取第一行)
+  max_tasks: 0       # 最大任务数 (0=无限制)
   filter_ids: []      # 精确指定要运行的记录ID (如: ["1", "2"])，留空则按顺序运行
   reaction_type: "[4+3]_default"  # 反应类型 (从reaxys_cleaned.csv数据可知是4+3反应)
+  compute_features: false  # 默认关闭 S4 特征提取；使用 --features 启用
 
   max_workers: 1      # 并行工作进程数
   notify:
     enabled: true
     backend: auto
+
+# P0-4: OldChk 复用控制
+checkpoint:
+  gaussian_oldchk_reuse:
+    enabled: false            # 默认禁用跨理论oldchk传递
+    allow_cross_theory: false # 若启用, 仅当 method/basis/charge/spin 完全一致才允许
 
 # 全局设置
 global:
@@ -578,13 +616,15 @@ s0:
   persist_graph: true
   fail_policy: degrade
   generate_intermediates: false
-  enable_dr_paths: false
+  dr_completion:
+    enabled: true
+    default_branch_when_unreported: true
 
 # ==================== Reference States (小分子参考态) ====================
 # 小分子离去基团目录，用于：
 #   1. Step 1 产物构象搜索时处理离去基团
 #   2. 参考态能量计算 (reference_states.py)
-#   3. 数据集中 ylide_leaving_group / leaving_group 字段的解析
+#   3. 数据集中 small_molecular_primary / small_molecular_fallback 字段的解析 (legacy: ylide_leaving_group / leaving_group)
 # 配置格式：
 #   <key>:           # 离去基团标识符（数据集中使用的 key，如 "AcOH"）
 #     smiles: ""     # SMILES 字符串（必填）
@@ -592,15 +632,27 @@ s0:
 #     multiplicity: 1  # 自旋多重度（默认 1，单重态）
 reference_states:
   small_molecule_map:
-    # 乙酸 (Acetic Acid) - 最常见的离去基团
+  # 乙酸 (Acetic Acid) - 最常见的离去基团
     AcOH:
       smiles: "CC(=O)O"
       charge: 0
       multiplicity: 1
-    
+     
     # 三氟乙醇 (Trifluoroethanol)
     TFE:
       smiles: "OCC(F)(F)F"
+      charge: 0
+      multiplicity: 1
+    
+    # DMDO (Dimethyldioxirane) - 用于联烯酰胺氧化形成 1,3-偶极子
+    DMDO:
+      smiles: "CC1(C)OO1"
+      charge: 0
+      multiplicity: 1
+    
+    # 丙酮 (Acetone) - DMDO 氧化后的共产物
+    acetone:
+      smiles: "CC(=O)C"
       charge: 0
       multiplicity: 1
     
@@ -624,6 +676,19 @@ reference_states:
     #   charge: 0
     #   multiplicity: 1
 
+# ==================== Reaction Reference Terms (反应参考态计量关系) ====================
+# 定义 precursor → intermediate 转化中涉及的氧化剂/共产物
+# 用于 ConditionThermoCalculator 计算完整热力学链条
+reaction_reference_terms:
+  "[4+3]_default":
+    precursor_to_intermediate:
+      reactants:
+        precursor: 1
+        DMDO: 1
+      products:
+        intermediate: 1
+        acetone: 1
+
 # ==================== Reaction Profiles (反应机理配置) ====================
 # 针对不同反应类型提供预置配置，key 以 "_" 开头表示内置模板
 # 使用方式: 在代码中根据反应类型选择对应 profile
@@ -645,7 +710,7 @@ reaction_profiles:
   # [4+3] 环加成反应默认配置
   "[4+3]_default":
     forming_bond_count: 2
-    s2_strategy: forward_scan
+    s2_strategy: retro_scan
     # 扫描参数
     scan:
       scan_start_distance: 3.5
@@ -668,3 +733,45 @@ reaction_profiles:
       scan_force_constant: 0.5
       min_valid_points: 5
       reject_boundary_maximum: true
+
+# ==================== V3.0 Scheduler (调度架构) ====================
+# V3.0 调度架构：将 RPH 从 "每个目录独立跑完整 pipeline"
+# 改造为 "由 S0 驱动的 reaction/branch/condition 任务图"
+scheduler:
+  mode: v3
+  v3:
+    precompute_small_molecules: true
+    precursor_s1_once_per_reaction: true
+    branch_product_only_s1: true
+    condition_branch_thermo: true
+
+# ==================== Intra-Reaction Parallel (单反应内部并行) ====================
+intra_reaction_parallel:
+  enabled: false
+  total_cores: 16
+  total_mem: "52GB"
+
+  s1:
+    molecule_parallel: false
+    max_molecule_workers: 1
+    crest_cores: 16
+    conformer_parallel: false
+    max_conformer_workers: 1
+    opt_cores_per_job: 16
+    opt_mem_per_job: "48GB"
+    sp_cores_per_job: 16
+    sp_maxcore_per_job: 5200
+
+  s2:
+    nproc: 16
+
+  s3:
+    parallel_intermediate_ts: true
+    ts_opt_cores: 9
+    ts_opt_mem: "29GB"
+    intermediate_opt_cores: 7
+    intermediate_opt_mem: "23GB"
+    sp_parallel: true
+    sp_workers: 2
+    sp_cores_per_job: 8
+    sp_maxcore_per_job: 2600

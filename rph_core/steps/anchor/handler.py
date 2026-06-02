@@ -25,6 +25,7 @@ from dataclasses import asdict, dataclass
 from rph_core.utils.log_manager import LoggerMixin
 from rph_core.steps.anchor.engine_factory import create_s1_engine
 from rph_core.steps.conformer_search.protocols import resolve_protocol_spec
+from rph_core.utils.intra_reaction_scheduler import IntraReactionScheduler, ParallelQCJob
 from rph_core.utils.molecule_utils import is_small_molecule
 from rph_core.utils.small_molecule_cache import SmallMoleculeCache
 from rph_core.utils.ui import get_progress_manager
@@ -40,6 +41,19 @@ class AnchorPhaseResult:
     anchored_molecules: Dict[str, Dict[str, Any]]
     # 格式: {"reactant_A": {"xyz": Path, "e_sp": float}, ...}
     error_message: Optional[str] = None
+
+
+@dataclass
+class MoleculeAnchorOutcome:
+    """Thread-safe return payload for one molecule-level anchor job."""
+
+    name: str
+    smiles: str
+    index: int
+    total: int
+    status: str
+    anchored_data: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
 
 
 class AnchorPhase(LoggerMixin):
@@ -140,6 +154,14 @@ class AnchorPhase(LoggerMixin):
     def _protocol_handoff_summary(self) -> str:
         return "shared DFT handoff → Gaussian OPT/FREQ → ORCA final SP"
 
+    def run_single_molecule(
+        self,
+        name: str,
+        smiles: str,
+        base_work_dir: Optional[Path] = None,
+    ) -> AnchorPhaseResult:
+        return self.run({name: smiles}, base_work_dir=base_work_dir)
+
     def run(
         self,
         molecules: Dict[str, str],
@@ -188,323 +210,74 @@ class AnchorPhase(LoggerMixin):
         pm = get_progress_manager()
         total_mols = len(molecules)
         anchored_molecules: Dict[str, Dict[str, Any]] = {}
-        error_messages = []
-        molecule_statuses: Dict[str, Dict[str, Any]] = {}
-
-        for idx, (name, smiles) in enumerate(molecules.items()):
-            if pm:
-                start_progress = int((idx / max(total_mols, 1)) * 100)
-                pm.update_step(
-                    "s1",
-                    completed=min(start_progress, 99),
-                    description=f"S1: Anchoring [{idx+1}/{total_mols}] '{name}'"
-                )
-                pm.set_subtask("S1", "Anchor Molecules", idx + 1, total_mols)
-            
-            self.logger.info(f"\n[S1] >>> Molecule {idx + 1}/{total_mols} · {name}")
-            self.logger.info(f"[S1]     SMILES      : {smiles}")
-            self.logger.info(f"[S1]     Search tier : {self._protocol_tier_label()}")
-
-            # Write status file
-            status_file = self.base_work_dir / ".rph_step_status.json"
-            status_data = {
-                "step": "s1",
-                "molecule": name,
-                "index": idx + 1,
-                "total": total_mols,
-                "smiles": smiles,
-                "status": "running",
-                "phase": "anchor_start",
-                "molecule_statuses": molecule_statuses,
-            }
-            with open(status_file, "w") as f:
-                json.dump(status_data, f, indent=4)
-
-            molecule_statuses[name] = {
-                "status": "running",
+        error_messages: List[str] = []
+        molecule_statuses: Dict[str, Dict[str, Any]] = {
+            name: {
+                "status": "queued",
                 "index": idx + 1,
                 "total": total_mols,
                 "smiles": smiles,
             }
-            self._emit_anchor_progress(
-                "molecule_started",
-                {
-                    "molecule": name,
-                    "index": idx + 1,
-                    "total": total_mols,
-                },
-            )
+            for idx, (name, smiles) in enumerate(molecules.items())
+        }
+        status_file = self.base_work_dir / ".rph_step_status.json"
+        self._write_anchor_status_file(
+            status_file,
+            status="running",
+            phase="anchor_queued",
+            molecule_statuses=molecule_statuses,
+            total=total_mols,
+        )
 
-            best_sp_out: Optional[Path] = None
-            sp_energy: Optional[float] = None
-            final_opt_sp_stage_meta: Dict[str, Any] = self._default_final_opt_sp_meta(stage_status="not_run")
+        outcomes = self._run_molecule_anchor_jobs(
+            molecules=molecules,
+            molecule_statuses=molecule_statuses,
+            status_file=status_file,
+            pm=pm,
+        )
 
-            try:
-                is_small = is_small_molecule(smiles, threshold=self.small_mol_threshold)
-                cache_hit = False
-                
-                theory_signature = self._build_theory_signature()
-
-                if is_small and self.small_mol_cache.exists(smiles, theory_signature):
-                    cache_dir = self.small_mol_cache.get_path(smiles)
-                    if isinstance(cache_dir, Path):
-                        self.logger.info(f"    ✓ Small molecule {name} found in cache, skipping")
-                        local_mol_dir = self.base_work_dir / name
-                        local_mol_dir.mkdir(parents=True, exist_ok=True)
-                        local_dft_dir = local_mol_dir / "finalDFT"
-                        local_dft_dir.mkdir(parents=True, exist_ok=True)
-
-                        cached_min_xyz = cache_dir / "molecule_min.xyz"
-                        local_min_xyz = local_mol_dir / f"{name}_global_min.xyz"
-                        shutil.copy(cached_min_xyz, local_min_xyz)
-
-                        cached_dft = cache_dir / "finalDFT"
-                        if not cached_dft.exists():
-                            cached_dft = cache_dir / "dft"
-                        if cached_dft.exists():
-                            for f in cached_dft.glob("*"):
-                                if f.is_file():
-                                    shutil.copy(f, local_dft_dir / f.name)
-                        
-                        best_sp_out = local_min_xyz
-                        with open(best_sp_out, "r") as f:
-                            lines = f.readlines()
-                            comment = lines[1] if len(lines) > 1 else ""
-                            import re
-                            match = re.search(r"E=([-+]?\d*\.\d+|\d+)", comment)
-                            if match:
-                                sp_energy = float(match.group(1))
-                            else:
-                                try:
-                                    sp_energy = float(comment.split()[0])
-                                except (ValueError, IndexError):
-                                    sp_energy = 0.0
-                        
-                        cache_hit = True
-                        final_opt_sp_stage_meta = self._default_final_opt_sp_meta(stage_status="cache_reused")
-
-                if not cache_hit:
-                    lock_file = None
-                    if is_small:
-                        lock_file = self.small_mol_cache.acquire_compute_lock(smiles)
-                        if lock_file is None:
-                            self.logger.info(f"    ⏳ Small-molecule cache busy for {name}, waiting...")
-                            import time
-                            time.sleep(1)
-                            if self.small_mol_cache.exists(smiles, theory_signature):
-                                cache_dir = self.small_mol_cache.get_path(smiles)
-                                if isinstance(cache_dir, Path):
-                                    self.logger.info(f"    ✓ Small molecule {name} found in cache after wait")
-                                    local_mol_dir = self.base_work_dir / name
-                                    local_mol_dir.mkdir(parents=True, exist_ok=True)
-                                    local_dft_dir = local_mol_dir / "finalDFT"
-                                    local_dft_dir.mkdir(parents=True, exist_ok=True)
-
-                                    cached_min_xyz = cache_dir / "molecule_min.xyz"
-                                    local_min_xyz = local_mol_dir / f"{name}_global_min.xyz"
-                                    shutil.copy(cached_min_xyz, local_min_xyz)
-
-                                    cached_dft = cache_dir / "finalDFT"
-                                    if not cached_dft.exists():
-                                        cached_dft = cache_dir / "dft"
-                                    if cached_dft.exists():
-                                        for f in cached_dft.glob("*"):
-                                            if f.is_file():
-                                                shutil.copy(f, local_dft_dir / f.name)
-                                    
-                                    best_sp_out = local_min_xyz
-                                    with open(best_sp_out, "r") as f:
-                                        lines = f.readlines()
-                                        comment = lines[1] if len(lines) > 1 else ""
-                                        import re
-                                        match = re.search(r"E=([-+]?\d*\.\d+|\d+)", comment)
-                                        if match:
-                                            sp_energy = float(match.group(1))
-                                        else:
-                                            try:
-                                                sp_energy = float(comment.split()[0])
-                                            except (ValueError, IndexError):
-                                                sp_energy = 0.0
-                                    
-                                    cache_hit = True
-                    
-                    if not cache_hit:
-                        temp_engine = create_s1_engine(
-                            protocol=self.protocol,
-                            config=self.config,
-                            work_dir=self.base_work_dir,
-                            molecule_name=name,
-                        )
-                        
-                        if is_small:
-                            self.logger.info(f"    🧪 任务类型: 刚性小分子优化 ({name})")
-                            self.logger.info("    ℹ️  说明: 分子较小，跳过构象搜索，直接进行单构象优化。")
-                            best_sp_out, sp_energy = temp_engine.run_optimization_only(smiles=smiles)
-                        else:
-                            self.logger.info(f"    🧬 任务类型: 柔性分子构象搜索与优化 ({name})")
-                            self.logger.info("    ℹ️  说明: 执行系综搜索 (CREST) + DFT OPT-SP 耦合循环。")
-                            best_sp_out, sp_energy = temp_engine.run(smiles=smiles)
-
-                        stage_meta_from_engine = getattr(temp_engine, "last_final_opt_sp_meta", None)
-                        if isinstance(stage_meta_from_engine, dict) and stage_meta_from_engine:
-                            final_opt_sp_stage_meta = {
-                                **self._default_final_opt_sp_meta(stage_status="completed"),
-                                **stage_meta_from_engine,
-                            }
-                        else:
-                            final_opt_sp_stage_meta = self._default_final_opt_sp_meta(stage_status="completed")
-
-                        if is_small:
-                            cache_dir = self.small_mol_cache.get_or_create(smiles, name=name)
-                            shutil.copy(best_sp_out, cache_dir / "molecule_min.xyz")
-                            mol_dft_dir = self.base_work_dir / name / "finalDFT"
-                            if not mol_dft_dir.exists():
-                                mol_dft_dir = self.base_work_dir / name / "dft"
-                            if mol_dft_dir.exists():
-                                dest_dft = cache_dir / "finalDFT"
-                                if dest_dft.exists():
-                                    shutil.rmtree(dest_dft)
-                                shutil.copytree(mol_dft_dir, dest_dft)
-                            self.small_mol_cache.write_cache_meta(smiles, theory_signature)
-                            self.logger.info(f"    ✓ Cached small molecule: {name}")
-                    
-                    if lock_file:
-                        self.small_mol_cache.release_compute_lock(lock_file)
-
-                if best_sp_out is not None:
-                    self.logger.info(f"    ✓ Finalized output: {self._display_path(best_sp_out)}")
-                self.logger.info(f"    ✓ SP 能量: {sp_energy:.8f} Hartree")
-
-                conformer_state = self.base_work_dir / name / "conformer_state.json"
-
-                mol_dir = self.base_work_dir / name / "finalDFT"
-                if not mol_dir.exists():
-                    mol_dir = self.base_work_dir / name / "dft"
-                log_file = None
-                chk_file = None
-                fchk_file = None
-
-                if best_sp_out and best_sp_out.suffix == ".log":
-                    log_file = best_sp_out
-                elif best_sp_out and best_sp_out.suffix == ".out":
-                    log_file = best_sp_out
-                else:
-                    potential_logs = list(mol_dir.glob("*.log")) + list(mol_dir.glob("*.out"))
-                    if potential_logs:
-                        log_file = potential_logs[0]
-
-                if best_sp_out and best_sp_out.stem:
-                    potential_chk = (
-                        list(mol_dir.glob(f"{best_sp_out.stem}.chk"))
-                        + list(mol_dir.glob("*.chk"))
-                    )
-                    if potential_chk:
-                        chk_file = potential_chk[0]
-                        from rph_core.utils.qc_interface import try_formchk
-                        fchk_file = try_formchk(chk_file)
-
-                anchored_molecules[name] = {
-                    "xyz": best_sp_out,
-                    "e_sp": sp_energy,
-                    "log": log_file,
-                    "chk": chk_file,
-                    "fchk": fchk_file,
-                    "qm_output": best_sp_out,
-                    "conformer_state": conformer_state if conformer_state.exists() else None,
-                    "protocol": self.protocol,
-                    "engine": "ConformerEngine",
-                    "final_opt_sp_stage_meta": final_opt_sp_stage_meta,
-                }
-
+        for outcome in outcomes:
+            name = outcome.name
+            if outcome.status == "completed" and outcome.anchored_data is not None:
+                anchored_molecules[name] = outcome.anchored_data
+                conformer_state = outcome.anchored_data.get("conformer_state")
                 molecule_statuses[name] = {
                     "status": "completed",
-                    "index": idx + 1,
-                    "total": total_mols,
-                    "smiles": smiles,
-                    "e_sp": sp_energy,
-                    "conformer_state": str(conformer_state) if conformer_state.exists() else "",
+                    "index": outcome.index,
+                    "total": outcome.total,
+                    "smiles": outcome.smiles,
+                    "e_sp": outcome.anchored_data.get("e_sp"),
+                    "conformer_state": str(conformer_state) if isinstance(conformer_state, Path) else "",
                 }
-                self._emit_anchor_progress(
-                    "molecule_completed",
-                    {
-                        "molecule": name,
-                        "index": idx + 1,
-                        "total": total_mols,
-                        "energy_hartree": sp_energy,
-                    },
-                )
-                with open(status_file, "w") as f:
-                    json.dump(
-                        {
-                            "step": "s1",
-                            "molecule": name,
-                            "index": idx + 1,
-                            "total": total_mols,
-                            "smiles": smiles,
-                            "status": "running",
-                            "phase": "anchor_running",
-                            "molecule_statuses": molecule_statuses,
-                        },
-                        f,
-                        indent=4,
-                    )
-
-                self.logger.info(f"  ✓ {name} anchor complete")
-
-            except Exception as e:
-                error_msg = f"{name} 锚定失败: {e}"
-                self.logger.error(error_msg, exc_info=True)
+            else:
+                error_msg = outcome.error or f"{name} 锚定失败: unknown error"
                 error_messages.append(error_msg)
                 molecule_statuses[name] = {
                     "status": "failed",
-                    "index": idx + 1,
-                    "total": total_mols,
-                    "smiles": smiles,
-                    "error": str(e),
+                    "index": outcome.index,
+                    "total": outcome.total,
+                    "smiles": outcome.smiles,
+                    "error": error_msg,
                 }
-                self._emit_anchor_progress(
-                    "molecule_failed",
-                    {
-                        "molecule": name,
-                        "index": idx + 1,
-                        "total": total_mols,
-                        "error": str(e),
-                    },
-                )
+                if outcome.anchored_data is not None:
+                    anchored_molecules[name] = outcome.anchored_data
 
-                mol_dir = self.base_work_dir / name
-                potential_xyz = list((mol_dir / "finalDFT").glob("*_SP.out"))
-                if not potential_xyz:
-                    potential_xyz = list((mol_dir / "dft").glob("*_SP.out"))
-                if potential_xyz:
-                    anchored_molecules[name] = {
-                        "xyz": potential_xyz[0],
-                        "e_sp": None,
-                        "failed": True
-                    }
-
-                with open(status_file, "w") as f:
-                    json.dump(
-                        {
-                            "step": "s1",
-                            "molecule": name,
-                            "index": idx + 1,
-                            "total": total_mols,
-                            "smiles": smiles,
-                            "status": "running",
-                            "phase": "anchor_running",
-                            "molecule_statuses": molecule_statuses,
-                        },
-                        f,
-                        indent=4,
-                    )
-
+            completed_count = sum(1 for item in molecule_statuses.values() if item.get("status") == "completed")
+            failed_count = sum(1 for item in molecule_statuses.values() if item.get("status") == "failed")
+            self._write_anchor_status_file(
+                status_file,
+                status="running",
+                phase="anchor_running",
+                molecule_statuses=molecule_statuses,
+                current=outcome,
+                total=total_mols,
+            )
             if pm:
-                done_progress = int(((idx + 1) / max(total_mols, 1)) * 100)
+                done_progress = int(((completed_count + failed_count) / max(total_mols, 1)) * 100)
                 pm.update_step(
                     "s1",
                     completed=min(done_progress, 99),
-                    description=f"S1: Anchoring [{idx+1}/{total_mols}] '{name}'"
+                    description=f"S1: Anchored {completed_count}/{total_mols} molecules ({failed_count} failed)",
                 )
 
         success = len(error_messages) < len(molecules)
@@ -550,6 +323,396 @@ class AnchorPhase(LoggerMixin):
             )
 
         return result
+
+    def _run_molecule_anchor_jobs(
+        self,
+        *,
+        molecules: Dict[str, str],
+        molecule_statuses: Dict[str, Dict[str, Any]],
+        status_file: Path,
+        pm: Any,
+    ) -> List[MoleculeAnchorOutcome]:
+        total_mols = len(molecules)
+        items = [(idx, name, smiles) for idx, (name, smiles) in enumerate(molecules.items())]
+        if not items:
+            return []
+
+        scheduler = IntraReactionScheduler(self.config)
+        max_workers = min(total_mols, max(1, scheduler.s1_max_molecule_workers))
+        parallel_enabled = scheduler.s1_molecule_parallel and max_workers > 1
+
+        if not parallel_enabled:
+            self.logger.info("[S1] Molecule-level parallel: disabled; running anchors sequentially")
+            outcomes: List[MoleculeAnchorOutcome] = []
+            for idx, name, smiles in items:
+                molecule_statuses[name] = {
+                    "status": "running",
+                    "index": idx + 1,
+                    "total": total_mols,
+                    "smiles": smiles,
+                }
+                self._write_anchor_status_file(
+                    status_file,
+                    status="running",
+                    phase="anchor_running",
+                    molecule_statuses=molecule_statuses,
+                    total=total_mols,
+                    molecule=name,
+                    index=idx + 1,
+                    smiles=smiles,
+                )
+                if pm:
+                    start_progress = int((idx / max(total_mols, 1)) * 100)
+                    pm.update_step(
+                        "s1",
+                        completed=min(start_progress, 99),
+                        description=f"S1: Anchoring [{idx+1}/{total_mols}] '{name}'",
+                    )
+                    pm.set_subtask("S1", "Anchor Molecules", idx + 1, total_mols)
+                outcomes.append(self._anchor_single_molecule(name, smiles, idx, total_mols))
+            return outcomes
+
+        lane = scheduler.get_s1_molecule_lane()
+        self.logger.info(
+            "[S1] Molecule-level parallel: enabled (%s molecules, max_workers=%s, crest_cores/job=%s)",
+            total_mols,
+            max_workers,
+            lane.nproc,
+        )
+        self._emit_anchor_progress(
+            "molecule_parallel_started",
+            {"total": total_mols, "max_workers": max_workers, "lane_nproc": lane.nproc},
+        )
+        if pm:
+            pm.update_step(
+                "s1",
+                completed=0,
+                description=f"S1: Anchoring {total_mols} molecules in parallel ({max_workers} workers)",
+            )
+
+        outcomes = []
+        for batch_start in range(0, total_mols, max_workers):
+            batch = items[batch_start:batch_start + max_workers]
+            batch_ids = [name for _, name, _ in batch]
+            self.logger.info(
+                "[S1] Molecule parallel batch %s-%s/%s: %s",
+                batch_start + 1,
+                batch_start + len(batch),
+                total_mols,
+                ", ".join(batch_ids),
+            )
+            for idx, name, smiles in batch:
+                molecule_statuses[name] = {
+                    "status": "running",
+                    "index": idx + 1,
+                    "total": total_mols,
+                    "smiles": smiles,
+                }
+            self._write_anchor_status_file(
+                status_file,
+                status="running",
+                phase="anchor_parallel_batch",
+                molecule_statuses=molecule_statuses,
+                total=total_mols,
+            )
+
+            jobs = [
+                ParallelQCJob(
+                    job_id=name,
+                    lane=lane,
+                    func=self._anchor_single_molecule,
+                    args=(name, smiles, idx, total_mols),
+                    description=f"S1 anchor for {name}",
+                )
+                for idx, name, smiles in batch
+            ]
+            lookup = {name: (idx, smiles) for idx, name, smiles in batch}
+            for result in scheduler.run_parallel(jobs):
+                if result.success and isinstance(result.result, MoleculeAnchorOutcome):
+                    outcomes.append(result.result)
+                    continue
+                idx, smiles = lookup.get(result.job_id, (-1, ""))
+                error = result.error or "molecule_parallel_job_failed"
+                outcomes.append(
+                    MoleculeAnchorOutcome(
+                        name=result.job_id,
+                        smiles=smiles,
+                        index=idx + 1 if idx >= 0 else 0,
+                        total=total_mols,
+                        status="failed",
+                        anchored_data=self._find_failed_molecule_output(result.job_id),
+                        error=f"{result.job_id} 锚定失败: {error}",
+                    )
+                )
+        return outcomes
+
+    def _anchor_single_molecule(self, name: str, smiles: str, idx: int, total_mols: int) -> MoleculeAnchorOutcome:
+        self.logger.info(f"\n[S1] >>> Molecule {idx + 1}/{total_mols} · {name}")
+        self.logger.info(f"[S1]     SMILES      : {smiles}")
+        self.logger.info(f"[S1]     Search tier : {self._protocol_tier_label()}")
+        self._emit_anchor_progress(
+            "molecule_started",
+            {"molecule": name, "index": idx + 1, "total": total_mols},
+        )
+
+        best_sp_out: Optional[Path] = None
+        sp_energy: Optional[float] = None
+        final_opt_sp_stage_meta: Dict[str, Any] = self._default_final_opt_sp_meta(stage_status="not_run")
+        lock_file: Optional[Path] = None
+
+        try:
+            if self.small_mol_cache is None:
+                raise RuntimeError("SmallMoleculeCache was not initialized")
+
+            is_small = is_small_molecule(smiles, threshold=self.small_mol_threshold)
+            cache_hit = False
+            theory_signature = self._build_theory_signature()
+
+            if is_small and self.small_mol_cache.exists(smiles, theory_signature):
+                best_sp_out, sp_energy = self._reuse_small_molecule_cache(name, smiles)
+                cache_hit = True
+                final_opt_sp_stage_meta = self._default_final_opt_sp_meta(stage_status="cache_reused")
+
+            if not cache_hit:
+                if is_small:
+                    lock_file = self.small_mol_cache.acquire_compute_lock(smiles)
+                    if lock_file is None:
+                        self.logger.info(f"    ⏳ Small-molecule cache busy for {name}; checking completed cache")
+                        if self.small_mol_cache.exists(smiles, theory_signature):
+                            best_sp_out, sp_energy = self._reuse_small_molecule_cache(name, smiles)
+                            cache_hit = True
+
+                if not cache_hit:
+                    temp_engine = create_s1_engine(
+                        protocol=self.protocol,
+                        config=self.config,
+                        work_dir=self.base_work_dir,
+                        molecule_name=name,
+                    )
+
+                    if is_small:
+                        self.logger.info(f"    🧪 任务类型: 刚性小分子优化 ({name})")
+                        self.logger.info("    ℹ️  说明: 分子较小，跳过构象搜索，直接进行单构象优化。")
+                        best_sp_out, sp_energy = temp_engine.run_optimization_only(smiles=smiles)
+                    else:
+                        self.logger.info(f"    🧬 任务类型: 柔性分子构象搜索与优化 ({name})")
+                        self.logger.info("    ℹ️  说明: 执行系综搜索 (CREST) + DFT OPT-SP 耦合循环。")
+                        best_sp_out, sp_energy = temp_engine.run(smiles=smiles)
+
+                    stage_meta_from_engine = getattr(temp_engine, "last_final_opt_sp_meta", None)
+                    if isinstance(stage_meta_from_engine, dict) and stage_meta_from_engine:
+                        final_opt_sp_stage_meta = {
+                            **self._default_final_opt_sp_meta(stage_status="completed"),
+                            **stage_meta_from_engine,
+                        }
+                    else:
+                        final_opt_sp_stage_meta = self._default_final_opt_sp_meta(stage_status="completed")
+
+                    if is_small:
+                        self._store_small_molecule_cache(name, smiles, best_sp_out, theory_signature)
+
+            if best_sp_out is None or sp_energy is None:
+                raise RuntimeError("S1 engine did not produce a final structure and SP energy")
+
+            self.logger.info(f"    ✓ Finalized output: {self._display_path(best_sp_out)}")
+            self.logger.info(f"    ✓ SP 能量: {sp_energy:.8f} Hartree")
+            anchored_data = self._build_anchored_molecule_record(
+                name=name,
+                best_sp_out=best_sp_out,
+                sp_energy=sp_energy,
+                final_opt_sp_stage_meta=final_opt_sp_stage_meta,
+            )
+            self._emit_anchor_progress(
+                "molecule_completed",
+                {
+                    "molecule": name,
+                    "index": idx + 1,
+                    "total": total_mols,
+                    "energy_hartree": sp_energy,
+                },
+            )
+            self.logger.info(f"  ✓ {name} anchor complete")
+            return MoleculeAnchorOutcome(
+                name=name,
+                smiles=smiles,
+                index=idx + 1,
+                total=total_mols,
+                status="completed",
+                anchored_data=anchored_data,
+            )
+        except Exception as exc:
+            error_msg = f"{name} 锚定失败: {exc}"
+            self.logger.error(error_msg, exc_info=True)
+            self._emit_anchor_progress(
+                "molecule_failed",
+                {"molecule": name, "index": idx + 1, "total": total_mols, "error": str(exc)},
+            )
+            return MoleculeAnchorOutcome(
+                name=name,
+                smiles=smiles,
+                index=idx + 1,
+                total=total_mols,
+                status="failed",
+                anchored_data=self._find_failed_molecule_output(name),
+                error=error_msg,
+            )
+        finally:
+            if lock_file is not None and self.small_mol_cache is not None:
+                self.small_mol_cache.release_compute_lock(lock_file)
+
+    def _reuse_small_molecule_cache(self, name: str, smiles: str) -> Tuple[Path, float]:
+        if self.small_mol_cache is None:
+            raise RuntimeError("SmallMoleculeCache was not initialized")
+        cache_dir = self.small_mol_cache.get_path(smiles)
+        if not isinstance(cache_dir, Path):
+            raise RuntimeError(f"Invalid small-molecule cache path for {name}")
+        self.logger.info(f"    ✓ Small molecule {name} found in cache, skipping")
+        local_mol_dir = self.base_work_dir / name
+        local_mol_dir.mkdir(parents=True, exist_ok=True)
+        local_dft_dir = local_mol_dir / "finalDFT"
+        local_dft_dir.mkdir(parents=True, exist_ok=True)
+
+        cached_min_xyz = cache_dir / "molecule_min.xyz"
+        local_min_xyz = local_mol_dir / f"{name}_global_min.xyz"
+        shutil.copy(cached_min_xyz, local_min_xyz)
+
+        cached_dft = cache_dir / "finalDFT"
+        if not cached_dft.exists():
+            cached_dft = cache_dir / "dft"
+        if cached_dft.exists():
+            for item in cached_dft.glob("*"):
+                if item.is_file():
+                    shutil.copy(item, local_dft_dir / item.name)
+        return local_min_xyz, self._extract_xyz_energy(local_min_xyz)
+
+    def _store_small_molecule_cache(
+        self,
+        name: str,
+        smiles: str,
+        best_sp_out: Path,
+        theory_signature: Dict[str, Any],
+    ) -> None:
+        if self.small_mol_cache is None:
+            raise RuntimeError("SmallMoleculeCache was not initialized")
+        cache_dir = self.small_mol_cache.get_or_create(smiles, name=name)
+        shutil.copy(best_sp_out, cache_dir / "molecule_min.xyz")
+        mol_dft_dir = self.base_work_dir / name / "finalDFT"
+        if not mol_dft_dir.exists():
+            mol_dft_dir = self.base_work_dir / name / "dft"
+        if mol_dft_dir.exists():
+            dest_dft = cache_dir / "finalDFT"
+            if dest_dft.exists():
+                shutil.rmtree(dest_dft)
+            shutil.copytree(mol_dft_dir, dest_dft)
+        self.small_mol_cache.write_cache_meta(smiles, theory_signature)
+        self._ensure_cache_thermo_json(cache_dir)
+        self.logger.info(f"    ✓ Cached small molecule: {name}")
+
+    def _ensure_cache_thermo_json(self, cache_dir: Path) -> None:
+        from rph_core.utils.thermo import ensure_thermo_json_from_entry
+
+        _ = ensure_thermo_json_from_entry(cache_dir)
+
+    def _extract_xyz_energy(self, xyz_path: Path) -> float:
+        import re
+
+        with open(xyz_path, "r") as handle:
+            lines = handle.readlines()
+        comment = lines[1] if len(lines) > 1 else ""
+        match = re.search(r"E=([-+]?\d*\.\d+|\d+)", comment)
+        if match:
+            return float(match.group(1))
+        try:
+            return float(comment.split()[0])
+        except (ValueError, IndexError):
+            return 0.0
+
+    def _build_anchored_molecule_record(
+        self,
+        *,
+        name: str,
+        best_sp_out: Path,
+        sp_energy: float,
+        final_opt_sp_stage_meta: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        conformer_state = self.base_work_dir / name / "conformer_state.json"
+        mol_dir = self.base_work_dir / name / "finalDFT"
+        if not mol_dir.exists():
+            mol_dir = self.base_work_dir / name / "dft"
+
+        log_file = None
+        chk_file = None
+        fchk_file = None
+        if best_sp_out.suffix in {".log", ".out"}:
+            log_file = best_sp_out
+        else:
+            potential_logs = list(mol_dir.glob("*.log")) + list(mol_dir.glob("*.out"))
+            if potential_logs:
+                log_file = potential_logs[0]
+
+        if best_sp_out.stem:
+            potential_chk = list(mol_dir.glob(f"{best_sp_out.stem}.chk")) + list(mol_dir.glob("*.chk"))
+            if potential_chk:
+                chk_file = potential_chk[0]
+                from rph_core.utils.qc_interface import try_formchk
+
+                fchk_file = try_formchk(chk_file)
+
+        return {
+            "xyz": best_sp_out,
+            "e_sp": sp_energy,
+            "log": log_file,
+            "chk": chk_file,
+            "fchk": fchk_file,
+            "qm_output": best_sp_out,
+            "conformer_state": conformer_state if conformer_state.exists() else None,
+            "protocol": self.protocol,
+            "engine": "ConformerEngine",
+            "final_opt_sp_stage_meta": final_opt_sp_stage_meta,
+        }
+
+    def _find_failed_molecule_output(self, name: str) -> Optional[Dict[str, Any]]:
+        mol_dir = self.base_work_dir / name
+        potential_xyz = list((mol_dir / "finalDFT").glob("*_SP.out"))
+        if not potential_xyz:
+            potential_xyz = list((mol_dir / "dft").glob("*_SP.out"))
+        if not potential_xyz:
+            return None
+        return {"xyz": potential_xyz[0], "e_sp": None, "failed": True}
+
+    def _write_anchor_status_file(
+        self,
+        status_file: Path,
+        *,
+        status: str,
+        phase: str,
+        molecule_statuses: Dict[str, Dict[str, Any]],
+        total: int,
+        current: Optional[MoleculeAnchorOutcome] = None,
+        molecule: Optional[str] = None,
+        index: Optional[int] = None,
+        smiles: Optional[str] = None,
+    ) -> None:
+        payload: Dict[str, Any] = {
+            "step": "s1",
+            "status": status,
+            "phase": phase,
+            "total": total,
+            "completed": sum(1 for item in molecule_statuses.values() if item.get("status") == "completed"),
+            "failed": sum(1 for item in molecule_statuses.values() if item.get("status") == "failed"),
+            "molecule_statuses": molecule_statuses,
+        }
+        if current is not None:
+            payload.update(
+                {
+                    "molecule": current.name,
+                    "index": current.index,
+                    "smiles": current.smiles,
+                }
+            )
+        elif molecule is not None:
+            payload.update({"molecule": molecule, "index": index, "smiles": smiles})
+        status_file.write_text(json.dumps(self._json_safe(payload), indent=4), encoding="utf-8")
 
     def _write_s1_provenance(
         self,

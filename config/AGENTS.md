@@ -19,7 +19,7 @@ Single source of truth for all runtime configuration: `defaults.yaml` (executabl
 | `theory.optimization` | DFT method/basis/dispersion/engine |
 | `theory.single_point` | SP method/basis/engine |
 | `step1.conformer_search` | `two_stage_enabled`, stage configs, energy windows |
-| `reaction_profiles.*.s2_strategy` | S2 strategy routing (`forward_scan` or `retro_scan`) |
+| `reaction_profiles.*.s2_strategy` | S2 strategy routing (`retro_scan` only in v3.0.0+) |
 | `step2.xtb_settings` | xTB scan controls (`gfn_level`, `solvent`, optional `etemp`) |
 | `step3.reactant_opt.enable_nbo` | NBO disabled by default — enable explicitly |
 | `run.*` | `source` (single/batch/dataset), `resume`, `output_root` |

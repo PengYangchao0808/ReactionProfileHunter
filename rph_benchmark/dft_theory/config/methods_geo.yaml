@@ -1,0 +1,65 @@
+methods:
+  GEO-1:
+    description: ORCA B3LYP-D3BJ geometry
+    engine: orca
+    family: hybrid_gga
+    method: B3LYP
+    basis: def2-SVP
+    scf:
+      accel: RIJCOSX
+      aux_j: def2/J
+    dispersion:
+      mode: external
+      keyword: D3BJ
+
+  GEO-2:
+    description: ORCA PBE0-D3BJ geometry
+    engine: orca
+    family: hybrid_gga
+    method: PBE0
+    basis: def2-SVP
+    scf:
+      accel: RIJCOSX
+      aux_j: def2/J
+    dispersion:
+      mode: external
+      keyword: D3BJ
+
+  GEO-3:
+    description: ORCA r2SCAN-3c efficiency candidate
+    engine: orca
+    family: composite_3c
+    method: r2SCAN-3c
+    basis: mTZVPP
+    aux_basis: null
+    self_contained: true
+    dispersion:
+      mode: forbidden
+
+  GEO-4:
+    description: ORCA M06-2X geometry
+    engine: orca
+    family: hybrid_gga
+    method: M06-2X
+    basis: def2-SVP
+    scf:
+      accel: RIJCOSX
+      aux_j: def2/J
+    dispersion:
+      mode: none
+
+  GEO-5:
+    description: ORCA wB97X-D3BJ geometry
+    engine: orca
+    family: hybrid_gga
+    method: wB97X-D3BJ
+    basis: def2-SVP
+    scf:
+      accel: RIJCOSX
+      aux_j: def2/J
+    dispersion:
+      mode: forbidden
+
+solvent:
+  model: CPCM
+  solvent: acetone

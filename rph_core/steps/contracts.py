@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from rph_core.utils.data_types import MapId, MolIdx
+from rph_core.utils.data_types import MolIdx
 
 
 @dataclass
@@ -14,16 +14,14 @@ class Step0Artifacts:
 @dataclass
 class Step2Input:
     product_xyz: Path
-    forming_bonds: Tuple[Tuple[MapId, MapId], ...]
+    forming_bonds: Tuple[Tuple[MolIdx, MolIdx], ...]
 
 
 @dataclass
 class Step2Artifacts:
     ts_guess_xyz: Path
-    substrate_xyz: Path
     intermediate_xyz: Path
     forming_bonds: Tuple[Tuple[MolIdx, MolIdx], ...]
-    forming_bonds_map: Optional[Tuple[Tuple[MapId, MapId], ...]] = None
     generation_method: str = "unknown"
     status: str = "COMPLETE"
     ts_guess_confidence: str = "high"

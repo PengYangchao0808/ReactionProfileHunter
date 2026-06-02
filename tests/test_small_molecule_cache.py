@@ -49,3 +49,20 @@ def test_invalid_smiles(tmp_path):
     assert not cache.exists(smiles)
     with pytest.raises(ValueError):
         cache.get_or_create(smiles)
+
+
+def test_acquire_compute_lock_creates_cache_entry_dir(tmp_path):
+    cache = SmallMoleculeCache(tmp_path / "SmallMolecules")
+    smiles = "CCO"
+    cache_dir = cache.get_path(smiles)
+
+    assert cache_dir is not None
+    assert not cache_dir.exists()
+
+    lock_file = cache.acquire_compute_lock(smiles, timeout=0.1)
+
+    assert lock_file is not None
+    assert cache_dir.exists()
+    assert lock_file.exists()
+    cache.release_compute_lock(lock_file)
+    assert not lock_file.exists()

@@ -9,7 +9,7 @@ from rph_core.utils.cleaner_adapter import (
 from rph_core.utils.file_io import write_xyz
 
 
-def test_convert_cleaner_row_sets_explicit_zero_based_metadata() -> None:
+def test_convert_cleaner_row_preserves_loader_metadata_without_bond_derivations() -> None:
     row = {
         "rx_id": "rx_1",
         "precursor_smiles": "C=C",
@@ -23,14 +23,17 @@ def test_convert_cleaner_row_sets_explicit_zero_based_metadata() -> None:
     record = convert_cleaner_row_to_record(
         row=row,
         row_index=1,
-        reaction_profiles={"[4+3]_default": {"s2_strategy": "forward_scan"}},
+        reaction_profiles={"[4+3]_default": {"s2_strategy": "retro_scan"}},
     )
 
     assert record is not None
-    assert record.raw.get("formed_bond_index_pairs") == "0-1"
-    assert record.raw.get("forming_bonds") == "0-1"
-    assert record.raw.get("forming_bonds_index_base") == "0"
-    assert record.raw.get("index_base") == "0"
+    assert record.raw.get("map_status") == "OK"
+    assert record.raw.get("map_confidence") == "0.95"
+    assert record.raw.get("mapped_precursor_smiles") == "[CH2:1]=[CH2:2]"
+    assert "formed_bond_index_pairs" not in record.raw
+    assert "forming_bonds" not in record.raw
+    assert "forming_bonds_index_base" not in record.raw
+    assert "index_base" not in record.raw
     assert record.raw.get("reaction_profile") == "[4+3]_default"
 
 

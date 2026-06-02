@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 
 from rph_core.utils.file_io import write_xyz
-from rph_core.steps.step4_features.mech_packager import pack_mechanism_assets
+from rph_features.mech_packager import pack_mechanism_assets
 
 
 # ============================================================================
@@ -54,7 +54,7 @@ def s1_only_dir(tmp_path):
     s2 = tmp_path / "S2_Retro"
     s2.mkdir(parents=True)
 
-    # Create S2 reactant_complex (final fallback)
+    write_xyz(s2 / "intermediate.xyz", coords, symbols, title="S2 Intermediate")
     write_xyz(s2 / "reactant_complex.xyz", coords, symbols, title="S2 Reactant Complex")
 
     return {"S1": s1, "S2": s2}
@@ -77,9 +77,9 @@ def s1_and_s2_neutral_dir(tmp_path):
     # Create S2 neutral_precursor (intermediate)
     write_xyz(s2 / "neutral_precursor.xyz", coords, symbols, title="S2 Neutral Precursor")
 
-    # Create S2 reactant_complex (final fallback)
     coords = np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
     symbols = ["C", "H", "H"]
+    write_xyz(s2 / "intermediate.xyz", coords, symbols, title="S2 Intermediate")
     write_xyz(s2 / "reactant_complex.xyz", coords, symbols, title="S2 Reactant Complex")
 
     return {"S1": s1, "S2": s2}
@@ -91,9 +91,9 @@ def s2_only_dir(tmp_path):
     s2 = tmp_path / "S2_Retro"
     s2.mkdir(parents=True)
 
-    # Create S2 reactant_complex
     coords = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
     symbols = ["C", "H", "H"]
+    write_xyz(s2 / "intermediate.xyz", coords, symbols, title="S2 Intermediate")
     write_xyz(s2 / "reactant_complex.xyz", coords, symbols, title="S2 Reactant Complex")
 
     return {"S2": s2}
@@ -149,7 +149,7 @@ class TestPrecursorPriority:
             'enabled': True,
             'copy_mode': 'copy',
             'dipole_source_priority': ['S3_reactant', 'S2_reactant_complex'],
-            'precursor_source_priority': ['S1_precursor', 'S2_neutral_precursor', 'S2_reactant_complex'],
+            'precursor_source_priority': ['S1_precursor', 'S2_neutral_precursor', 'S2_intermediate'],
             'write_quality_flags': True
         }
 
@@ -178,7 +178,7 @@ class TestPrecursorPriority:
             'enabled': True,
             'copy_mode': 'copy',
             'dipole_source_priority': ['S3_reactant', 'S2_reactant_complex'],
-            'precursor_source_priority': ['S1_precursor', 'S2_neutral_precursor', 'S2_reactant_complex'],
+            'precursor_source_priority': ['S1_precursor', 'S2_neutral_precursor', 'S2_intermediate'],
             'write_quality_flags': True
         }
 
@@ -209,7 +209,7 @@ class TestPrecursorPriority:
             'enabled': True,
             'copy_mode': 'copy',
             'dipole_source_priority': ['S3_reactant', 'S2_reactant_complex'],
-            'precursor_source_priority': ['S1_precursor', 'S2_neutral_precursor', 'S2_reactant_complex'],
+            'precursor_source_priority': ['S1_precursor', 'S2_neutral_precursor', 'S2_intermediate'],
             'write_quality_flags': True
         }
 
@@ -229,7 +229,7 @@ class TestPrecursorPriority:
 
         precursor_asset = mech_index['assets']['mech_step1_precursor']
         assert precursor_asset is not None
-        assert precursor_asset['source_label'] == 'S2_reactant_complex'
+        assert precursor_asset['source_label'] == 'S2_intermediate'
 
     def test_custom_priority_order(self, s1_and_s2_neutral_dir, tmp_path):
         """Custom priority order should be respected."""
@@ -237,7 +237,7 @@ class TestPrecursorPriority:
             'enabled': True,
             'copy_mode': 'copy',
             'dipole_source_priority': ['S3_reactant', 'S2_reactant_complex'],
-            'precursor_source_priority': ['S2_neutral_precursor', 'S2_reactant_complex', 'S1_precursor'],  # Custom order
+            'precursor_source_priority': ['S2_neutral_precursor', 'S2_intermediate', 'S1_precursor'],
             'write_quality_flags': True
         }
 
@@ -267,7 +267,7 @@ class TestPrecursorPriority:
             'enabled': True,
             'copy_mode': 'copy',
             'dipole_source_priority': ['S3_reactant', 'S2_reactant_complex'],
-            'precursor_source_priority': ['S1_precursor', 'S2_neutral_precursor', 'S2_reactant_complex'],
+            'precursor_source_priority': ['S1_precursor', 'S2_neutral_precursor', 'S2_intermediate'],
             'write_quality_flags': True
         }
 

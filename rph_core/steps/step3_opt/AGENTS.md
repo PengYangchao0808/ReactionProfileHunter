@@ -38,7 +38,7 @@ S3_TransitionAnalysis/
 ├── ts_opt/
 │   ├── berny/             # primary Berny attempt
 │   └── L2_SP/              # L2 single-point on TS
-├── ASM_SP_Mat/             # activation strain matrix
+
 └── (legacy directories preserved for backward compatibility)
 ```
 

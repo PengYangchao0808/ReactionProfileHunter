@@ -26,7 +26,6 @@ def _make_hunter(tmp_path: Path) -> SimpleNamespace:
     hunter._resolve_product_xyz_for_s2 = MagicMock()
     hunter._resolve_profile_key = MagicMock(return_value="[4+3]_default")
     hunter._resolve_forming_bonds_for_s2 = MagicMock(return_value=((0, 1), (2, 3)))
-    hunter._resolve_forward_scan_config = MagicMock(return_value={"scan_start_distance": 3.5, "scan_end_distance": 1.8})
     hunter._build_step2_signature = MagicMock(return_value={"sig": "ok"})
     hunter._resolve_s1_artifacts = MagicMock(
         return_value={
@@ -122,7 +121,7 @@ def test_phase3c_full_chain_no_fallback_when_dft_geometry(protocol: str, tmp_pat
     step4 = run_step4(
         hunter=hunter,
         ts_final_xyz=step3.ts_final_xyz,
-        substrate_xyz=step2.substrate_xyz,
+        intermediate_xyz=step2.intermediate_xyz,
         product_xyz=product,
         work_dir=tmp_path,
         forming_bonds=step2.forming_bonds,
@@ -230,7 +229,7 @@ def test_phase3c_chain_survives_fallback_path(tmp_path: Path) -> None:
     step4 = run_step4(
         hunter=hunter,
         ts_final_xyz=step3.ts_final_xyz,
-        substrate_xyz=step2.substrate_xyz,
+        intermediate_xyz=step2.intermediate_xyz,
         product_xyz=product,
         work_dir=tmp_path,
         forming_bonds=step2.forming_bonds,

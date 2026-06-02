@@ -66,6 +66,20 @@ def test_generate_input_with_solvent(sample_xyz, tmp_path):
     assert "smd true" in content
 
 
+def test_generate_input_with_cpcm_solvent_model(sample_xyz, tmp_path):
+    """Benchmark GEO uses CPCM, which must not be rendered as SMD."""
+    orca = ORCAInterface(
+        solvent="acetone",
+        config={"theory": {"solvent": {"model": "CPCM", "solvent": "acetone"}}},
+    )
+    inp_file = orca._generate_input(sample_xyz, tmp_path)
+
+    content = inp_file.read_text()
+    assert "CPCM(Acetone)" in content
+    assert "SMDsolvent" not in content
+    assert "smd true" not in content
+
+
 def test_generate_input_multiple_solvents(sample_xyz, tmp_path):
     """测试多种溶剂支持"""
     solvents = ["water", "toluene", "dichloromethane", "ethanol"]
@@ -580,3 +594,67 @@ Session #7: 真实 ORCA 集成测试
 - Mock 测试 (Sessions #1-#6 已完成)
 - 验证脚本 (verify_orca.py, verify_session2.py 已创建)
 """
+
+
+# ──────────────────────────────────────────────────────────────────
+# P0: ORCA final xyz resolution tests
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_resolve_orca_final_xyz_prefers_sibling_over_out_parsing(tmp_path: Path) -> None:
+    orca = ORCAInterface()
+    out_file = tmp_path / "test_opt_abc123.out"
+    out_file.write_text("""
+ORCA TERMINATED NORMALLY
+CARTESIAN COORDINATES (ANGSTROEM)
+---------------------------------
+C      0.000000      0.000000      0.000000
+H      1.000000      0.000000      0.000000
+H     -1.000000      0.000000      0.000000
+""")
+    input_xyz = tmp_path / "input.xyz"
+    input_xyz.write_text("3\n\nC 0 0 0\nH 0 0 1\nH 0 1 0\n")
+    sibling_xyz = tmp_path / "test_opt_abc123.xyz"
+    sibling_xyz.write_text("3\n\nC 1.0 0.0 0.0\nH 2.0 0.0 0.0\nH 0.0 0.0 0.0\n")
+
+    result = orca._resolve_orca_final_xyz(out_file, input_xyz)
+    assert result == sibling_xyz
+
+
+def test_resolve_orca_final_xyz_falls_back_to_out_when_no_sibling(tmp_path: Path) -> None:
+    orca = ORCAInterface()
+    out_file = tmp_path / "test_opt_def456.out"
+    out_file.write_text(
+        "ORCA TERMINATED NORMALLY\n"
+        "FINAL SINGLE POINT ENERGY      -100.0\n"
+        "CARTESIAN COORDINATES (ANGSTROEM)\n"
+        "---------------------------------\n"
+        "C      2.000000      0.000000      0.000000\n"
+        "H      3.000000      0.000000      0.000000\n"
+        "H      1.000000      0.000000      0.000000\n"
+        "\n"
+        "HIRSHFELD ANALYSIS\n"
+    )
+    input_xyz = tmp_path / "input.xyz"
+    input_xyz.write_text("3\n\nC 0 0 0\nH 0 0 1\nH 0 1 0\n")
+
+    result = orca._resolve_orca_final_xyz(out_file, input_xyz)
+    assert result is not None, "Fallback to .out parsing should produce a valid .rph_fallback.xyz"
+    assert result.exists()
+    assert ".rph_fallback" in result.name
+
+
+def test_extract_final_orca_coordinates_returns_sibling_xyz_coords(tmp_path: Path) -> None:
+    orca = ORCAInterface()
+    out_file = tmp_path / "ts_opt_ff0001.out"
+    out_file.write_text("ORCA TERMINATED NORMALLY\n")
+    input_xyz = tmp_path / "ts_guess.xyz"
+    input_xyz.write_text("3\n\nC 0 0 0\nH 0 0 1\nH 0 1 0\n")
+    sibling_xyz = tmp_path / "ts_opt_ff0001.xyz"
+    sibling_xyz.write_text("3\n\nC 1.5 0.0 0.0\nH 2.5 0.0 0.0\nH 0.5 0.0 0.0\n")
+
+    coords = orca._extract_final_orca_coordinates(out_file, input_xyz)
+    assert coords is not None
+    import numpy as np
+    assert coords.shape == (3, 3)
+    assert abs(coords[0][0] - 1.5) < 0.01

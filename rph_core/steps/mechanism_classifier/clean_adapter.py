@@ -64,13 +64,17 @@ class CleanRecord:
     core_atom_map: Optional[Dict[int, int]] = None
     core_bond_changes: Optional[Dict[str, List[Tuple[int, int]]]] = None
     new_ring_size: Optional[int] = None
-    raw: Optional[Dict[str, str]] = None
+    map_confidence: Optional[float] = None
+    low_confidence: bool = False
+    raw: Optional[Dict[str, Any]] = None
     
     def __post_init__(self):
         if self.core_atom_map is None:
             self.core_atom_map = {}
         if self.core_bond_changes is None:
-            self.core_bond_changes = {'forming': [], 'breaking': []}
+            self.core_bond_changes = {'forming': [], 'breaking': [], 'order_changed': []}
+        elif 'order_changed' not in self.core_bond_changes:
+            self.core_bond_changes['order_changed'] = []
         if self.raw is None:
             self.raw = {}
 
@@ -140,7 +144,7 @@ class CleanAdapter:
         logger.info(f"Parsed {len(records)} records from {csv_path}")
         return records
     
-    def parse_row(self, row: Dict[str, str]) -> Optional[CleanRecord]:
+    def parse_row(self, row: Dict[str, Any]) -> Optional[CleanRecord]:
         """
         解析单行 CSV
         
@@ -156,13 +160,16 @@ class CleanAdapter:
             logger.warning(f"Failed to parse row: {e}")
             return None
     
-    def _parse_row(self, row: Dict[str, str]) -> Optional[CleanRecord]:
+    def _parse_row(self, row: Dict[str, Any]) -> Optional[CleanRecord]:
         """内部解析方法"""
         # 提取基本字段
         reaction_id = row.get('rxn_key_hash', '')
         if not reaction_id:
             return None
-        
+
+        raw_obj = row.get('raw')
+        row_raw = raw_obj if isinstance(raw_obj, dict) else {}
+
         # 解析 core_atom_map (JSON 字符串)
         core_atom_map = self._parse_atom_map(row.get('core_atom_map', '{}'))
         
@@ -172,12 +179,6 @@ class CleanAdapter:
             atom_map=core_atom_map
         )
         
-        if not bond_changes.get('forming'):
-            alt_forming = self._extract_forming_from_alt_sources(row)
-            if alt_forming:
-                bond_changes['forming'] = alt_forming
-                logger.debug(f"[CleanAdapter] Using forming_bonds from alt sources: {alt_forming}")
-        
         # 解析 new_ring_size
         new_ring_size = None
         if row.get('new_ring_size'):
@@ -185,10 +186,31 @@ class CleanAdapter:
                 new_ring_size = int(row['new_ring_size'])
             except ValueError:
                 pass
-        
+
+        map_confidence = self._parse_float(
+            row.get('map_confidence')
+            or row.get('map_score')
+            or row.get('mapping_score')
+            or row_raw.get('map_confidence')
+            or row_raw.get('map_score')
+            or row_raw.get('mapping_score')
+        )
+        low_confidence = self._parse_bool(row.get('low_confidence') or row_raw.get('low_confidence'))
+        if map_confidence is not None and map_confidence < 0.8:
+            low_confidence = True
+            logger.warning(
+                f"[CleanAdapter] reaction {reaction_id} map_confidence={map_confidence:.3f} below 0.8; "
+                "retaining record as low-confidence"
+            )
+
         # 构建原始数据字典
-        raw = {k: v for k, v in row.items() if v}
-        
+        raw = {k: v for k, v in row.items() if k != 'raw' and v not in (None, '')}
+        raw.update({k: v for k, v in row_raw.items() if v not in (None, '')})
+        if map_confidence is not None:
+            raw['map_confidence'] = map_confidence
+        if low_confidence:
+            raw['low_confidence'] = True
+
         return CleanRecord(
             reaction_id=reaction_id,
             reaction_type=row.get('reaction_type', 'unknown'),
@@ -203,8 +225,30 @@ class CleanAdapter:
             core_atom_map=core_atom_map,
             core_bond_changes=bond_changes,
             new_ring_size=new_ring_size,
+            map_confidence=map_confidence,
+            low_confidence=low_confidence,
             raw=raw
         )
+
+    @staticmethod
+    def _parse_float(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _parse_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        return str(value).strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
     
     def _parse_atom_map(self, atom_map_str: str) -> Dict[int, int]:
         """
@@ -231,31 +275,30 @@ class CleanAdapter:
         """
         解析 core_bond_changes 字段
         
-        格式: "6-7:formed;10-11:formed;6-9:broken"
+        格式: "6-7:formed;10-11:formed;6-9:broken;12-19:order_changed(AROMATIC→SINGLE)"
         
         Args:
             changes_str: core_bond_changes 字符串
             atom_map: 可选的 MapId -> MolIdx 映射，用于坐标系转换
+            
+        Returns:
+            dict with keys 'forming', 'breaking', 'order_changed'.
+            'order_changed' stores (map_i, map_j) tuples for bonds whose
+            order changed between precursor and product (e.g. AROMATIC→SINGLE).
         """
-        forming = []
-        breaking = []
+        forming: List[Tuple[int, int]] = []
+        breaking: List[Tuple[int, int]] = []
+        order_changed: List[Tuple[int, int]] = []
         
         if not changes_str:
-            return {'forming': forming, 'breaking': breaking}
-        
-        # 准备 MapId -> MolIdx 转换
-        # atom_map 格式: {MapId: MolIdx}
-        # 需要反向映射: {MolIdx: MapId} 来将 MapId 转换为 MolIdx
-        reverse_map = {}
-        if atom_map:
-            reverse_map = {v: k for k, v in atom_map.items()}
+            return {'forming': forming, 'breaking': breaking, 'order_changed': order_changed}
         
         for item in changes_str.split(';'):
             item = item.strip()
             if not item:
                 continue
             
-            # 解析 "6-7:formed" 格式
+            # 解析 "6-7:formed" 或 "12-19:order_changed(AROMATIC→SINGLE)" 格式
             if ':' not in item:
                 continue
             
@@ -270,75 +313,19 @@ class CleanAdapter:
                 a = int(a.strip())
                 b = int(b.strip())
                 
-                # 如果有 atom_map，将 MapId 转换为 MolIdx
-                # core_bond_changes 中的索引是 MapId
-                # 需要找到对应的 MolIdx
-                if atom_map and reverse_map:
-                    # a 和 b 是 MapId，转换为 MolIdx
-                    # atom_map 是 {MapId: MolIdx}
-                    # 我们需要: 如果 atom_map[a] 存在，用它
-                    a_molidx = atom_map.get(a, a)
-                    b_molidx = atom_map.get(b, b)
-                else:
-                    a_molidx = a
-                    b_molidx = b
-                
+                # core_bond_changes 中的索引是 MapId，直接保留
                 if change_type == 'formed':
-                    forming.append((a_molidx, b_molidx))
+                    forming.append((a, b))
                 elif change_type == 'broken':
-                    breaking.append((a_molidx, b_molidx))
+                    breaking.append((a, b))
+                elif change_type.startswith('order_changed'):
+                    order_changed.append((a, b))
                     
             except (ValueError, IndexError):
                 logger.warning(f"Failed to parse bond change: {item}")
                 continue
         
-        return {'forming': forming, 'breaking': breaking}
-    
-    def _extract_forming_from_alt_sources(self, row: Dict[str, str]) -> List[Tuple[int, int]]:
-        """从备用字段提取 forming_bonds (当 core_bond_changes 为空时)."""
-        for key in ['formed_bond_index_pairs', 'forming_bonds', 'formed_bonds']:
-            if key in row and row[key]:
-                bonds = self._normalize_bond_list(row[key])
-                if bonds:
-                    return bonds
-        return []
-    
-    def _normalize_bond_list(self, value: Any) -> List[Tuple[int, int]]:
-        """归一化各种格式的 bond 列表."""
-        if isinstance(value, list):
-            result = []
-            for pair in value:
-                if isinstance(pair, (list, tuple)) and len(pair) == 2:
-                    try:
-                        result.append((int(pair[0]), int(pair[1])))
-                    except (ValueError, TypeError):
-                        continue
-                elif isinstance(pair, str) and '-' in pair:
-                    try:
-                        a, b = pair.split('-', 1)
-                        result.append((int(a.strip()), int(b.strip())))
-                    except (ValueError, IndexError):
-                        continue
-            return result
-        if isinstance(value, str):
-            result = []
-            for item in value.split(';'):
-                item = item.strip()
-                if not item:
-                    continue
-                for delim in ['-', ',', ' ']:
-                    if delim in item:
-                        try:
-                            parts = item.split(delim)
-                            if len(parts) >= 2:
-                                a = int(parts[0].strip())
-                                b = int(parts[1].strip())
-                                result.append((a, b))
-                                break
-                        except (ValueError, IndexError):
-                            continue
-            return result
-        return []
+        return {'forming': forming, 'breaking': breaking, 'order_changed': order_changed}
     
     def filter_by_reaction_type(
         self, 

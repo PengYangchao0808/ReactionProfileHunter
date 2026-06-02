@@ -14,7 +14,7 @@ Session: #4 - ORCAInterface.single_point()
 
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Optional, Union, TYPE_CHECKING, Dict, Any
+from typing import Mapping, Optional, Union, TYPE_CHECKING, Dict, Any, List
 import uuid
 import hashlib
 import json
@@ -37,8 +37,52 @@ from rph_core.utils.resource_utils import (
 )
 from rph_core.utils.geometry_tools import CoordinateExtractor
 from rph_core.utils.data_types import QCResult
+from rph_core.utils.keyword_translator import KeywordTranslator
+from rph_core.utils.method_registry import MethodRegistry, NormalizedMethodSpec
+from rph_core.utils.capability_validator import CapabilityValidator
+from rph_core.utils.orca_input_renderer import OrcaInputRenderer
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_orca_angstrom_lines(coord_lines: List[str]) -> Optional[np.ndarray]:
+    """Parse ORCA CARTESIAN COORDINATES (ANGSTROEM) block lines into (N,3) array.
+
+    ORCA angstrom coordinate lines have format: ``[element] [x] [y] [z]``.
+    Returns ``None`` if no valid coordinate lines are found.
+    """
+    coords: List[List[float]] = []
+    for line in coord_lines:
+        parts = line.strip().split()
+        if len(parts) >= 4:
+            try:
+                coords.append([float(parts[-3]), float(parts[-2]), float(parts[-1])])
+            except (ValueError, IndexError):
+                continue
+    if coords:
+        return np.array(coords)
+    return None
+
+
+def _write_orca_xyz_file(xyz_path: Path, coords: np.ndarray, input_xyz: Optional[Path] = None) -> None:
+    """Write coordinates to a plain XYZ file, inferring element symbols from input_xyz."""
+    symbols: List[str] = ["X"] * coords.shape[0]
+    if input_xyz is not None and input_xyz.exists():
+        try:
+            lines = input_xyz.read_text(encoding="utf-8").splitlines()
+            if len(lines) > 2:
+                symbol_lines = lines[2:2 + coords.shape[0]]
+                for i, line in enumerate(symbol_lines):
+                    parts = line.split()
+                    if parts:
+                        symbols[i] = parts[0]
+        except Exception:
+            pass
+    n = coords.shape[0]
+    xyz_lines = [f"{n}", "ORCA fallback coordinates"]
+    for i in range(n):
+        xyz_lines.append(f"{symbols[i]:2s}  {coords[i,0]:12.6f}  {coords[i,1]:12.6f}  {coords[i,2]:12.6f}")
+    xyz_path.write_text("\n".join(xyz_lines) + "\n", encoding="utf-8")
 
 
 class ORCAInterface:
@@ -52,8 +96,10 @@ class ORCAInterface:
         nprocs: int = 16,
         maxcore: Optional[int] = None,
         solvent: str = "acetone",
+        route_extras: str = "",
         orca_binary_path: Optional[str] = None,
-        config: Optional[Dict[str, Any]] = None
+        config: Optional[Dict[str, Any]] = None,
+        method_spec: Optional[Dict[str, Any]] = None,
     ):
         """
         初始化 ORCA 接口
@@ -68,11 +114,35 @@ class ORCAInterface:
             orca_binary_path: ORCA 可执行文件路径 (可选)
             config: 配置字典 (可选，用于派生路径和内存）
         """
-        self.method = method
-        self.basis = basis
-        self.aux_basis = aux_basis
+        raw_method_spec: Dict[str, Any] = dict(method_spec or {})
+        if not raw_method_spec:
+            raw_method_spec = {
+                "engine": "orca",
+                "method": method,
+                "basis": basis,
+                "aux_basis": aux_basis,
+                "route_extras": route_extras,
+                "solvent": solvent,
+            }
+            if maxcore is not None:
+                raw_method_spec["maxcore"] = maxcore
+
+        self.method_alias = str(raw_method_spec.get("method", method) or method)
+        self.method_profile = MethodRegistry.get_profile(self.method_alias, engine="orca")
+        self.method_spec: NormalizedMethodSpec = MethodRegistry.normalize_spec(
+            raw_method_spec,
+            default_engine="orca",
+            default_basis=basis,
+        )
+
+        self.method = self.method_spec.method
+        self.dispersion = self.method_spec.dispersion.keyword
+        self.basis = self.method_spec.basis
+        self.aux_basis = self.method_spec.aux_basis or aux_basis
         self.nprocs = nprocs
-        self.solvent = solvent
+        self.solvent = self.method_spec.solvent or solvent
+        self.solvent_model = self._resolve_solvent_model(config, raw_method_spec)
+        self.route_extras = self.method_spec.route_extras
 
         # 处理 maxcore：如果未提供，从配置派生
         if maxcore is None and config:
@@ -82,6 +152,11 @@ class ORCAInterface:
             self.maxcore = calc_orca_maxcore(mem, nprocs, safety_factor)
         else:
             self.maxcore = maxcore if maxcore is not None else 4000
+
+        validation_errors = CapabilityValidator.validate(self.method_spec, task_type="sp")
+        if validation_errors:
+            self.logger = logging.getLogger(f"{__name__}.{method}/{basis}")
+            self.logger.warning("ORCA method spec validation issues: %s", "; ".join(validation_errors))
 
         # 查找 ORCA 二进制文件（集成新的配置系统）
         self.orca_binary = self._find_orca_binary(orca_binary_path, config)
@@ -128,6 +203,8 @@ class ORCAInterface:
             "basis": self.basis,
             "aux_basis": self.aux_basis,
             "solvent": self.solvent,
+            "solvent_model": self.solvent_model,
+            "route_extras": self.route_extras,
             "charge": charge,
             "spin": spin
         }
@@ -144,21 +221,83 @@ class ORCAInterface:
             f"SP cache hit rate: {self._sp_cache_hits}/{total} ({hit_rate:.1f}%)"
         )
 
-    def _is_double_hybrid(self) -> bool:
-        """
-        检查当前方法是否为双杂化泛函
+    def _get_renderer(self) -> OrcaInputRenderer:
+        return OrcaInputRenderer(self.method_spec)
 
-        双杂化泛函需要额外的 /C 辅助基组 (如 def2-TZVPP/C)
+    def render_simple_keywords(self, task_type: str = "sp") -> str:
+        return self._get_renderer().render_simple_keywords(task_type=task_type)
 
-        Returns:
-            是否为双杂化泛函
-        """
-        double_hybrid_functionals = [
-            "PWPB95", "DSD-PBEP86", "DSD-PBEP95",
-            "B2PLYP", "B2GPPLYP", "DSD-BLYP"
-        ]
+    def render_blocks(self) -> Dict[str, str]:
+        return self._get_renderer().render_blocks()
 
-        return self.method.upper() in [fh.upper() for fh in double_hybrid_functionals]
+    @staticmethod
+    def _resolve_solvent_model(config: Optional[Dict[str, Any]], method_spec: Mapping[str, Any]) -> str:
+        candidates: List[Any] = [method_spec.get("solvent_model")]
+        raw_spec = method_spec.get("raw")
+        if isinstance(raw_spec, Mapping):
+            candidates.append(raw_spec.get("solvent_model"))
+        if isinstance(config, Mapping):
+            theory = config.get("theory")
+            if isinstance(theory, Mapping):
+                theory_solvent = theory.get("solvent")
+                if isinstance(theory_solvent, Mapping):
+                    candidates.append(theory_solvent.get("model"))
+            top_solvent = config.get("solvent")
+            if isinstance(top_solvent, Mapping):
+                candidates.append(top_solvent.get("model"))
+
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip().upper()
+        return "SMD"
+
+    def _solvent_name_for_orca(self) -> str:
+        from rph_core.utils.solvent_map import orca_smd_solvent
+
+        return orca_smd_solvent(self.solvent)
+
+    def _render_route(self, task_type: str = "sp") -> str:
+        route = self.render_simple_keywords(task_type=task_type)
+        if not self.solvent or str(self.solvent).upper() == "NONE":
+            return route
+        if self.solvent_model in {"CPCM", "PCM"}:
+            solvent_keyword = f"CPCM({self._solvent_name_for_orca()})"
+            if solvent_keyword.lower() not in route.lower():
+                return f"{route} {solvent_keyword}"
+        return route
+
+    def _render_cpcm_block(self) -> str:
+        if not self.solvent or str(self.solvent).upper() == "NONE":
+            return ""
+        if self.solvent_model not in {"SMD", "CPCM-SMD"}:
+            return ""
+
+        solvent_name = self._solvent_name_for_orca()
+        return (
+            "\n %cpcm\n"
+            "    smd true\n"
+            f"    SMDsolvent \"{solvent_name}\"\n"
+            " end\n "
+        )
+
+    @staticmethod
+    def _render_named_blocks(blocks: Dict[str, str]) -> str:
+        if not blocks:
+            return ""
+        ordered_keys = ("basis", "method", "scf", "mdci")
+        chunk: List[str] = []
+        for key in ordered_keys:
+            value = blocks.get(key)
+            if value:
+                chunk.append(value.rstrip())
+        for key, value in blocks.items():
+            if key in ordered_keys:
+                continue
+            if value:
+                chunk.append(value.rstrip())
+        if not chunk:
+            return ""
+        return "\n" + "\n".join(chunk) + "\n"
 
     def _generate_input(
         self,
@@ -179,28 +318,9 @@ class ORCAInterface:
         Returns:
             生成的 .inp 文件路径
         """
-        # 构建路由行
-        if self.method.upper().endswith("-3C"):
-            route = f"! {self.method} tightSCF noautostart miniprint nopop"
-        else:
-            route = f"! {self.method} {self.basis} {self.aux_basis} RIJCOSX tightSCF"
-            route += " noautostart miniprint nopop"
-
-            if self._is_double_hybrid():
-                c_basis = self.basis + "/C"
-                route += f" {c_basis}"
- 
-        cpcm_block = ""
-        if self.solvent and self.solvent.upper() != "NONE":
-            from rph_core.utils.solvent_map import orca_smd_solvent
-
-            solvent_name = orca_smd_solvent(self.solvent)
-            cpcm_block = f"""
- %cpcm
-    smd true
-    SMDsolvent "{solvent_name}"
- end
- """
+        route = self._render_route(task_type="sp")
+        cpcm_block = self._render_cpcm_block()
+        rendered_blocks = self._render_named_blocks(self.render_blocks())
  
         if charge is None or spin is None:
             inferred_charge, inferred_spin = 0, 1
@@ -240,7 +360,7 @@ class ORCAInterface:
 
         inp_content = f"""{route}
  %maxcore {self.maxcore}
- {pal_block}{cpcm_block}
+ {pal_block}{cpcm_block}{rendered_blocks}
 {extra_block}
   * xyz {charge} {spin}
 {xyz_content}
@@ -268,24 +388,9 @@ class ORCAInterface:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        route = f"! {self.method} {self.basis} {self.aux_basis} Opt tightSCF"
-        route += " noautostart miniprint nopop"
-
-        if self._is_double_hybrid():
-            c_basis = self.basis + "/C"
-            route += f" {c_basis}"
-
-        cpcm_block = ""
-        if self.solvent and self.solvent.upper() != "NONE":
-            from rph_core.utils.solvent_map import orca_smd_solvent
-
-            solvent_name = orca_smd_solvent(self.solvent)
-            cpcm_block = f"""
- %cpcm
-    smd true
-    SMDsolvent \"{solvent_name}\"
- end
- """
+        route = self._render_route(task_type="opt")
+        cpcm_block = self._render_cpcm_block()
+        rendered_blocks = self._render_named_blocks(self.render_blocks())
 
         import shutil
         job_tag = uuid.uuid4().hex[:8]
@@ -303,7 +408,7 @@ class ORCAInterface:
 
         inp_content = f"""{route}
  %maxcore {self.maxcore}
- {pal_block}{cpcm_block}
+ {pal_block}{cpcm_block}{rendered_blocks}
 {constraints_block}
   * xyz {charge} {spin}
 {xyz_content}
@@ -317,23 +422,7 @@ class ORCAInterface:
             out_file = self._run_orca(inp_file, output_dir, timeout=timeout)
             result = self._parse_output(out_file)
 
-            try:
-                coord_block = re.search(
-                    r"CARTESIAN COORDINATES \(ANGSTROEM\)\s*\n(.*?)(?=\n\n|\n[A-Z])",
-                    out_file.read_text(),
-                    re.DOTALL
-                )
-                if coord_block:
-                    coord_lines = [l for l in coord_block.group(1).split('\n') if l.strip()]
-                    if len(coord_lines) >= 3:
-                        result.coordinates = np.array([
-                            [float(coord_lines[i + 1].split()[1]),
-                             float(coord_lines[i + 1].split()[2]),
-                             float(coord_lines[i + 1].split()[3])]
-                            for i in range(0, len(coord_lines) - 1, 3)
-                        ])
-            except Exception:
-                pass
+            result.coordinates = self._extract_final_orca_coordinates(out_file, xyz_copy)
 
             return result
 
@@ -392,13 +481,162 @@ class ORCAInterface:
                 error_message=f"能量格式错误: {energy_match.group(1)}"
             )
 
+        coordinates = None
+        try:
+            coord_block = re.search(
+                r'CARTESIAN COORDINATES \(ANGSTROEM\)\s*\n-+\n((?:\s*[A-Za-z]{1,3}\s+[\d\.\-]+\s+[\d\.\-]+\s+[\d\.\-]+(?:\n|$))+)',
+                content,
+                re.DOTALL
+            )
+            if coord_block:
+                coord_lines = [l for l in coord_block.group(1).split('\n') if l.strip()]
+                coords = _parse_orca_angstrom_lines(coord_lines)
+                if coords is not None:
+                    coordinates = coords
+                else:
+                    self.logger.warning("Failed to parse ORCA coordinates from %s", out_file)
+            else:
+                self.logger.warning("No ORCA coordinate block found in %s", out_file)
+        except Exception as e:
+            self.logger.warning("Failed to extract ORCA coordinates from %s: %s", out_file, e)
+
         # 成功解析
         return QCResult(
             energy=energy,
             converged=True,
+            coordinates=coordinates,
             output_file=out_file,
             error_message=None
         )
+
+    def _resolve_orca_final_xyz(
+        self,
+        out_file: Path,
+        input_xyz: Optional[Path] = None,
+    ) -> Optional[Path]:
+        """Resolve ORCA final geometry: prefer sibling .xyz, fallback to .out parsing.
+
+        ORCA writes the final optimized geometry to a ``.xyz`` file with the
+        same stem as the output file (e.g. ``ts_guess_ts_opt_6693bdc1.xyz``).
+        This method returns that sibling file when it exists and passes
+        atom-count validation.  Only when no sibling ``.xyz`` is found does it
+        fall back to parsing ``CARTESIAN COORDINATES (ANGSTROEM)`` blocks from
+        the ``.out`` file.
+
+        Returns:
+            Path to the resolved final XYZ file, or ``None`` if unavailable.
+        """
+        sibling_xyz = out_file.with_suffix(".xyz")
+        if sibling_xyz.is_file():
+            try:
+                lines = sibling_xyz.read_text(encoding="utf-8").splitlines()
+                n_atoms = int(lines[0].strip()) if lines else 0
+            except (ValueError, IndexError, UnicodeDecodeError) as exc:
+                self.logger.debug("Cannot read sibling xyz %s: %s", sibling_xyz, exc)
+            else:
+                # If we have an input_xyz for validation, check atom count.
+                if input_xyz is not None:
+                    try:
+                        ref_lines = input_xyz.read_text(encoding="utf-8").splitlines()
+                        ref_atoms = int(ref_lines[0].strip()) if ref_lines else 0
+                    except Exception:
+                        ref_atoms = 0
+                    if n_atoms > 0 and ref_atoms > 0 and n_atoms != ref_atoms:
+                        self.logger.warning(
+                            "ORCA sibling xyz atom count mismatch in %s: %d vs %d",
+                            sibling_xyz, n_atoms, ref_atoms,
+                        )
+                        # Do not return fallback — prefer to return nothing unambiguous.
+                        return None
+                return sibling_xyz
+
+        # Fallback: parse final coordinate block from .out
+        self.logger.debug("No ORCA final sibling xyz for %s; parsing .out coordinates", out_file)
+        coords = self._extract_orca_coordinates_from_out(out_file, input_xyz)
+        if coords is not None:
+            # Write a canonical final xyz file so that downstream code can use a
+            # real file path instead of trusting an in-memory array.
+            fallback_xyz = out_file.with_suffix(".rph_fallback.xyz")
+            try:
+                _write_orca_xyz_file(fallback_xyz, coords, input_xyz)
+                return fallback_xyz
+            except Exception:
+                pass
+        return None
+
+    def _extract_orca_coordinates_from_out(
+        self,
+        out_file: Path,
+        input_xyz: Optional[Path] = None,
+    ) -> Optional[np.ndarray]:
+        """Extract the LAST Cartesian coordinate block from an ORCA .out file.
+
+        Prefer :meth:`_resolve_orca_final_xyz` for canonical geometry —
+        this method is a fallback for parsing.
+        """
+        try:
+            content = out_file.read_text(encoding="utf-8")
+        except Exception as e:
+            self.logger.warning("Failed to read ORCA output for coordinate extraction %s: %s", out_file, e)
+            return None
+
+        # Match through the separator line to coordinate lines, stop at blank line.
+        # ORCA coordinate lines have format: element x y z (uppercase element starters
+        # like C, H, N would fool a naive \n[A-Z] terminator).
+        coord_blocks = re.findall(
+            r'CARTESIAN COORDINATES \(ANGSTROEM\)\s*\n-+\n((?:\s*[A-Za-z]{1,3}\s+[\d\.\-]+\s+[\d\.\-]+\s+[\d\.\-]+(?:\n|$))+)',
+            content,
+            re.DOTALL
+        )
+        if not coord_blocks:
+            self.logger.warning("No ORCA coordinate blocks found in %s", out_file)
+            return None
+
+        coord_lines = [line for line in coord_blocks[-1].split('\n') if line.strip()]
+        coordinates = _parse_orca_angstrom_lines(coord_lines)
+        if coordinates is None:
+            self.logger.warning("Failed to parse final ORCA coordinate block in %s", out_file)
+            return None
+
+        if input_xyz is not None:
+            try:
+                xyz_lines = [line for line in input_xyz.read_text(encoding="utf-8").splitlines() if line.strip()]
+                expected_atoms = int(xyz_lines[0]) if xyz_lines else 0
+            except Exception:
+                expected_atoms = 0
+            if expected_atoms > 0 and coordinates.shape[0] != expected_atoms:
+                self.logger.warning(
+                    "ORCA coordinate atom count mismatch in %s: parsed %d, expected %d from %s",
+                    out_file, coordinates.shape[0], expected_atoms, input_xyz,
+                )
+                return None
+
+        return coordinates
+
+    def _extract_final_orca_coordinates(
+        self,
+        out_file: Path,
+        input_xyz: Path
+    ) -> Optional[np.ndarray]:
+        """Legacy wrapper — prefer :meth:`_resolve_orca_final_xyz`.
+
+        Returns the coordinates as a numpy array when a final .xyz file is
+        available; otherwise falls back to parsing from the .out file.
+        """
+        final_xyz = self._resolve_orca_final_xyz(out_file, input_xyz)
+        if final_xyz is not None:
+            return self._read_xyz_coordinates(final_xyz)
+        return self._extract_orca_coordinates_from_out(out_file, input_xyz)
+
+    def _read_xyz_coordinates(self, xyz_path: Path) -> Optional[np.ndarray]:
+        """Read coordinates from a plain XYZ file, returning (N,3) array."""
+        try:
+            from rph_core.utils.file_io import read_xyz as _io_read_xyz
+            coords, _symbols = _io_read_xyz(xyz_path)
+            return coords.astype(np.float64)
+        except Exception as e:
+            self.logger.warning("Failed to read XYZ coordinates from %s: %s", xyz_path, e)
+            return None
 
     def _find_orca_binary(self, provided_path: Optional[str] = None, config: Optional[Dict[str, Any]] = None) -> Optional[Path]:
         """
@@ -561,7 +799,7 @@ class ORCAInterface:
             import tempfile
             import shutil
 
-            self.logger.warning("检测到路径包含空格/特殊字符，使用临时目录运行 ORCA")
+            self.logger.debug("检测到路径包含空格/特殊字符，使用临时目录运行 ORCA")
 
             # Use a unique temp directory per ORCA job to avoid MPI/IO collisions.
             job_tag = inp_file.stem.split('_')[-1]
@@ -569,10 +807,23 @@ class ORCAInterface:
                 job_tag = uuid.uuid4().hex[:8]
             temp_dir = Path(tempfile.mkdtemp(prefix=f"orca_run_{job_tag}_"))
             temp_out_file: Optional[Path] = None
+            succeeded = False
             try:
                 temp_inp_file = temp_dir / inp_file.name
                 temp_out_file = temp_inp_file.with_suffix('.out')
                 shutil.copy(inp_file, temp_inp_file)
+
+                # Copy referenced XYZ files into sandbox temp dir
+                inp_text = temp_inp_file.read_text()
+                for line in inp_text.splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith("* xyzfile "):
+                        parts = stripped.split()
+                        if len(parts) >= 4:
+                            xyz_ref = parts[-1]
+                            xyz_src = output_dir / xyz_ref
+                            if xyz_src.is_file():
+                                shutil.copy(xyz_src, temp_dir / xyz_ref)
 
                 cmd = [str(self.orca_binary), str(temp_inp_file.resolve())]
 
@@ -604,6 +855,7 @@ class ORCAInterface:
                         )
 
                 shutil.copy(temp_out_file, out_file)
+                succeeded = True
 
                 for f in temp_dir.glob('*'):
                     if f.is_file() and f not in [temp_inp_file, temp_out_file]:
@@ -627,7 +879,7 @@ class ORCAInterface:
 
             finally:
                 # Only cleanup on success; keep failed sandbox directory for postmortem.
-                if temp_out_file is not None and temp_out_file.exists():
+                if succeeded:
                     shutil.rmtree(temp_dir, ignore_errors=True)
 
         inp_file_abs = inp_file.resolve()
@@ -679,7 +931,7 @@ class ORCAInterface:
         self,
         xyz_file: Path,
         output_dir: Path,
-        timeout: int = 3600,
+        timeout: Optional[int] = None,
         charge: Optional[int] = None,
         spin: Optional[int] = None
     ) -> QCResult:
@@ -694,7 +946,7 @@ class ORCAInterface:
         Args:
             xyz_file: 输入 XYZ 文件
             output_dir: 输出目录
-            timeout: 超时时间（秒），默认 1 小时
+            timeout: 超时时间（秒），None = 无限制
 
         Returns:
             QCResult 对象
@@ -775,7 +1027,9 @@ class ORCAInterface:
         route: Optional[str] = None,
         constraints: Optional[str] = None,
         old_checkpoint: Optional[Path] = None,
-        timeout: Optional[int] = None
+        timeout: Optional[int] = None,
+        charge: int = 0,
+        spin: int = 1
     ) -> QCResult:
         """
         ORCA 几何优化（统一接口，兼容 Gaussian 风格）
@@ -787,6 +1041,8 @@ class ORCAInterface:
             constraints: 约束（暂时忽略，ORCA 不支持相同格式）
             old_checkpoint: checkpoint 文件（暂时忽略）
             timeout: 超时时间（秒）
+            charge: 分子电荷（默认 0）
+            spin: 自旋多重度（默认 1，闭壳层）
 
         Returns:
             QCResult 对象
@@ -805,25 +1061,27 @@ class ORCAInterface:
                 return self.ts_optimization(
                     xyz_file, output_dir,
                     opt_config=OptimizationConfig(),
-                    timeout=timeout
+                    timeout=timeout, charge=charge, spin=spin
                 )
             else:
                 # 基态优化 - 使用 Opt 关键词
                 self.logger.info(f"ORCA 基态优化: {xyz_file.name}")
                 return self._run_normal_optimization(
-                    xyz_file, output_dir, timeout=timeout
+                    xyz_file, output_dir, timeout=timeout, charge=charge, spin=spin
                 )
 
         # 默认基态优化
         return self._run_normal_optimization(
-            xyz_file, output_dir, timeout=timeout
+            xyz_file, output_dir, timeout=timeout, charge=charge, spin=spin
         )
 
     def _run_normal_optimization(
         self,
         xyz_file: Path,
         output_dir: Path,
-        timeout: Optional[int] = None
+        timeout: Optional[int] = None,
+        charge: int = 0,
+        spin: int = 1
     ) -> QCResult:
         """
         ORCA 基态优化（使用 Opt 关键词）
@@ -832,6 +1090,8 @@ class ORCAInterface:
             xyz_file: 输入 XYZ 文件
             output_dir: 输出目录
             timeout: 超时时间
+            charge: 分子电荷
+            spin: 自旋多重度
 
         Returns:
             QCResult 对象
@@ -853,32 +1113,16 @@ class ORCAInterface:
         else:
             xyz_content = xyz_copy.read_text()
 
-        # 构建路由行
-        route = f"! {self.method} {self.basis} {self.aux_basis} Opt tightSCF Freq"
-        route += " noautostart miniprint nopop"
-
-        # 双杂化泛函需要额外的 /C 辅助基组
-        if self._is_double_hybrid():
-            c_basis = self.basis + "/C"
-            route += f" {c_basis}"
-
-        # 构建溶剂块
-        cpcm_block = ""
-        if self.solvent and self.solvent.upper() != "NONE":
-            cpcm_block = f"""
-%cpcm
-   smd true
-   SMDsolvent "{self.solvent}"
-end
-"""
+        route = self._render_route(task_type="opt_freq")
+        cpcm_block = self._render_cpcm_block()
+        rendered_blocks = self._render_named_blocks(self.render_blocks())
 
         # 组装完整输入文件
         inp_content = f"""{route}
 %maxcore {self.maxcore}
 {self._pal_block()}
-{cpcm_block}
- * xyzfile 0 1 {xyz_copy.name}
- *
+{cpcm_block}{rendered_blocks}
+ * xyzfile {charge} {spin} {xyz_copy.name}
 """
 
         inp_file = output_dir / f"{base_name}.inp"
@@ -890,22 +1134,13 @@ end
             result = self._parse_output(out_file)
 
             # 提取频率
-            freq_block = re.search(r'VIBRATIONAL FREQUENCIES\s*\n(.*?)(?=\n\n|\n[A-Z])', out_file.read_text(), re.DOTALL)
+            freq_block = re.search(r'VIBRATIONAL FREQUENCIES\s*\n((?:\s*[\d\.\-]+\s+[\d\.\-]+\s+[\d\.\-]+(?:\n|$))+)', out_file.read_text(), re.DOTALL)
             if freq_block:
                 freqs = re.findall(r'[\-]?\d+\.\d+', freq_block.group(1))
                 result.frequencies = np.array([float(f) for f in freqs]) if freqs else None
 
-            # 提取坐标
-            coord_block = re.search(r'CARTESIAN COORDINATES \(ANGSTROEM\)\s*\n(.*?)(?=\n\n|\n[A-Z])', out_file.read_text(), re.DOTALL)
-            if coord_block:
-                coord_lines = [l for l in coord_block.group(1).split('\n') if l.strip()]
-                if len(coord_lines) >= 3:
-                    result.coordinates = np.array([
-                        [float(coord_lines[i+1].split()[1]),
-                         float(coord_lines[i+1].split()[2]),
-                         float(coord_lines[i+1].split()[3])]
-                        for i in range(0, len(coord_lines)-1, 3)
-                    ])
+            # 提取最终优化坐标
+            result.coordinates = self._extract_final_orca_coordinates(out_file, xyz_copy)
 
             return result
 
@@ -978,16 +1213,12 @@ end
 
             # 运行 ORCA（无超时或自定义超时）
             self.logger.debug("  运行 ORCA TS 优化...")
-            if timeout is None:
-                # 无超时限制（QC 计算通常需要长时间）
-                out_file = self._run_orca_no_timeout(inp_file, output_dir)
-            else:
-                out_file = self._run_orca(inp_file, output_dir, timeout=timeout)
+            out_file = self._run_orca(inp_file, output_dir, timeout=timeout)
             self.logger.debug(f"  输出文件: {out_file}")
 
             # 解析输出
             self.logger.debug("  解析 ORCA TS 优化输出...")
-            result = self._parse_ts_output(out_file)
+            result = self._parse_ts_output(out_file, xyz_file)
 
             if result.converged:
                 self.logger.info(
@@ -1036,26 +1267,9 @@ end
         """
         import shutil
 
-        # 构建路由行
-        route = f"! {self.method} {self.basis} {self.aux_basis} OptTS Freq tightSCF"
-        route += " noautostart miniprint nopop"
-
-        # 双杂化泛函需要额外的 /C 辅助基组
-        if self._is_double_hybrid():
-            c_basis = self.basis + "/C"
-            route += f" {c_basis}"
-
-        cpcm_block = ""
-        if self.solvent and self.solvent.upper() != "NONE":
-            from rph_core.utils.solvent_map import orca_smd_solvent
-
-            solvent_name = orca_smd_solvent(self.solvent)
-            cpcm_block = f"""
- %cpcm
-    smd true
-    SMDsolvent "{solvent_name}"
- end
- """
+        route = self._render_route(task_type="ts_freq")
+        cpcm_block = self._render_cpcm_block()
+        rendered_blocks = self._render_named_blocks(self.render_blocks())
  
         # 如果 xyz_file 是 .out 文件，尝试从中提取电荷和自旋
 
@@ -1084,10 +1298,9 @@ end
         inp_content = f"""{route}
 %maxcore {self.maxcore}
 {self._pal_block()}
-{cpcm_block}
+{cpcm_block}{rendered_blocks}
 {geom_block}
  * xyzfile {charge} {spin} {xyz_copy.name}
- *
 """
 
         # 写入文件
@@ -1154,7 +1367,7 @@ end
 
         return out_file
 
-    def _parse_ts_output(self, out_file: Path) -> QCResult:
+    def _parse_ts_output(self, out_file: Path, input_xyz: Optional[Path] = None) -> QCResult:
         """
         解析 ORCA TS 优化输出文件
 
@@ -1193,33 +1406,41 @@ end
         energy_match = re.search(r'FINAL SINGLE POINT ENERGY\s+([\-\d\.]+)', content)
         energy = float(energy_match.group(1)) if energy_match else 0.0
 
-        # 提取频率
+        # 提取频率 — 使用最后一个 VIBRATIONAL FREQUENCIES 块（最终收敛频率）
+        # re.search() 会匹配第一个块（优化中期的中间频率），导致虚频数错误
         frequencies = None
-        freq_block = re.search(r'VIBRATIONAL FREQUENCIES\s*\n(.*?)(?=\n\n|\n[A-Z])', content, re.DOTALL)
-        if freq_block:
-            freqs = re.findall(r'[\-]?\d+\.\d+', freq_block.group(1))
+        last_freq_pos = content.rfind('VIBRATIONAL FREQUENCIES')
+        if last_freq_pos >= 0:
+            block_content = content[last_freq_pos:]
+            freqs = re.findall(r'[-]?\d+\.\d+(?=\s+cm\*\*-1)', block_content)
             frequencies = np.array([float(f) for f in freqs]) if freqs else None
 
-        # 提取坐标
+        # Resolve final geometry via sibling .xyz (preferred) or .out fallback
+        final_xyz_path = self._resolve_orca_final_xyz(out_file, input_xyz)
         coordinates = None
-        coord_block = re.search(r'CARTESIAN COORDINATES \(ANGSTROEM\)\s*\n(.*?)(?=\n\n|\n[A-Z])', content, re.DOTALL)
-        if coord_block:
-            coord_lines = [l for l in coord_block.group(1).split('\n') if l.strip()]
-            if len(coord_lines) >= 3:
-                coordinates = np.array([
-                    [float(coord_lines[i+1].split()[1]),
-                     float(coord_lines[i+1].split()[2]),
-                     float(coord_lines[i+1].split()[3])]
-                    for i in range(0, len(coord_lines)-1, 3)
-                ])
+        if final_xyz_path is not None:
+            coordinates = self._read_xyz_coordinates(final_xyz_path)
+            # Store the resolved xyz path so downstream code (QCTaskRunner /
+            # benchmark) can reference the canonical geometry file directly.
+            self._last_resolved_final_xyz = final_xyz_path
+        elif input_xyz is not None:
+            coordinates = self._extract_orca_coordinates_from_out(out_file, input_xyz)
+            self._last_resolved_final_xyz = None
+        else:
+            self.logger.warning("Cannot validate ORCA TS coordinates without input XYZ for %s", out_file)
+            self._last_resolved_final_xyz = None
 
         error_message = None if converged else "优化未收敛"
 
-        return QCResult(
+        result = QCResult(
             energy=energy,
             converged=converged,
-            coordinates=coordinates if coordinates is not None else np.array([]),
+            coordinates=coordinates,
             frequencies=frequencies,
             output_file=out_file,
             error_message=error_message
         )
+        # Attach resolved final xyz path to result for downstream canonical use
+        if final_xyz_path is not None:
+            result.final_xyz_path = str(final_xyz_path.resolve())
+        return result

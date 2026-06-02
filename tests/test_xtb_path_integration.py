@@ -84,8 +84,7 @@ class TestConfigPathSearch:
         step2_cfg = hunter.config.get("step2", {})
         path_search_cfg = step2_cfg.get("path_search", {})
         
-        assert "enabled" in path_search_cfg
-        assert path_search_cfg.get("enabled") is False
+        assert path_search_cfg.get("mode") == "rescue"
     
     def test_path_search_params_exist(self):
         from rph_core.orchestrator import ReactionProfileHunter

@@ -1,24 +1,24 @@
 """
 TSV Dataset Loader for Reference States
 
-Handles loading and parsing TSV files containing reaction records
-for reference state calculations (precursors, leaving small molecules, etc.).
+Handles loading and parsing TSV/CSV files containing reaction records
+for reference state calculations (precursors, small molecular species, etc.).
 """
 
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 import csv
 
 
 @dataclass
 class ReactionRecord:
-    """Single reaction record from TSV dataset."""
+    """Single reaction record from TSV/CSV dataset."""
     rx_id: str
     precursor_smiles: str
     raw: Dict[str, str]
-    ylide_leaving_group: Optional[str] = None
-    leaving_group: Optional[str] = None
+    small_molecular_primary: Optional[str] = None
+    small_molecular_fallback: Optional[str] = None
     product_smiles_main: Optional[str] = None
     ylide_smiles: Optional[str] = None
     solvent: Optional[str] = None
@@ -36,17 +36,29 @@ class ReactionRecord:
     def __post_init__(self):
         object.__setattr__(self, 'raw', self.raw or {})
 
-    def get_leaving_small_molecule_key(self) -> Optional[str]:
+    def get_small_molecular_keys(self) -> list[str]:
         """
-        Get leaving small molecule key with priority:
-        1) ylide_leaving_group (primary)
-        2) leaving_group (fallback)
+        Get small molecular species keys from dataset record.
+
+        Priority:
+        1) small_molecular_primary (comma/semicolon separated list)
+        2) small_molecular_fallback (fallback column)
+
+        Returns:
+            List of small molecular keys (may be empty)
         """
-        if self.ylide_leaving_group and self.ylide_leaving_group.strip():
-            return self.ylide_leaving_group.strip()
-        if self.leaving_group and self.leaving_group.strip():
-            return self.leaving_group.strip()
-        return None
+        keys: list[str] = []
+        if self.small_molecular_primary and self.small_molecular_primary.strip():
+            for part in self.small_molecular_primary.replace(';', ',').split(','):
+                key = part.strip()
+                if key:
+                    keys.append(key)
+        if not keys and self.small_molecular_fallback and self.small_molecular_fallback.strip():
+            for part in self.small_molecular_fallback.replace(';', ',').split(','):
+                key = part.strip()
+                if key:
+                    keys.append(key)
+        return keys
 
 
 class TSVLoaderError(Exception):
@@ -59,22 +71,22 @@ def load_tsv_records(
     filter_ids: Optional[List[str]] = None,
     id_col: str = "rx_id",
     precursor_smiles_col: str = "precursor_smiles",
-    ylide_leaving_group_col: str = "ylide_leaving_group",
-    leaving_group_col: str = "leaving_group",
+    small_molecular_primary_col: str = "",
+    small_molecular_fallback_col: str = "",
     product_smiles_col: str = "product_smiles_main",
     ylide_smiles_col: str = "ylide_smiles",
     delimiter: str = "\t"
 ) -> List[ReactionRecord]:
     """
-    Load reaction records from TSV file.
+    Load reaction records from TSV/CSV file.
 
     Args:
-        path: Path to TSV file
+        path: Path to TSV/CSV file
         filter_ids: Optional list of rx_ids to filter (None = load all)
         id_col: Column name for reaction ID (default: "rx_id")
         precursor_smiles_col: Column name for precursor SMILES
-        ylide_leaving_group_col: Column name for leaving small molecule label (primary)
-        leaving_group_col: Column name for leaving group (fallback)
+        small_molecular_primary_col: Column for small molecular keys (primary, comma-sep)
+        small_molecular_fallback_col: Column for small molecular keys (fallback)
         product_smiles_col: Column name for product SMILES (optional)
         ylide_smiles_col: Column name for ylide SMILES (optional)
         delimiter: Field delimiter (default: tab)
@@ -94,7 +106,6 @@ def load_tsv_records(
         with open(path, 'r', encoding='utf-8', newline='') as f:
             reader = csv.DictReader(f, delimiter=delimiter)
 
-            # Validate required columns
             fieldnames = reader.fieldnames or []
             required_cols = [id_col, precursor_smiles_col]
 
@@ -105,28 +116,25 @@ def load_tsv_records(
                     f"Available columns: {fieldnames}"
                 )
 
-            for row_num, row in enumerate(reader, start=2):  # Start at 2 (header = 1)
-                # Filter by ID if specified
+            for row_num, row in enumerate(reader, start=2):
                 rx_id = row.get(id_col, "").strip()
                 if not rx_id:
-                    continue  # Skip rows without rx_id
+                    continue
 
                 if filter_ids and rx_id not in filter_ids:
                     continue
 
-                # Extract precursor SMILES (required)
                 precursor_smiles = row.get(precursor_smiles_col, "").strip()
                 if not precursor_smiles:
-                    continue  # Skip rows without precursor_smiles
+                    continue
 
-                # Build raw dict for meta.json
                 raw_dict = {k: v for k, v in row.items() if v is not None and v.strip()}
 
                 record = ReactionRecord(
                     rx_id=rx_id,
                     precursor_smiles=precursor_smiles,
-                    ylide_leaving_group=_clean_str(row.get(ylide_leaving_group_col)),
-                    leaving_group=_clean_str(row.get(leaving_group_col)),
+                    small_molecular_primary=_clean_str(row.get(small_molecular_primary_col)),
+                    small_molecular_fallback=_clean_str(row.get(small_molecular_fallback_col)),
                     product_smiles_main=_clean_str(row.get(product_smiles_col)),
                     ylide_smiles=_clean_str(row.get(ylide_smiles_col)),
                     solvent=_clean_str(row.get("solvent")),
@@ -169,21 +177,20 @@ def _clean_str(value: Any) -> Optional[str]:
     return s if s else None
 
 
-def collect_leaving_small_molecule_keys(
+def collect_small_molecular_keys_from_records(
     records: List[ReactionRecord]
 ) -> set[str]:
     """
-    Collect all unique leaving small molecule keys from records.
+    Collect all unique small molecular keys from records.
 
     Args:
         records: List of ReactionRecord objects
 
     Returns:
-        Set of unique keys (e.g., {"AcOH", "TFE"})
+        Set of unique keys (e.g., {"DMDO", "acetone", "AcOH"})
     """
     keys = set()
     for record in records:
-        key = record.get_leaving_small_molecule_key()
-        if key:
+        for key in record.get_small_molecular_keys():
             keys.add(key)
     return keys

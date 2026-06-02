@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -85,60 +86,31 @@ def run_shermo(
     imagreal: Optional[float] = None,
     conc: Optional[str] = None
 ) -> ThermoResult:
-    args = [str(shermo_bin), str(freq_output), "-E", f"{sp_energy:.12f}"]
+    """Legacy wrapper: delegates to unified rph_core.utils.thermo.run_shermo_record.
 
-    if temperature_k is not None:
-        args.extend(["-T", f"{temperature_k}"])
-    if pressure_atm is not None:
-        args.extend(["-P", f"{pressure_atm}"])
-    if scl_zpe is not None:
-        args.extend(["-sclZPE", f"{scl_zpe}"])
-    if ilowfreq is not None:
-        args.extend(["-ilowfreq", f"{ilowfreq}"])
-    if imagreal is not None:
-        args.extend(["-imagreal", f"{imagreal}"])
+    Maintains backward-compatible ThermoResult return type for existing callers in
+    conformer_search/engine.py, ts_optimizer.py, condition_thermo.py, etc.
+    """
+    from rph_core.utils.thermo import run_shermo_record, ShermoOptions
 
-    conc_value = _clean_conc(conc)
-    if conc_value:
-        args.extend(["-conc", conc_value])
+    options = ShermoOptions(
+        temperature_k=temperature_k if temperature_k is not None else 298.15,
+        pressure_atm=pressure_atm,
+        scl_zpe=scl_zpe,
+        ilowfreq=ilowfreq,
+        imagreal=imagreal,
+        conc=str(conc) if conc is not None else None,
+    )
+    record = run_shermo_record(shermo_bin, freq_output, sp_energy, output_file, options)
 
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-
-    freq_output_str = str(freq_output)
-    if is_toxic_path(Path(freq_output_str)):
-        temp_dir = Path(tempfile.mkdtemp(prefix="RPH_Shermo_", dir="/tmp"))
-        try:
-            safe_freq_name = "freq.log"
-            temp_freq = temp_dir / safe_freq_name
-            shutil.copy2(freq_output, temp_freq)
-            args[1] = str(temp_freq)
-            result = subprocess.run(
-                args,
-                capture_output=True,
-                text=True,
-                cwd=str(temp_dir)
-            )
-            if result.returncode != 0:
-                raise RuntimeError(f"Shermo 运行失败: {result.stderr}")
-            output_file.write_text(result.stdout)
-            if "Error:" in result.stdout:
-                raise RuntimeError(f"Shermo 执行异常: {result.stdout[:500]}")
-            return _parse_sum_file(output_file)
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-    else:
-        result = subprocess.run(
-            args,
-            capture_output=True,
-            text=True
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Shermo 运行失败: {result.stderr}")
-
-        output_file.write_text(result.stdout)
-        if "Error:" in result.stdout:
-            raise RuntimeError(f"Shermo 执行异常: {result.stdout[:500]}")
-        return _parse_sum_file(output_file)
+    return ThermoResult(
+        g_sum=record.g_sum_hartree,
+        h_sum=record.h_sum_hartree,
+        u_sum=record.u_sum_hartree,
+        s_total=record.s_cal_mol_k,
+        g_conc=record.g_conc_hartree,
+        output_file=output_file,
+    )
 
 
 def derive_shermo_summary_from_sum(
@@ -187,47 +159,6 @@ def derive_shermo_summary_from_sum(
         json.dump(summary, f, indent=2)
 
     return summary
-
-
-def derive_hoac_thermo_from_sum(
-    sum_file: Path,
-    output_json: Path,
-    temperature_K: float = 298.15
-) -> Dict[str, Any]:
-    """Derive HOAc thermo.json from Shermo .sum file.
-
-    Creates a thermo.json compatible with step1_activation extractor,
-    which expects 'g' or 'G' key (not 'g_hoac').
-
-    Args:
-        sum_file: Path to HOAc Shermo .sum file
-        output_json: Path to write thermo.json
-        temperature_K: Temperature for thermodynamics
-
-    Returns:
-        Dictionary with 'g', 'temperature_K', 'unit' keys
-    """
-    thermo = _parse_sum_file(sum_file)
-    g_value = thermo.g_conc if thermo.g_conc is not None else thermo.g_sum
-
-    # Convert from Hartree to kcal/mol if needed
-    # Shermo outputs in Hartree (a.u.) by default
-    g_kcal = g_value * HARTREE_TO_KCAL
-
-    thermo_data = {
-        "g": g_kcal,
-        "G": g_kcal,
-        "temperature_K": temperature_K,
-        "unit": "kcal/mol",
-        "derived_from_sum": str(sum_file),
-        "derived_artifacts": True
-    }
-
-    output_json.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_json, 'w') as f:
-        json.dump(thermo_data, f, indent=2)
-
-    return thermo_data
 
 
 def find_shermo_sum_files(s1_dir: Path) -> Dict[str, Optional[Path]]:

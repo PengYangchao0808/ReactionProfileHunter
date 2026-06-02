@@ -134,6 +134,42 @@ class PathwayInfo(BaseModel):
     )
 
 
+class SmilesAtomMapping(BaseModel):
+    precursor_smiles_to_map: Dict[int, int] = Field(
+        default_factory=dict,
+        description="Precursor SMILES canonical idx → Map# (0-based idx → 1-based map)",
+    )
+    product_smiles_to_map: Dict[int, int] = Field(
+        default_factory=dict,
+        description="Product SMILES canonical idx → Map# (0-based idx → 1-based map)",
+    )
+    map_to_precursor_smiles: Dict[int, int] = Field(
+        default_factory=dict,
+        description="Map# → Precursor SMILES idx",
+    )
+    map_to_product_smiles: Dict[int, int] = Field(
+        default_factory=dict,
+        description="Map# → Product SMILES idx",
+    )
+
+
+class FormingBondNotation(BaseModel):
+    map_space: Tuple[int, int] = Field(..., description="Map# numbering")
+    product_smiles_idx: Tuple[int, int] = Field(..., description="Product SMILES canonical idx")
+    precursor_smiles_idx: Optional[Tuple[int, int]] = Field(
+        default=None,
+        description="Precursor SMILES canonical idx (may be None if atoms are in different molecules)",
+    )
+    bond_type_product: str = Field(
+        default="UNKNOWN",
+        description="Bond type in product (SINGLE/DOUBLE/AROMATIC/etc)",
+    )
+    bond_type_precursor: str = Field(
+        default="NONE",
+        description="Bond type in precursor (NONE if no bond)",
+    )
+
+
 class MechanismGraph(BaseModel):
     """
     完整的机理图模型
@@ -164,6 +200,18 @@ class MechanismGraph(BaseModel):
     source_data: Optional[Dict[str, Any]] = Field(
         default=None, 
         description="原始 Clean 输出"
+    )
+    smiles_atom_mapping: Optional[SmilesAtomMapping] = Field(
+        default=None,
+        description="SMILES↔Map atom mapping (populated during graph building)",
+    )
+    forming_bonds_annotated: Optional[List[FormingBondNotation]] = Field(
+        default=None,
+        description="Forming bonds with full notation context",
+    )
+    dr_completion: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="S0-authoritative DR branch completion payload",
     )
 
     def to_networkx(self) -> Any:

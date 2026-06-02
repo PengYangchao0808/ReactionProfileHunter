@@ -6,7 +6,7 @@ to SMILES and quantum chemistry parameters (charge, multiplicity).
 """
 
 from dataclasses import dataclass
-from typing import Optional, Dict, List
+from typing import Any, Optional, Dict, List, Iterable
 
 
 @dataclass
@@ -30,7 +30,7 @@ class SmallMoleculeCatalog:
     Loaded from config['reference_states']['small_molecule_map'].
     """
 
-    def __init__(self, config: Dict):
+    def __init__(self, config: Dict[str, Any]):
         """
         Initialize catalog from configuration.
 
@@ -87,6 +87,10 @@ class SmallMoleculeCatalog:
         if mol is None:
             raise UnknownSmallMoleculeError(f"Unknown small molecule key: {key}")
         return mol
+
+    def resolve_many(self, keys: Iterable[str]) -> dict[str, SmallMolecule]:
+        """Resolve multiple keys, raising on the first unknown key."""
+        return {key: self.require(key) for key in keys}
 
     def validate_keys(self, keys: List[str]) -> List[str]:
         """

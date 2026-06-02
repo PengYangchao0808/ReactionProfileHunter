@@ -31,6 +31,7 @@ import logging
 
 import numpy as np
 from rph_core.utils.keyword_translator import KeywordTranslator
+from rph_core.utils.path_compat import is_toxic_path as is_path_toxic
 
 logger = logging.getLogger(__name__)
 
@@ -232,16 +233,7 @@ def _select_task_resources(
     mem = task_resources.get('mem') or (global_resources.get('mem') if fallback_to_global else None)
     nproc = task_resources.get('nproc') or (global_resources.get('nproc') if fallback_to_global else None)
 
-    # Determine theory key based on task kind
-    theory_key_map = {
-        TaskKind.OPTIMIZATION: 'optimization',
-        TaskKind.TS_OPTIMIZATION: 'optimization',
-        TaskKind.SINGLE_POINT: 'single_point',
-        TaskKind.FREQUENCY: 'optimization',  # Freq uses optimization method/basis
-        TaskKind.IRC: 'optimization',
-        TaskKind.NBO: 'single_point',  # NBO typically runs on SP
-    }
-    theory_key = theory_key_map.get(task_kind, 'optimization')
+    theory_key = _theory_key_for_task(task_kind)
 
     theory_config = config.get('theory', {}).get(theory_key, {})
 
@@ -260,6 +252,18 @@ def _select_task_resources(
         'method': method,
         'basis': basis
     }
+
+
+def _theory_key_for_task(task_kind: TaskKind) -> str:
+    theory_key_map = {
+        TaskKind.OPTIMIZATION: 'optimization',
+        TaskKind.TS_OPTIMIZATION: 'optimization',
+        TaskKind.SINGLE_POINT: 'single_point',
+        TaskKind.FREQUENCY: 'optimization',
+        TaskKind.IRC: 'optimization',
+        TaskKind.NBO: 'single_point',
+    }
+    return theory_key_map.get(task_kind, 'optimization')
 
 
 
@@ -377,9 +381,22 @@ def run_gaussian_task(
         TaskKind.NBO: f"SP Pop=NBO",
     }
     base_route = route_map.get(task_kind, "SP")
+    theory_config = config.get('theory', {}).get(_theory_key_for_task(task_kind), {})
+    dispersion = KeywordTranslator.to_gaussian_dispersion(str(theory_config.get('dispersion', '')))
+    solvent = KeywordTranslator.to_gaussian_solvent(str(theory_config.get('solvent', '')))
+    theory_route_extras = str(theory_config.get('route_extras', '') or '').strip()
+
+    route_parts = [f"{method}/{basis}"]
+    if dispersion:
+        route_parts.append(dispersion)
+    if solvent:
+        route_parts.append(solvent)
+    route_parts.append(base_route)
+    if theory_route_extras:
+        route_parts.append(theory_route_extras)
     if extra_route:
-        base_route = f"{base_route} {extra_route}"
-    route = f"{method}/{basis} {base_route}"
+        route_parts.append(extra_route.strip())
+    route = " ".join(part for part in route_parts if part)
 
     try:
         # Read atoms from input file
@@ -1326,7 +1343,13 @@ class CRESTInterface:
             text=True
         )
         if result.returncode != 0:
-            raise RuntimeError(f"CREST conformer search failed: {result.stderr}")
+            from rph_core.utils.ui import ErrorFormatter
+            compact_msg = ErrorFormatter.compact(
+                RuntimeError("CREST conformer search failed"),
+                stderr=result.stderr,
+                stdout=result.stdout,
+            )
+            raise RuntimeError(compact_msg)
 
         best_path = output_dir / "crest_best.xyz"
         if best_path.exists():
@@ -1407,31 +1430,6 @@ class CRESTInterface:
         # Fallback: return input if no optimization output
         logger.warning("No optimized ensemble found, returning input ensemble")
         return ensemble_xyz
-
-
-toxic_chars = {' ', '[', ']', '(', ')', '{', '}'}
-
-
-def is_path_toxic(path: Path) -> bool:
-    """
-    Check if path contains characters that break Gaussian/QC calculations.
-
-    This is a HARD CONSTRAINT: paths containing spaces or special characters
-    will cause Gaussian to fail on WSL/Windows. The function rejects paths
-    with: space, brackets (), [], and braces {}.
-
-    Usage:
-        - Used before QC calculations to decide whether to use sandbox
-        - Returns True if path is unsafe and requires sandbox execution
-
-    Args:
-        path: Path to check
-
-    Returns:
-        True if path contains toxic characters, False otherwise
-    """
-    path_str = str(path)
-    return any(char in path_str for char in toxic_chars)
 
 
 def try_formchk(chk_path: Path) -> Optional[Path]:
@@ -1515,6 +1513,15 @@ class GaussianInterface:
             )
             self.gaussian_cmd = str(resolved.get('path') or 'g16')
 
+    def _allow_oldchk_reuse(self, old_checkpoint: Path, route_line: str) -> bool:
+        checkpoint_cfg = self.config.get("checkpoint", {}) or {}
+        oldchk_cfg = checkpoint_cfg.get("gaussian_oldchk_reuse", {}) or {}
+        if not bool(oldchk_cfg.get("enabled", False)):
+            return False
+        if not bool(oldchk_cfg.get("allow_cross_theory", False)):
+            return False
+        return old_checkpoint and old_checkpoint.exists()
+
     def write_input_file(
         self,
         xyz_file: Path,
@@ -1530,7 +1537,10 @@ class GaussianInterface:
         if route_line.lower().startswith('p '):
             route_line = route_line[1:].strip()
         if old_checkpoint and old_checkpoint.exists() and "Guess=Read" not in route_line:
-            route_line = f"{route_line} Guess=Read"
+            if self._allow_oldchk_reuse(old_checkpoint, route_line):
+                route_line = f"{route_line} Guess=Read"
+            else:
+                logger.debug("OldChk reuse blocked by checkpoint.gaussian_oldchk_reuse config")
         if "SCRF=" in route_line:
             route_line = route_line.replace("SCRF=(Solvent=", "SCRF=(PCM,Solvent=")
 
@@ -1549,7 +1559,7 @@ class GaussianInterface:
             f"%mem={self.mem}\n",
             f"%nprocshared={self.nprocshared}\n"
         ]
-        if old_checkpoint and old_checkpoint.exists():
+        if old_checkpoint and old_checkpoint.exists() and self._allow_oldchk_reuse(old_checkpoint, route_line):
             lines.append(f"%oldchk={old_checkpoint.name}\n")
         lines.append(f"{_format_gaussian_route_block(route_line)}\n\n")
         lines.append(f"{title}\n\n")
@@ -1589,7 +1599,9 @@ class GaussianInterface:
         output_dir: Path,
         route: str,
         old_checkpoint: Optional[Path] = None,
-        timeout: Optional[int] = None
+        timeout: Optional[int] = None,
+        charge: Optional[int] = None,
+        spin: Optional[int] = None
     ) -> QCResult:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -1597,93 +1609,134 @@ class GaussianInterface:
         gjf_file = output_dir / f"{xyz_file.stem}.gjf"
         log_file = output_dir / f"{xyz_file.stem}.log"
 
-        local_old_chk = None
-        if old_checkpoint and Path(old_checkpoint).exists():
-            local_old_chk_path = output_dir / "previous.chk"
-            try:
-                shutil.copy2(old_checkpoint, local_old_chk_path)
-                local_old_chk = Path("previous.chk")
-            except Exception as e:
-                import warnings
-                warnings.warn(f"Cannot localize checkpoint: {e}")
-                local_old_chk = Path(old_checkpoint).absolute()
-
-        self.write_input_file(
-            xyz_file=xyz_file,
-            gjf_file=gjf_file,
-            route=route,
-            title=xyz_file.stem,
-            old_checkpoint=local_old_chk
-        )
-
-        cmd = [self.gaussian_cmd, gjf_file.name, log_file.name] if self.use_wrapper else [self.gaussian_cmd, gjf_file.name]
-
-        result = subprocess.run(
-            cmd,
-            cwd=output_dir,
-            capture_output=True,
-            text=True,
-            timeout=timeout
-        )
-
-        if result.returncode != 0 or not log_file.exists():
-            error_snippet = "Unknown error"
-            if log_file.exists():
+        # Temporarily apply call-time charge/spin overrides
+        saved_charge, saved_multiplicity = self.charge, self.multiplicity
+        if charge is not None:
+            self.charge = charge
+        if spin is not None:
+            self.multiplicity = spin
+        try:
+            local_old_chk = None
+            if old_checkpoint and Path(old_checkpoint).exists():
+                local_old_chk_path = output_dir / "previous.chk"
                 try:
-                    with open(log_file, 'r', errors='replace') as f:
-                        lines = f.readlines()
-                        important_lines = [l.strip() for l in lines[-50:] if "Error" in l or "termination" in l or "galloc" in l or "allocation" in l]
-                        if important_lines:
-                            error_snippet = " | ".join(important_lines)
-                        else:
-                            error_snippet = "".join(lines[-10:])
-                except Exception:
-                    error_snippet = f"Cannot read log file: {log_file}"
-            elif result.stderr:
-                error_snippet = result.stderr.strip()
+                    shutil.copy2(old_checkpoint, local_old_chk_path)
+                    local_old_chk = Path("previous.chk")
+                except Exception as e:
+                    import warnings
+                    warnings.warn(f"Cannot localize checkpoint: {e}")
+                    local_old_chk = Path(old_checkpoint).absolute()
 
-            return QCResult(
-                success=False,
-                converged=False,
-                error_message=error_snippet
+            self.write_input_file(
+                xyz_file=xyz_file,
+                gjf_file=gjf_file,
+                route=route,
+                title=xyz_file.stem,
+                old_checkpoint=local_old_chk
             )
 
-        log_content = log_file.read_text()
-        converged = "Normal termination" in log_content
-        energy = None
-        try:
-            energy = read_energy_from_gaussian(log_file)
-        except Exception:
+            cmd = [self.gaussian_cmd, gjf_file.name, log_file.name] if self.use_wrapper else [self.gaussian_cmd, gjf_file.name]
+
+            result = subprocess.run(
+                cmd,
+                cwd=output_dir,
+                capture_output=True,
+                text=True,
+                timeout=timeout
+            )
+
+            if result.returncode != 0 or not log_file.exists():
+                error_snippet = "Unknown error"
+                if log_file.exists():
+                    try:
+                        with open(log_file, 'r', errors='replace') as f:
+                            lines = f.readlines()
+                            important_lines = [l.strip() for l in lines[-50:] if "Error" in l or "termination" in l or "galloc" in l or "allocation" in l]
+                            if important_lines:
+                                error_snippet = " | ".join(important_lines)
+                            else:
+                                error_snippet = "".join(lines[-10:])
+                    except Exception:
+                        error_snippet = f"Cannot read log file: {log_file}"
+
+                    try:
+                        log_content = log_file.read_text(errors="replace")
+                        energy = None
+                        try:
+                            energy = read_energy_from_gaussian(log_file)
+                        except Exception:
+                            pass
+                        atoms = LogParser.extract_final_geometry(log_content)
+                        coords = np.array([[atom['x'], atom['y'], atom['z']] for atom in atoms]) if atoms else np.array([])
+                        frequencies = self._parse_frequencies(log_content)
+                        chk_file = gjf_file.with_suffix(".chk")
+                        fchk_file = try_formchk(chk_file) if chk_file.exists() else None
+                        return QCResult(
+                            success=False,
+                            converged=False,
+                            energy=energy,
+                            coordinates=coords,
+                            frequencies=frequencies,
+                            output_file=log_file,
+                            log_file=log_file,
+                            chk_file=chk_file if chk_file.exists() else None,
+                            fchk_file=fchk_file,
+                            qm_output_file=log_file,
+                            error_message=error_snippet,
+                        )
+                    except Exception:
+                        pass
+                elif result.stderr:
+                    error_snippet = result.stderr.strip()
+
+                return QCResult(
+                    success=False,
+                    converged=False,
+                    error_message=error_snippet
+                )
+
+            log_content = log_file.read_text()
+            converged = "Normal termination" in log_content
             energy = None
+            try:
+                energy = read_energy_from_gaussian(log_file)
+            except Exception:
+                energy = None
 
-        atoms = LogParser.extract_final_geometry(log_content)
-        coords = np.array([[atom['x'], atom['y'], atom['z']] for atom in atoms]) if atoms else np.array([])
-        frequencies = self._parse_frequencies(log_content)
+            atoms = LogParser.extract_final_geometry(log_content)
+            coords = np.array([[atom['x'], atom['y'], atom['z']] for atom in atoms]) if atoms else np.array([])
+            frequencies = self._parse_frequencies(log_content)
 
-        chk_file = gjf_file.with_suffix(".chk")
-        fchk_file = try_formchk(chk_file) if chk_file.exists() else None
+            chk_file = gjf_file.with_suffix(".chk")
+            fchk_file = try_formchk(chk_file) if chk_file.exists() else None
 
-        error_message = None
-        if not converged:
-            error_lines = [line.strip() for line in log_content.splitlines() if "Error termination" in line]
-            if error_lines:
-                error_message = error_lines[-1]
-            else:
-                error_message = "Gaussian did not terminate normally"
+            error_message = None
+            if not converged:
+                if "Number of steps exceeded" in log_content:
+                    error_message = "Number of steps exceeded (optimization did not converge within MaxCycles)"
+                else:
+                    error_lines = [line.strip() for line in log_content.splitlines() if "Error termination" in line]
+                    if error_lines:
+                        error_message = error_lines[-1]
+                    else:
+                        error_message = "Gaussian did not terminate normally"
 
-        return QCResult(
-            success=converged,
-            energy=energy,
-            coordinates=coords,
-            converged=converged,
-            frequencies=frequencies,
-            output_file=log_file,
-            log_file=log_file,
-            chk_file=chk_file if chk_file.exists() else None,
-            fchk_file=fchk_file,
-            qm_output_file=log_file,
-            error_message=error_message
-        )
+            return QCResult(
+                success=converged,
+                energy=energy,
+                coordinates=coords,
+                converged=converged,
+                frequencies=frequencies,
+                output_file=log_file,
+                log_file=log_file,
+                chk_file=chk_file if chk_file.exists() else None,
+                fchk_file=fchk_file,
+                qm_output_file=log_file,
+                error_message=error_message
+            )
+        finally:
+            self.charge = saved_charge
+            self.multiplicity = saved_multiplicity
 
     @staticmethod
     def _parse_frequencies(log_content: str) -> Optional[np.ndarray]:
@@ -1949,6 +2002,19 @@ class QCInterfaceFactory:
             )
         if engine == 'orca':
             from rph_core.utils.orca_interface import ORCAInterface
+            method_spec = kwargs.get('method_spec')
+            if method_spec is None:
+                normalized = kwargs.get('normalized_spec')
+                if isinstance(normalized, dict):
+                    method_spec = dict(normalized)
+                    method_spec.setdefault('engine', 'orca')
+                    method_spec.setdefault('method', kwargs.get('method', 'M062X'))
+                    method_spec.setdefault('basis', kwargs.get('basis', 'def2-TZVPP'))
+                    method_spec.setdefault('aux_basis', kwargs.get('aux_basis', 'def2/J'))
+                    method_spec.setdefault('route_extras', kwargs.get('route_extras', ''))
+                    method_spec.setdefault('solvent', kwargs.get('solvent', 'acetone'))
+                    if kwargs.get('maxcore') is not None:
+                        method_spec.setdefault('maxcore', kwargs.get('maxcore'))
             return ORCAInterface(
                 method=kwargs.get('method', 'M062X'),
                 basis=kwargs.get('basis', 'def2-TZVPP'),
@@ -1956,7 +2022,9 @@ class QCInterfaceFactory:
                 nprocs=kwargs.get('nprocshared', kwargs.get('nprocs', 16)),
                 maxcore=kwargs.get('maxcore'),
                 solvent=kwargs.get('solvent', 'acetone'),
-                config=kwargs.get('config')
+                route_extras=kwargs.get('route_extras', ''),
+                config=kwargs.get('config'),
+                method_spec=method_spec,
             )
         if engine == 'xtb':
             return XTBInterface(

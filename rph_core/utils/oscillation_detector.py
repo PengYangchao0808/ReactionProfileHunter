@@ -6,12 +6,13 @@
 
 Author: QC Descriptors Team
 Date: 2026-01-13
-Purpose: ReactionProfileHunter v2.1 - 优化控制与振荡救援
+Purpose: ReactionProfileHunter v3.0 - 优化控制与振荡救援
 """
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import logging
 
@@ -51,7 +52,7 @@ class OscillationResult:
     oscillation_count: int
     energy_variance: float
     recommended_rescue: RescueLevel
-    rescue_params: dict
+    rescue_params: Dict[str, Any]
 
 
 class OscillationDetector:
@@ -250,7 +251,7 @@ class OscillationDetector:
         oscillation_type: str,
         oscillation_count: int,
         energy_variance: float
-    ) -> Tuple[RescueLevel, dict]:
+    ) -> Tuple[RescueLevel, Dict[str, Any]]:
         """
         推荐救援策略和参数调整
 
@@ -359,4 +360,64 @@ def detect_oscillation_from_output(
             # 梯度通常在下一行或附近的收敛信息中
             detector.record_step(i, energy, 0.0)  # 梯度暂设为0
 
+    return detector.detect()
+
+
+def analyze_gaussian_ts_log_for_oscillation(
+    log_path: Path,
+    min_steps: int = 60,
+    window_size: int = 10,
+    energy_tolerance: float = 1e-4,
+) -> OscillationResult:
+    """Post-hoc Gaussian TS log analysis for oscillation detection.
+
+    Parses SCF Done energies from a completed Gaussian log and checks
+    for oscillation patterns. Used after a TS optimization completes
+    (or fails) to classify the failure mode.
+    """
+    if not log_path or not log_path.exists():
+        return OscillationResult(
+            is_oscillating=False,
+            oscillation_type='none',
+            severity='none',
+            oscillation_count=0,
+            energy_variance=0.0,
+            recommended_rescue=RescueLevel.NONE,
+            rescue_params={}
+        )
+
+    energies = []
+    import re
+    try:
+        text = log_path.read_text(errors="ignore")
+        for match in re.finditer(r'SCF Done:\s+E\([^)]+\)\s+=\s+([-\d.]+)', text):
+            energies.append(float(match.group(1)))
+    except Exception:
+        return OscillationResult(
+            is_oscillating=False,
+            oscillation_type='none',
+            severity='none',
+            oscillation_count=0,
+            energy_variance=0.0,
+            recommended_rescue=RescueLevel.NONE,
+            rescue_params={}
+        )
+
+    if len(energies) < min_steps:
+        return OscillationResult(
+            is_oscillating=False,
+            oscillation_type='none',
+            severity='none',
+            oscillation_count=0,
+            energy_variance=0.0,
+            recommended_rescue=RescueLevel.NONE,
+            rescue_params={}
+        )
+
+    detector = OscillationDetector(
+        window_size=window_size,
+        energy_tolerance=energy_tolerance
+    )
+    for i, e in enumerate(energies):
+        detector.record_step(i, e, 0.0)
     return detector.detect()

@@ -2,8 +2,8 @@
 
 ## Version Management Guide
 
-**版本**: 2.0.0  
-**生效日期**: 2025-03-18  
+**版本**: 3.0.0  
+**生效日期**: 2026-06-02  
 **文档语言**: 中文 (English version available: VERSION_GUIDE_EN.md)
 
 ---

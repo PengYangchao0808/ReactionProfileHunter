@@ -106,11 +106,11 @@ class RetroScanner(LoggerMixin):
             i, j = int(pair[0]), int(pair[1])
             if i == j:
                 continue
-            normalized.append((i, j))
+            normalized.append((min(i, j), max(i, j)))
 
         if not normalized:
             raise RuntimeError("S2 requires non-empty forming_bonds; got empty/invalid input")
-        return tuple(normalized)
+        return tuple(sorted(set(normalized)))
 
     def _get_topology_guard_config(self) -> Dict[str, Any]:
         """Get topology guard configuration with defaults."""
@@ -195,7 +195,8 @@ class RetroScanner(LoggerMixin):
 
         xtb_settings = self.step2_cfg.get("xtb_settings", {}) or {}
         solvent = str(xtb_settings.get("solvent", self.config.get("theory", {}).get("optimization", {}).get("solvent", "acetone")))
-        nproc = int(self.config.get("resources", {}).get("nproc", 1))
+        scan_cfg = self.step2_cfg.get("scan", {}) or {}
+        nproc = int(scan_cfg.get("nproc") or xtb_settings.get("nproc") or self.config.get("resources", {}).get("nproc", 1))
 
         xtb = XTBInterface(solvent=solvent, nproc=nproc, config=self.config)
         result = xtb.scan(
@@ -227,30 +228,17 @@ class RetroScanner(LoggerMixin):
             )
         return result, energies_local, max_idx_local, boundary_local, local_peak_local
 
-    def _map_bonds(self, forming_bonds: Sequence[Tuple[int, int]], atom_map: Optional[Dict[int, int]]) -> Tuple[Tuple[int, int], ...]:
-        if not atom_map:
-            return self._validate_forming_bonds(forming_bonds)
-        mapped = []
-        for pair in forming_bonds:
-            if int(pair[0]) in atom_map and int(pair[1]) in atom_map:
-                mapped.append((atom_map[int(pair[0])], atom_map[int(pair[1])]))
-            else:
-                self.logger.warning(f"Could not map MapId bond {pair} using atom_map. Falling back to using it as MolIdx.")
-                mapped.append((int(pair[0]), int(pair[1])))
-        return self._validate_forming_bonds(mapped)
-
     def run_retro_scan(
         self,
         product_xyz: Path,
         output_dir: Path,
         forming_bonds: Sequence[Tuple[int, int]],
         scan_config: Optional[Dict[str, Any]] = None,
-        atom_map: Optional[Dict[int, int]] = None,
     ) -> Tuple[Path, Path, Path, Tuple[Tuple[int, int], ...], Path, str, str, Tuple[str, ...], Optional[Path]]:
         """向外扫描 (V5.1 Product-Seeded Relaxed Scan)"""
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        bonds = self._map_bonds(forming_bonds, atom_map)
+        bonds = self._validate_forming_bonds(forming_bonds)
         product_file = self._resolve_product_file(product_xyz)
         params = self._resolve_scan_params(scan_config)
 
@@ -399,12 +387,11 @@ class RetroScanner(LoggerMixin):
         output_dir: Path,
         forming_bonds: Sequence[Tuple[int, int]],
         scan_config: Optional[Dict[str, Any]] = None,
-        atom_map: Optional[Dict[int, int]] = None,
     ) -> Tuple[Path, Path, Path, Tuple[Tuple[int, int], ...], Path, str, str, Tuple[str, ...]]:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        bonds = self._map_bonds(forming_bonds, atom_map)
+        bonds = self._validate_forming_bonds(forming_bonds)
         product_file = self._resolve_product_file(product_xyz)
         params = self._resolve_scan_params(scan_config)
 
@@ -548,22 +535,6 @@ class RetroScanner(LoggerMixin):
             tuple(degraded_reasons),
         )
 
-    def run_forward_scan(
-        self,
-        product_xyz: Path,
-        output_dir: Path,
-        forming_bonds: Sequence[Tuple[int, int]],
-        scan_config: Optional[Dict[str, Any]] = None,
-        atom_map: Optional[Dict[int, int]] = None,
-    ) -> Tuple[Path, Path, Path, Tuple[Tuple[int, int], ...], Path, str, str, Tuple[str, ...], Optional[Path]]:
-        return self.run_retro_scan(
-            product_xyz=product_xyz,
-            output_dir=output_dir,
-            forming_bonds=forming_bonds,
-            scan_config=scan_config,
-            atom_map=atom_map,
-        )
-
     def run_with_precursor(
         self,
         reactant_complex_xyz: Path,
@@ -625,7 +596,7 @@ class RetroScanner(LoggerMixin):
             meta_json_path = output_dir / "meta.json"
             meta_data = {
                 "precursor_smiles": record.precursor_smiles,
-                "leaving_small_molecule_key": record.get_leaving_small_molecule_key(),
+                "small_molecular_keys": record.get_small_molecular_keys(),
                 "strategy": strategy,
                 "source_reactant_complex": str(reactant_complex_xyz),
             }
@@ -666,8 +637,15 @@ $end
         output_dir.mkdir(parents=True, exist_ok=True)
 
         path_cfg = self.step2_cfg.get("path_search", {}) or {}
-        if not path_cfg.get("enabled", False):
-            raise ValueError("path_search is not enabled in config")
+        if path_cfg.get("enabled") is True:
+            path_search_mode = "always"
+        elif path_cfg.get("enabled") is False:
+            path_search_mode = "never"
+        else:
+            path_search_mode = str(path_cfg.get("mode", "rescue")).strip().lower()
+
+        if path_search_mode == "never":
+            raise ValueError("path_search mode is set to 'never' in config")
 
         self.logger.info("[S2] Path Search (xTB --path) started")
 
@@ -680,7 +658,7 @@ $end
 
         xtb = XTBInterface(
             solvent=xtb_settings.get("solvent", "acetone"),
-            nproc=int(self.config.get("resources", {}).get("nproc", 1)),
+            nproc=int(path_cfg.get("nproc") or xtb_settings.get("nproc") or self.config.get("resources", {}).get("nproc", 1)),
             config=self.config
         )
 
@@ -797,7 +775,7 @@ $end
         """
         gau_xtb_cfg = self.step2_cfg.get("gau_xtb", {})
         
-        nproc = self.config.get("resources", {}).get("nproc", 1)
+        nproc = gau_xtb_cfg.get("nproc") or self.config.get("resources", {}).get("nproc", 1)
         
         optimizer = GauXTBOptimizer(
             config=self.config,
@@ -889,7 +867,6 @@ $end
             output_dir=output_dir,
             forming_bonds=forming_bonds,
             scan_config=None,
-            atom_map=None,
         )
     
     def get_edge_info_from_mechanism(

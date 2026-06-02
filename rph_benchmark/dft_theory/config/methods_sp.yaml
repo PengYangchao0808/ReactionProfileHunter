@@ -1,0 +1,107 @@
+methods:
+  SP-REF:
+    description: DLPNO reference
+    engine: orca
+    family: post_hf_dlpno
+    method: DLPNO-CCSD(T)
+    basis: def2-TZVPP
+    scf:
+      accel: RIJK
+      aux_j: def2/JK
+    correlation:
+      model: DLPNO-CCSD(T)
+      aux_c: def2-TZVPP/C
+    pno:
+      preset: TightPNO
+    dispersion:
+      mode: forbidden
+    is_reference: true
+    reuse_baseline_gcorr: true
+
+  SP-1:
+    description: wB97M-V candidate
+    engine: orca
+    family: vv10_family
+    method: wB97M-V
+    basis: def2-TZVPP
+    scf:
+      accel: RIJCOSX
+      aux_j: def2/J
+    dispersion:
+      mode: forbidden
+    reuse_baseline_gcorr: true
+
+  SP-2:
+    description: PWPB95-D3BJ candidate
+    engine: orca
+    family: double_hybrid_dft
+    method: PWPB95
+    basis: def2-TZVPP
+    scf:
+      accel: RIJCOSX
+      aux_j: def2/J
+    correlation:
+      model: RI-MP2
+      aux_c: def2-TZVPP/C
+    dispersion:
+      mode: external
+      keyword: D3BJ
+    reuse_baseline_gcorr: true
+
+  SP-3:
+    description: wB97X-2 candidate
+    engine: orca
+    family: double_hybrid_dft
+    method: wB97X-2
+    basis: def2-TZVPP
+    scf:
+      accel: RIJCOSX
+      aux_j: def2/J
+    correlation:
+      model: RI-MP2
+      aux_c: def2-TZVPP/C
+    dispersion:
+      mode: none
+    reuse_baseline_gcorr: true
+
+  SP-4:
+    description: wB97X-V candidate
+    engine: orca
+    family: vv10_family
+    method: wB97X-V
+    basis: def2-TZVPP
+    scf:
+      accel: RIJCOSX
+      aux_j: def2/J
+    dispersion:
+      mode: forbidden
+    reuse_baseline_gcorr: true
+
+  SP-5:
+    description: M06-2X orca candidate
+    engine: orca
+    family: hybrid_gga
+    method: M06-2X
+    basis: def2-TZVPP
+    scf:
+      accel: RIJCOSX
+      aux_j: def2/J
+    dispersion:
+      mode: none
+    reuse_baseline_gcorr: true
+
+  SP-6:
+    description: r2SCAN-3c low-cost baseline
+    engine: orca
+    family: composite_3c
+    method: r2SCAN-3c
+    basis: mTZVPP
+    aux_basis: null
+    self_contained: true
+    dispersion:
+      mode: forbidden
+    reuse_baseline_gcorr: true
+
+solvent:
+  model: PCM
+  solvent: acetone

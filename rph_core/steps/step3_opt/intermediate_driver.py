@@ -126,6 +126,8 @@ class IntermediateDriver(LoggerMixin):
                 'opt_output': result.log_file,
                 'sp_output': result.l2_sp_result.output_file if result.l2_sp_result else None,
                 'freq_output': result.freq_log,
+                'chk_file': result.chk_file,
+                'fchk_file': result.fchk_file,
                 'error': result.error_message,
             }
             

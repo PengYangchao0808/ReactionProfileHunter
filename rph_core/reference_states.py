@@ -1,16 +1,20 @@
 """
-Reference States Runner
+Reference States Runner — DEPRECATED since v2.1.2
 
-Manages reference state calculations for precursors and leaving small molecules.
-Creates directory structure and index files (without QC in V5.1).
+Reference-state small molecule thermo is now resolved via:
+  rph_core.utils.small_molecule_cache.SmallMoleculeCache
+  rph_core.orchestrator._resolve_small_molecule_thermo()
+
+This module is kept for backward compatibility with external callers
+but should not be used in new pipeline code.
 """
 
 from pathlib import Path
 from typing import Dict, List, Optional, Any
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 import json
 
-from rph_core.utils.tsv_dataset import ReactionRecord, collect_leaving_small_molecule_keys
+from rph_core.utils.tsv_dataset import ReactionRecord, collect_small_molecular_keys_from_records
 from rph_core.utils.small_molecule_catalog import SmallMoleculeCatalog, UnknownSmallMoleculeError
 
 
@@ -37,7 +41,7 @@ class ReactionReferenceState:
     rx_id: str
     precursor: ReferenceStateEntry
     raw_meta: Dict[str, str]
-    leaving_small_molecule_key: Optional[str] = None
+    small_molecular_keys: list[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -104,15 +108,15 @@ class ReferenceStatesRunner:
 
         # Create subdirectories
         rx_dir = ref_base / 'reactions'
-        rx_dir.mkdir(exist_ok=True)
+        rx_dir.mkdir(parents=True, exist_ok=True)
         smol_dir = ref_base / 'small_molecules'
-        smol_dir.mkdir(exist_ok=True)
+        smol_dir.mkdir(parents=True, exist_ok=True)
 
-        # Collect leaving small molecule keys
-        leaving_keys = collect_leaving_small_molecule_keys(records)
+        # Collect small molecular keys from records
+        small_molecular_keys = collect_small_molecular_keys_from_records(records)
 
         # Validate small molecule keys
-        unknown_keys = self.small_mol_catalog.validate_keys(list(leaving_keys))
+        unknown_keys = self.small_mol_catalog.validate_keys(list(small_molecular_keys))
         if unknown_keys:
             policy = self._get_unknown_small_mol_policy()
             if policy == 'error':
@@ -129,7 +133,7 @@ class ReferenceStatesRunner:
             self._process_reaction(record, rx_dir)
 
         # Process each small molecule
-        for key in leaving_keys:
+        for key in small_molecular_keys:
             if key not in unknown_keys:
                 self._process_small_molecule(key, smol_dir)
 
@@ -151,7 +155,7 @@ class ReferenceStatesRunner:
         rx_subdir.mkdir(parents=True, exist_ok=True)
 
         precursor_dir = rx_subdir / 'precursor'
-        precursor_dir.mkdir(exist_ok=True)
+        precursor_dir.mkdir(parents=True, exist_ok=True)
 
         # Write placeholder energy.json (V5.1: no QC yet)
         placeholder_entry = ReferenceStateEntry(
@@ -169,7 +173,7 @@ class ReferenceStatesRunner:
         self.reaction_states[record.rx_id] = ReactionReferenceState(
             rx_id=record.rx_id,
             precursor=placeholder_entry,
-            leaving_small_molecule_key=record.get_leaving_small_molecule_key(),
+            small_molecular_keys=record.get_small_molecular_keys(),
             raw_meta=record.raw
         )
 
@@ -200,8 +204,8 @@ class ReferenceStatesRunner:
             'csv_schema': {
                 'id_col': 'rx_id',
                 'precursor_smiles_col': 'precursor_smiles',
-                'ylide_leaving_group_col': 'ylide_leaving_group',
-                'leaving_group_col_fallback': 'leaving_group'
+                'small_molecular_primary_col': '',
+                'small_molecular_fallback_col': ''
             },
             'config_snapshot': {
                 'theory_opt': self.config.get('theory', {}).get('optimization', {}),

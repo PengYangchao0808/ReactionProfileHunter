@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from rph_core.steps.step4_features.context import FeatureContext
+from rph_features.context import FeatureContext
 from rph_core.utils.fragment_cut import FragmentCutter, cut_along_forming_bonds
 
 

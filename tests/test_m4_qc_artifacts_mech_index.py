@@ -16,7 +16,7 @@ import pytest
 from pathlib import Path
 import tempfile
 
-from rph_core.steps.step4_features.mech_packager import (
+from rph_features.mech_packager import (
     pack_mechanism_assets,
     _collect_qc_artifacts,
     _write_json_atomic,

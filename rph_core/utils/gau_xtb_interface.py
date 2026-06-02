@@ -24,7 +24,7 @@ from rph_core.utils.log_manager import LoggerMixin
 from rph_core.utils.file_io import read_xyz, write_xyz
 from rph_core.utils.geometry_tools import LogParser
 from rph_core.utils.data_types import QCResult
-from rph_core.utils.qc_interface import is_path_toxic
+from rph_core.utils.path_compat import is_toxic_path
 
 
 class GauXTBInterface(LoggerMixin):
@@ -223,7 +223,7 @@ class GauXTBInterface(LoggerMixin):
 
         execution_dir = output_dir
         cleanup_execution_dir = False
-        if is_path_toxic(resolved_output_dir):
+        if is_toxic_path(resolved_output_dir):
             execution_dir = Path(tempfile.mkdtemp(prefix="rph_gau_xtb_", dir="/tmp"))
             cleanup_execution_dir = True
             self.logger.warning(

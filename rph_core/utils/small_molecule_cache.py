@@ -6,17 +6,23 @@ Manages a global cache directory for small molecules to avoid redundant
 conformer searches and optimizations.
 """
 
-import fcntl
 import json
 import logging
 import os
+import re
+import json
 import time
+import shutil
+import logging
+from typing import Optional, Any
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from rph_core.utils.molecule_utils import get_molecule_key
 
 logger = logging.getLogger(__name__)
+
+_TOXIC_CHARS_RE = re.compile(r"[ \[\](){}]")
 
 
 class SmallMoleculeCache:
@@ -55,7 +61,11 @@ class SmallMoleculeCache:
         key = get_molecule_key(smiles)
         if key is None:
             return None
-        return self.cache_root / key
+        return self.cache_root / self._safe_key(key)
+
+    @staticmethod
+    def _safe_key(key: str) -> str:
+        return _TOXIC_CHARS_RE.sub("_", key)
 
     def exists(self, smiles: str, theory_signature: Optional[Dict[str, Any]] = None) -> bool:
         """
@@ -75,8 +85,10 @@ class SmallMoleculeCache:
             return False
         
         min_xyz = path / "molecule_min.xyz"
+        thermo_file = path / "thermo.json"
         if not min_xyz.exists():
-            return False
+            if not thermo_file.exists():
+                return False
         
         if theory_signature is not None:
             meta_file = path / "cache_meta.json"
@@ -95,6 +107,26 @@ class SmallMoleculeCache:
                 logger.debug(f"No cache meta for {smiles}, skipping signature check")
         
         return True
+
+    def find_thermo(self, smiles: str) -> Optional[Path]:
+        """Find thermo.json for a cached molecule by SMILES."""
+        path = self.get_path(smiles)
+        if path is None:
+            return None
+
+        thermo_file = path / "thermo.json"
+        if thermo_file.exists():
+            return thermo_file
+
+        return None
+
+    def find_thermo_by_key(self, key: str, catalog: Any) -> Optional[Path]:
+        """Find thermo.json for a catalog key via its mapped SMILES."""
+        mol = catalog.get(key)
+        if mol is None:
+            return None
+
+        return self.find_thermo(mol.smiles)
 
     def _is_signature_compatible(self, requested: Dict[str, Any], cached: Dict[str, Any]) -> bool:
         """Check if requested theory signature is compatible with cached signature.
@@ -154,6 +186,11 @@ class SmallMoleculeCache:
         path = self.get_path(smiles)
         if path is None:
             return None
+
+        # The per-molecule directory must exist before the atomic sentinel file
+        # is opened. Fresh cache entries previously skipped get_or_create() and
+        # failed here with FileNotFoundError under S1 molecule-level parallelism.
+        path.mkdir(parents=True, exist_ok=True)
         
         lock_file = path / ".computing"
         start_time = time.time()
@@ -165,6 +202,26 @@ class SmallMoleculeCache:
                     f.write(f"PID: {os.getpid()}\nTime: {time.time()}\n")
                 return lock_file
             except FileExistsError:
+                try:
+                    with open(lock_file, 'r') as f:
+                        content = f.read()
+                    pid_line = next((line for line in content.split('\n') if line.startswith('PID: ')), None)
+                    if pid_line:
+                        pid = int(pid_line.split(': ')[1])
+                        process_exists = False
+                        try:
+                            os.kill(pid, 0)
+                            process_exists = True
+                        except OSError:
+                            pass
+                        
+                        if not process_exists:
+                            logger.warning(f"Found stale lock for {smiles} (PID {pid} dead), removing it.")
+                            lock_file.unlink(missing_ok=True)
+                            continue
+                except Exception:
+                    pass
+                
                 time.sleep(0.5)
                 continue
         
@@ -218,13 +275,71 @@ class SmallMoleculeCache:
         Returns:
             Path to thermo.json if found, None otherwise.
         """
-        hoac_smiles = "CC(=O)O"
-        path = self.get_path(hoac_smiles)
+        return self.find_thermo("CC(=O)O")
+
+    def is_complete(
+        self,
+        smiles: str,
+        theory_signature: Optional[Dict[str, Any]] = None,
+        require_thermo: bool = True,
+    ) -> bool:
+        """Check if a cache entry is fully complete.
+
+        Unlike exists(), this requires all expected artifacts to be present.
+        With require_thermo=True, both molecule_min.xyz AND thermo.json must exist.
+
+        Args:
+            smiles: SMILES string of the molecule.
+            theory_signature: Optional theory parameters to validate cache compatibility.
+            require_thermo: If True, also require thermo.json to exist.
+
+        Returns:
+            True if cache entry is complete and compatible, False otherwise.
+        """
+        path = self.get_path(smiles)
+        if path is None or not path.exists():
+            return False
+
+        if not (path / "molecule_min.xyz").exists():
+            return False
+
+        if require_thermo and not (path / "thermo.json").exists():
+            return False
+
+        if theory_signature is not None:
+            meta_file = path / "cache_meta.json"
+            if meta_file.exists():
+                try:
+                    with open(meta_file, "r") as f:
+                        cache_meta = json.load(f)
+                    cached_sig = cache_meta.get('theory_signature', {})
+                    if not self._is_signature_compatible(theory_signature, cached_sig):
+                        return False
+                except Exception:
+                    return False
+            else:
+                return False
+
+        return True
+
+    def get_entry_manifest(self, smiles: str) -> Dict[str, Any]:
+        """Read the cache_meta.json for a cached molecule.
+
+        Args:
+            smiles: SMILES string of the molecule.
+
+        Returns:
+            Dict of cache metadata, or empty dict if not found.
+        """
+        path = self.get_path(smiles)
         if path is None:
-            return None
-        
-        thermo_file = path / "thermo.json"
-        if thermo_file.exists():
-            return thermo_file
-        
-        return None
+            return {}
+        meta_file = path / "cache_meta.json"
+        if not meta_file.exists():
+            return {}
+        try:
+            with open(meta_file, "r") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}

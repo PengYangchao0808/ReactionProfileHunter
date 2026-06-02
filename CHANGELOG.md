@@ -1,5 +1,31 @@
 # ReactionProfileHunter 修改日志 / Modification Log
 
+> 注：v2.1.1 已移除 legacy `forward_scan` 别名；下文中的相关提及均为历史记录或迁移说明。
+
+## v3.0.0 版本 — DFT/ML Split (2026-06-02)
+
+### 发布日期 / Release Date: 2026-06-02
+
+### 重大变更 (BREAKING)
+
+- **S4 特征提取移至独立包**: `rph_features/` 已移动至 `RPH_Postprocess/`，不再包含在 RPH 中
+- **ML 训练包分离**: `rph_ml/` 已移动至 `Training/`，与 DFT 管线完全解耦
+- **数据契约独立**: `rph_schemas/` 已移动至 `RPH_Postprocess/`
+- **Pipeline 默认停止于 S3**: DFT calculation pipeline (S0-S3) 完成后不再自动运行 S4 特征提取
+- **S4 外部调用**: 使用 `rph-features extract --rph-run <work_dir>` CLI 进行后处理
+- **`orchestrator.run_step4()` 已移除**: 调用将 `raise ImportError` 并给出迁移说明
+- **Oracle/ML 数据分离**: `data/`（130M）、`ml_yield_results_v*/`、`cleaned/` 移至 `Training/`
+
+### 新增 / 改进
+
+- 三体分离架构：`RPH (DFT)` / `RPH_Postprocess (特征)` / `Training (ML)`
+- S3 artifact 中 forming_bonds 元数据保留写入 `S4_Data/`，供 RPH_Postprocess 消费
+- `--skip-steps s4` 为默认行为；S4 通过 checkpoints 追踪但不再自动执行
+- 目录结构精简：已移除 `rph_ml/`、`rph_features/`、`rph_schemas/`、`data/`、`cleaned/`、`ml_yield_results_*/`
+- `external_data/` 中的 ML 相关数据已按类别分发至 RPH_Postprocess 和 Training
+
+---
+
 ## v2.0.0 版本更新 (Current / 当前版本)
 
 ### 发布日期 / Release Date: 2025-03-18
@@ -26,7 +52,7 @@
   reaction_profiles:
     "[4+3]_default":
       forming_bond_count: 2
-      s2_strategy: forward_scan
+      s2_strategy: forward_scan  # 历史配置；v2.1.1 已移除
       scan:
         scan_start_distance: 1.8
         scan_end_distance: 3.2
@@ -97,7 +123,7 @@
 | 文件 / File | 描述 / Description |
 |------------|-------------------|
 | `tests/test_s1_progress_parser.py` | S1 进度解析器测试 |
-| `tests/test_forward_scan_wiring.py` | 前向扫描接线测试 |
+| `tests/test_forward_scan_wiring.py`（v2.1.1 已删除） | 历史前向扫描接线测试 |
 | `tests/test_geometry_guard.py` | 几何守护测试 |
 | `tests/test_s2_boundary_degrade.py` | S2 边界降级测试 |
 | `tests/test_s3_checkpoint.py` | S3 检查点测试 |
@@ -130,7 +156,7 @@
 reaction_profiles:
   "[4+3]_default":
     forming_bond_count: 2
-    s2_strategy: forward_scan
+    s2_strategy: forward_scan  # 历史配置；v2.1.1 已移除
     scan:
       scan_start_distance: 1.8
       scan_end_distance: 3.2

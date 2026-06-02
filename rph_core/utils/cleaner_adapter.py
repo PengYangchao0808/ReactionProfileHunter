@@ -63,7 +63,6 @@ def convert_cleaner_row_to_record(
 
     map_status = (_first_nonempty(row, "map_status") or "").strip().upper()
     map_confidence = _to_float(_first_nonempty(row, "map_confidence", "map_score", "mapping_score"))
-    use_mapped = map_status == "OK" and map_confidence is not None and map_confidence >= 0.8
 
     mapped_product_smiles = _first_nonempty(
         row,
@@ -71,38 +70,10 @@ def convert_cleaner_row_to_record(
         "product_smiles_mapped",
         "mapped_product",
     )
-    mapped_precursor_smiles = _first_nonempty(
-        row,
-        "mapped_precursor_smiles",
-        "precursor_smiles_mapped",
-        "mapped_reactant_smiles",
-        "reactant_smiles_mapped",
-    )
-    mapped_smiles = mapped_product_smiles or mapped_precursor_smiles or precursor_smiles
 
     mapped_reaction = _first_nonempty(row, "rxn_smiles_mapped", "reaction_smiles_mapped")
     if not mapped_product_smiles:
         mapped_product_smiles = extract_product_smiles(mapped_reaction)
-    if not mapped_smiles:
-        mapped_smiles = extract_reactant_smiles(mapped_reaction)
-
-    index_source_smiles = mapped_product_smiles or mapped_smiles
-
-    formed_map_pairs: List[Tuple[int, int]] = []
-    formed_index_pairs: List[Tuple[int, int]] = []
-    bond_source = "none"
-
-    if use_mapped:
-        formed_map_pairs = parse_formed_pairs_from_core_bond_changes(
-            _first_nonempty(row, "core_bond_changes")
-        )
-        formed_index_pairs = map_pairs_to_internal_indices(index_source_smiles, formed_map_pairs)
-        bond_source = "core_bond_changes"
-    else:
-        smarts = _first_nonempty(row, "reaction_smarts", "smarts", "fallback_smarts")
-        formed_map_pairs = extract_formed_pairs_from_reaction_smarts(smarts)
-        formed_index_pairs = map_pairs_to_internal_indices(index_source_smiles, formed_map_pairs)
-        bond_source = "smarts_fallback"
 
     reaction_type = _first_nonempty(row, "reaction_type", "rxn_type", "reaction_family")
     profile_key = match_reaction_profile_key(reaction_type, reaction_profiles or {})
@@ -111,15 +82,8 @@ def convert_cleaner_row_to_record(
     raw["map_status"] = map_status
     if map_confidence is not None:
         raw["map_confidence"] = f"{map_confidence:.6g}"
-    raw["bond_change_source"] = bond_source
     if mapped_product_smiles:
         raw["mapped_product_smiles"] = mapped_product_smiles
-    raw["formed_bond_map_pairs"] = _pairs_to_str(formed_map_pairs)
-    raw["formed_bond_index_pairs"] = _pairs_to_str(formed_index_pairs)
-    raw["forming_bonds"] = raw["formed_bond_index_pairs"]
-    if formed_index_pairs:
-        raw["forming_bonds_index_base"] = "0"
-        raw["index_base"] = "0"
     if profile_key:
         raw["reaction_profile"] = profile_key
 
@@ -507,9 +471,3 @@ def _to_float(value: Optional[str]) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
-
-
-def _pairs_to_str(pairs: Sequence[Tuple[int, int]]) -> str:
-    if not pairs:
-        return ""
-    return ";".join(f"{a}-{b}" for a, b in pairs)

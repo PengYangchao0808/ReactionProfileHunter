@@ -12,7 +12,7 @@ def _unpack_s2_engine_result(
     if n == 8:
         (
             ts_guess_xyz,
-            substrate_xyz,
+            _,  # position 1: duplicate of intermediate_xyz (legacy)
             intermediate_xyz,
             returned_forming_bonds,
             scan_profile_json,
@@ -24,7 +24,7 @@ def _unpack_s2_engine_result(
     elif n == 9:
         (
             ts_guess_xyz,
-            substrate_xyz,
+            _,  # position 1: duplicate of intermediate_xyz (legacy)
             intermediate_xyz,
             returned_forming_bonds,
             scan_profile_json,
@@ -44,7 +44,7 @@ def _unpack_s2_engine_result(
 
     return (
         Path(ts_guess_xyz),
-        Path(substrate_xyz),
+        Path(intermediate_xyz),  # retained for backward compat with callers expecting 2 values
         Path(intermediate_xyz),
         tuple(normalized_bonds),
         Path(scan_profile_json),
@@ -68,6 +68,41 @@ def _read_s1_provenance(work_dir: Path) -> Dict[str, Any]:
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+
+def _write_step2_provenance(
+    *,
+    work_dir: Path,
+    version: str,
+    product_xyz: Path,
+    product_xyz_hash: Optional[str],
+    step2_signature: Dict[str, Any],
+    reaction_profile: Optional[str],
+    forming_bonds: list,
+    scan_config: Dict[str, Any],
+    path_search_mode: str,
+    s2_strategy: str,
+    metadata: Dict[str, Any],
+) -> None:
+    import json as _json
+    s2_dir = work_dir / "S2_Retro"
+    s2_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": "step2_provenance_v1",
+        "rph_version": version,
+        "product_xyz": str(product_xyz),
+        "product_xyz_hash": product_xyz_hash,
+        "step2_signature": step2_signature,
+        "reaction_profile": reaction_profile,
+        "forming_bonds": forming_bonds,
+        "scan_config": {k: v for k, v in scan_config.items() if k != "output_dir"},
+        "path_search": {"mode": path_search_mode},
+        "s2_strategy": s2_strategy,
+        "metadata": metadata,
+    }
+    prov_path = s2_dir / "step2_provenance.json"
+    with open(prov_path, "w", encoding="utf-8") as f:
+        _json.dump(payload, f, indent=2, ensure_ascii=False, default=str)
 
 
 def _adapt_product_xyz_for_s2_if_needed(
@@ -159,30 +194,17 @@ def run_step2(
         product_xyz_file=product_xyz_file,
         work_dir=work_dir,
     )
-    hunter.logger.info(f"[S2] Using MolIdx forming_bonds: {forming_bonds}")
-
-    forming_bonds_map = None
-    atom_map = None
-    if cleaner_data:
-        raw_map_pairs = cleaner_data.get("formed_bond_map_pairs") or cleaner_data.get("raw", {}).get("formed_bond_map_pairs")
-        if raw_map_pairs:
-            from rph_core.utils.cleaner_adapter import parse_pairs_text
-            forming_bonds_map = tuple(tuple(x) for x in parse_pairs_text(str(raw_map_pairs)))
-            
-        mapped_smiles = cleaner_data.get("mapped_product_smiles") or cleaner_data.get("raw", {}).get("mapped_product_smiles")
-        if mapped_smiles and product_xyz_file.exists():
-            from rph_core.utils.cleaner_adapter import get_map_to_xyz_dict
-            atom_map = get_map_to_xyz_dict(mapped_smiles, product_xyz_file)
-        hunter.logger.info(f"[S2] Using MapId forming_bonds: {forming_bonds_map}")
-
-    s2_scan_cfg = hunter._resolve_forward_scan_config(reaction_profile=reaction_profile, cleaner_data=cleaner_data)
-    s2_scan_cfg["output_dir"] = work_dir / "S2_Retro"
+    hunter.logger.info(f"[S2] Using executable XYZ forming_bonds: {forming_bonds}")
 
     reaction_profiles = hunter.config.get("reaction_profiles", {}) if isinstance(hunter.config, dict) else {}
     profile_cfg = (
         reaction_profiles.get(str(profile_key), {}) if isinstance(reaction_profiles, dict) and profile_key else {}
     )
     step2_cfg = hunter.config.get("step2", {}) if isinstance(hunter.config, dict) else {}
+    s2_scan_cfg = dict(step2_cfg.get("scan", {}) or {})
+    if isinstance(profile_cfg, dict):
+        s2_scan_cfg.update(dict(profile_cfg.get("scan", {}) or {}))
+    s2_scan_cfg["output_dir"] = work_dir / "S2_Retro"
 
     step2_signature = hunter._build_step2_signature(
         work_dir=work_dir,
@@ -192,52 +214,35 @@ def run_step2(
         scan_config=s2_scan_cfg,
     )
 
-    path_search_enabled = bool(step2_cfg.get("path_search", {}).get("enabled", False))
+    path_search_cfg = step2_cfg.get("path_search", {}) or {}
+    if path_search_cfg.get("enabled") is True:
+        path_search_mode = "always"
+    elif path_search_cfg.get("enabled") is False:
+        path_search_mode = "never"
+    else:
+        path_search_mode = str(path_search_cfg.get("mode", "rescue")).strip().lower()
 
     s2_strategy = str(profile_cfg.get("s2_strategy", "retro_scan")).strip().lower()
-
-    if s2_strategy == "forward_scan":
-        hunter.logger.info("[S2] Running forward_scan workflow")
-        engine_result = hunter.s2_engine.run_forward_scan(
-            product_xyz=product_xyz_file,
-            output_dir=s2_scan_cfg["output_dir"],
-            forming_bonds=forming_bonds_map if forming_bonds_map else forming_bonds,
-            scan_config=s2_scan_cfg,
-            atom_map=atom_map,
-        )
-        (
-            ts_guess_xyz,
-            substrate_xyz,
-            intermediate_xyz,
-            returned_forming_bonds,
-            scan_profile_json,
-            status,
-            ts_guess_confidence,
-            degraded_reasons,
-            ts_guess_gau_xtb,
-        ) = _unpack_s2_engine_result(engine_result)
-        generation_method = "forward_scan"
-    else:
-        hunter.logger.info("[S2] Running retro_scan workflow")
-        engine_result = hunter.s2_engine.run_retro_scan(
-            product_xyz=product_xyz_file,
-            output_dir=s2_scan_cfg["output_dir"],
-            forming_bonds=forming_bonds_map if forming_bonds_map else forming_bonds,
-            scan_config=s2_scan_cfg,
-            atom_map=atom_map,
-        )
-        (
-            ts_guess_xyz,
-            substrate_xyz,
-            intermediate_xyz,
-            returned_forming_bonds,
-            scan_profile_json,
-            status,
-            ts_guess_confidence,
-            degraded_reasons,
-            ts_guess_gau_xtb,
-        ) = _unpack_s2_engine_result(engine_result)
-        generation_method = "retro_scan"
+    hunter.logger.debug(f"[S2] Ignoring configured s2_strategy={s2_strategy!r}; retro_scan is the only supported workflow")
+    hunter.logger.info("[S2] Running retro_scan workflow")
+    engine_result = hunter.s2_engine.run_retro_scan(
+        product_xyz=product_xyz_file,
+        output_dir=s2_scan_cfg["output_dir"],
+        forming_bonds=forming_bonds,
+        scan_config=s2_scan_cfg,
+    )
+    (
+        ts_guess_xyz,
+        _,
+        intermediate_xyz,
+        returned_forming_bonds,
+        scan_profile_json,
+        status,
+        ts_guess_confidence,
+        degraded_reasons,
+        ts_guess_gau_xtb,
+    ) = _unpack_s2_engine_result(engine_result)
+    generation_method = "retro_scan"
     
     # Capture S2.1 results BEFORE path_search potentially overwrites scan_profile_json
     s1_scan_profile_json = scan_profile_json
@@ -284,8 +289,23 @@ def run_step2(
     ts_guess_gau_xtb_from_path = None
     returned_forming_bonds_from_path = None
 
-    if path_search_enabled:
-        hunter.logger.info("[S2] S2.2: Running path search (xtb_path_search) using dipole intermediate")
+    should_run_path_search = False
+    if path_search_mode == "always":
+        should_run_path_search = True
+    elif path_search_mode == "rescue":
+        retro_status_upper = str(status).upper() if status else "UNKNOWN"
+        should_run_path_search = retro_status_upper in ("DEGRADED", "FAILED", "UNKNOWN")
+        if should_run_path_search:
+            hunter.logger.info(
+                f"[S2] S2.1 retro_scan status: {retro_status_upper} — "
+                f"triggering path_search as rescue"
+            )
+    elif path_search_mode == "never":
+        should_run_path_search = False
+
+    if should_run_path_search:
+        reason = "rescue (retro_scan degraded)" if path_search_mode == "rescue" else "always-enabled"
+        hunter.logger.info(f"[S2] S2.2: Running path search ({reason})")
         
         (
             ts_guess_from_path,
@@ -301,7 +321,7 @@ def run_step2(
             start_xyz=intermediate_xyz,
             end_xyz=product_xyz_file,
             output_dir=s2_scan_cfg["output_dir"],
-            forming_bonds=forming_bonds_map if forming_bonds_map else forming_bonds,
+            forming_bonds=forming_bonds,
         )
         
         ts_guess_xyz = ts_guess_from_path
@@ -320,13 +340,6 @@ def run_step2(
                     for bond in returned_forming_bonds_from_path:
                         idx0 = int(bond[0])
                         idx1 = int(bond[1])
-                        if atom_map and len(atom_map) > 0:
-                            mapped0 = atom_map.get(idx0, idx0)
-                            mapped1 = atom_map.get(idx1, idx1)
-                            if mapped0 is None or mapped1 is None:
-                                continue
-                            idx0 = int(mapped0)
-                            idx1 = int(mapped1)
                         dist = GeometryUtils.calculate_distance(coords, idx0, idx1)
                         dist_candidates.append((dist, idx0, idx1))
 
@@ -359,7 +372,7 @@ def run_step2(
             # Check if we have energies_hartree (from S2.1 retro_scan)
             if profile_data.get("energies_hartree"):
                 # Get S2.2 Gau_XTB data
-                s2_gau_xtb_xyz = ts_guess_gau_xtb_from_path if path_search_enabled else None
+                s2_gau_xtb_xyz = ts_guess_gau_xtb_from_path if should_run_path_search else None
                 s2_gau_xtb_energy = None
                 s2_gau_xtb_distance = None
                 
@@ -376,13 +389,6 @@ def run_step2(
                             for bond in returned_forming_bonds_from_path:
                                 idx0 = int(bond[0])
                                 idx1 = int(bond[1])
-                                if atom_map:
-                                    mapped0 = atom_map.get(idx0, idx0)
-                                    mapped1 = atom_map.get(idx1, idx1)
-                                    if mapped0 is None or mapped1 is None:
-                                        continue
-                                    idx0 = int(mapped0)
-                                    idx1 = int(mapped1)
                                 dist = GeometryUtils.calculate_distance(coords, idx0, idx1)
                                 dist_candidates.append(dist)
                             if dist_candidates:
@@ -425,12 +431,35 @@ def run_step2(
         elif adapter_trigger_class == "legacy_or_unknown":
             fallback_reasons += ("pes_adapter_fallback_legacy_or_unknown",)
 
+    _write_step2_provenance(
+        work_dir=work_dir,
+        version=hunter.config.get("_rph_version") or __import__("rph_core.version", fromlist=["__version__"]).__version__,
+        product_xyz=product_xyz_file,
+        product_xyz_hash=hunter._build_step2_signature(
+            work_dir=work_dir,
+            product_xyz_file=product_xyz_file,
+            forming_bonds=forming_bonds,
+            reaction_profile=profile_key,
+            scan_config=s2_scan_cfg,
+        ).get("product_xyz_hash") if step2_signature else None,
+        step2_signature=step2_signature,
+        reaction_profile=profile_key,
+        forming_bonds=list(forming_bonds),
+        scan_config=s2_scan_cfg,
+        path_search_mode=path_search_mode,
+        s2_strategy=s2_strategy,
+        metadata={
+            "generation_method": generation_method,
+            "status": status,
+            "ts_guess_confidence": ts_guess_confidence,
+            "degraded_reasons": list(degraded_reasons) + list(fallback_reasons),
+        },
+    )
+
     return Step2Artifacts(
         ts_guess_xyz=ts_guess_xyz,
-        substrate_xyz=substrate_xyz,
         intermediate_xyz=intermediate_xyz,
         forming_bonds=tuple((MolIdx(int(i)), MolIdx(int(j))) for (i, j) in returned_forming_bonds),
-        forming_bonds_map=None,
         generation_method=generation_method,
         status=status,
         ts_guess_confidence=ts_guess_confidence,
@@ -471,13 +500,18 @@ def run_step3(
         intermediate_fchk=s3_result.intermediate_fchk,
         intermediate_log=s3_result.intermediate_log,
         intermediate_qm_output=s3_result.intermediate_qm_output,
+        # V7.1: forward S3-optimized intermediate data
+        intermediate_xyz=getattr(s3_result, 'intermediate_xyz', None),
+        intermediate_l2_energy=getattr(s3_result, 'intermediate_l2_energy', None),
+        intermediate_opt_output=getattr(s3_result, 'intermediate_opt_output', None),
+        intermediate_sp_output=getattr(s3_result, 'intermediate_sp_output', None),
     )
 
 
 def run_step4(
     hunter: Any,
     ts_final_xyz: Path,
-    substrate_xyz: Path,
+    intermediate_xyz: Path,
     product_xyz: Path,
     work_dir: Path,
     forming_bonds,
@@ -491,28 +525,13 @@ def run_step4(
     ts_qm_output: Optional[Path],
     intermediate_qm_output: Optional[Path],
     product_qm_output: Optional[Path],
+    product_smiles: Optional[str] = None,
+    s3_intermediate_xyz: Optional[Path] = None,
+    s3_intermediate_l2_energy: Optional[float] = None,
 ) -> Step4Artifacts:
-    s1_artifacts = hunter._resolve_s1_artifacts(work_dir)
-    features_csv = hunter.s4_engine.run(
-        ts_final=ts_final_xyz,
-        reactant=substrate_xyz,
-        product=product_xyz,
-        output_dir=work_dir / "S4_Data",
-        s1_dir=s1_artifacts.get("s1_dir"),
-        s1_shermo_summary_file=s1_artifacts.get("s1_shermo_summary_file"),
-        s1_hoac_thermo_file=s1_artifacts.get("s1_hoac_thermo_file"),
-        s1_conformer_energies_file=s1_artifacts.get("s1_conformer_energies_file"),
-        s1_precursor_xyz=s1_artifacts.get("s1_precursor_xyz"),
-        forming_bonds=forming_bonds,
-        sp_matrix_report=sp_matrix_report,
-        ts_fchk=ts_fchk,
-        reactant_fchk=intermediate_fchk,
-        product_fchk=product_fchk,
-        ts_log=ts_log,
-        reactant_log=intermediate_log,
-        product_log=product_log,
-        ts_orca_out=ts_qm_output,
-        reactant_orca_out=intermediate_qm_output,
-        product_orca_out=product_qm_output,
+    raise ImportError(
+        "Step 4 feature extraction has been moved to RPH_Postprocess/rph_features/. "
+        "This function is no longer functional.\n"
+        "Use the standalone CLI:\n"
+        "  rph-features extract --rph-run <work_dir> --output <features_dir>"
     )
-    return Step4Artifacts(features_csv=features_csv)

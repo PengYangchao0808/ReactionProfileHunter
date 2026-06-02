@@ -1,7 +1,7 @@
 import pytest
 import json
 from rph_core.utils.checkpoint_manager import CheckpointManager
-from rph_core.steps.step4_features.feature_miner import FeatureMiner
+from rph_features.feature_miner import FeatureMiner
 from pathlib import Path
 
 @pytest.fixture

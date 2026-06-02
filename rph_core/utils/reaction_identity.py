@@ -36,6 +36,24 @@ def generate_reaction_id(
     return f"RXN_{digest}"
 
 
+def generate_reaction_cache_key(
+    *,
+    reactant_smiles_canon: str,
+    product_smiles_canon: str,
+    reaction_type: str,
+    cyclo_mode: str,
+    theory_signature: str,
+) -> str:
+    payload = (
+        f"{reactant_smiles_canon}>>{product_smiles_canon}"
+        f"|{reaction_type.strip()}"
+        f"|{cyclo_mode.strip()}"
+        f"|{theory_signature}"
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    return f"RCACHE_{digest}"
+
+
 def _first_str(data: Mapping[str, object], *keys: str) -> str | None:
     for key in keys:
         value = data.get(key)
@@ -60,6 +78,7 @@ def _canonical_or_none(smiles: str | None) -> str | None:
 class RecordIdentity:
     row_id: str
     reaction_id: str
+    reaction_cache_key: str
     condition_id: str
     reactant_smiles_canon: str
     product_smiles_canon: str
@@ -67,7 +86,7 @@ class RecordIdentity:
     cyclo_mode: str
 
 
-def normalize_record_identity(record: Mapping[str, object]) -> RecordIdentity:
+def normalize_record_identity(record: Mapping[str, object], theory_signature: str = "") -> RecordIdentity:
     row_id = _first_str(record, "row_id", "rx_id", "id")
     if not row_id:
         raise ValueError("Missing row_id/rx_id in dataset record")
@@ -103,11 +122,19 @@ def normalize_record_identity(record: Mapping[str, object]) -> RecordIdentity:
         reaction_type=reaction_type,
         cyclo_mode=cyclo_mode,
     )
+    reaction_cache_key = generate_reaction_cache_key(
+        reactant_smiles_canon=reactant_canon,
+        product_smiles_canon=product_canon,
+        reaction_type=reaction_type,
+        cyclo_mode=cyclo_mode,
+        theory_signature=theory_signature,
+    )
     condition_id = generate_condition_id(row_id)
 
     return RecordIdentity(
         row_id=str(row_id),
         reaction_id=reaction_id,
+        reaction_cache_key=reaction_cache_key,
         condition_id=condition_id,
         reactant_smiles_canon=reactant_canon,
         product_smiles_canon=product_canon,

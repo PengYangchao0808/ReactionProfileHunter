@@ -2,8 +2,8 @@
 Integration tests for V5.2 features.
 """
 
+import inspect
 import pytest
-import tempfile
 import json
 import numpy as np
 from pathlib import Path
@@ -178,3 +178,11 @@ class TestRetroScannerV52:
         assert result.meta_json_path is not None
         meta_data = json.loads(result.meta_json_path.read_text())
         assert meta_data['strategy'] == 'reactant_complex'
+
+
+def test_retro_scanner_step2_entrypoints_accept_xyz_bonds_only() -> None:
+    run_retro_scan_sig = inspect.signature(RetroScanner.run_retro_scan)
+    run_sig = inspect.signature(RetroScanner.run)
+
+    assert "atom_map" not in run_retro_scan_sig.parameters
+    assert "atom_map" not in run_sig.parameters
