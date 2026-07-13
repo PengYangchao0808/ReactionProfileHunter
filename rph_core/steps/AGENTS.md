@@ -1,43 +1,51 @@
 # rph_core/steps/AGENTS.md
 
 ## OVERVIEW
-Step implementations: S1 anchor/conformer → S2 retro scan → S3 TS optimization/rescue → S4 feature extraction. Each step is a self-contained directory with its own `AGENTS.md`.
+V4 step implementations: S0 mechanism → S1 CENSO-LITE conformer search → S2 PEB backward scan → S3 low-level QC → S4 high-level QC. Each step is a self-contained directory with versioned manifest output.
 
 ## WHERE TO LOOK
-| Step | Directory | Entry point |
-|------|-----------|-------------|
-| S1 anchor | `anchor/` | `handler.py` → `AnchorPhase.run()` |
-| S1 conformer engine | `conformer_search/` | `engine.py` → `ConformerEngine` |
-| S2 retro scan | `step2_retro/` | `retro_scanner.py` → `RetroScanner.run()` |
-| S3 TS optimization | `step3_opt/` | `ts_optimizer.py` → `TSOptimizer.run()` |
-| S4 feature mining | `step4_features/` | `feature_miner.py:31` → `FeatureMiner.run()` |
+| Step | Directory | Entry point | Theory |
+|------|-----------|-------------|--------|
+| S0 mechanism | `mechanism_classifier/` | `s0_record.py` → `load_s0_reaction_record()` | Trusted dataset CSV input |
+| S1 CENSO-LITE | `conformer_search/` | `censo_lite.py` → `CensoLiteEngine.run()` | CREST/GFN2 + B97-3c SP + xTB mRRHO |
+| S2 PEB | `step2_retro/` | `peb_scanner.py` → `RetroScanner.run()` | xTB PEB backward scan |
+| S3 low-level | `step3_lowlevel/` | `engine.py` → `LowLevelEngine.run()` | ORCA B97-3c OPT/OptTS → r2SCAN-3c SP |
+| S4 high-level | `step4_highlevel/` | `engine.py` → `HighLevelEngine.run()` | Gaussian M062X OPT/OptTS → ORCA wB97M-V SP |
+| Shared engine | — | `stage_calculator.py` → `StageCalculator` | OPT/Freq/SP dispatch for S3 + S4 |
 
-## NAMING CONVENTION (v6.3+)
-Unified naming for all reaction types ([4+3], [3+2], [4+2], etc.):
+## V4 OUTPUT CONTRACT
+```
+S0_Mechanism/mechanism.json
+S1_ConfSearch/product/manifest.json
+S2_PEB/manifest.json
+S3_LowLevel/manifest.json
+S4_HighLevel/manifest.json
+```
 
-| Concept | New Name | Legacy Alias | Notes |
-|---------|----------|--------------|-------|
-| S2 output | `intermediate.xyz` | `reactant_complex.xyz` | Backward compatible |
-| S3 subdirectory | `S3_intermediate_opt/` | `S3_Intermediate/` | Intermediate DFT optimization |
-| S4 source label | `S2_intermediate` | `s2_reactant_complex` | Resolved via `naming_compat.py` |
+Each S3/S4 structure uses flat directory naming:
+- `<variant>` — product (e.g. `product_major`)
+- `<variant>_int` — PEB intermediate
+- `<variant>_ts` — PEB TS candidate
+- `precursor` — precursor minimum
 
-Use `rph_core.utils.naming_compat` for path resolution.
-
-## OUTPUT CONTRACT (strict — orchestrator asserts these)
-| Step | Required outputs | Notes |
-|------|-----------------|-------|
-| S1 | `S1_ConfGeneration/product/product_min.xyz` | `precursor_min.xyz` optional |
-| S2 | `S2_Retro/ts_guess.xyz` + `intermediate.xyz` | Both required; forming bonds indices; `reactant_complex.xyz` alias created |
-| S3 | `S3_TransitionAnalysis/ts_final.xyz` | Must preserve fchk/log for S4 |
-| S4 | `S4_Data/features_raw.csv`, `features_mlr.csv`, `feature_meta.json` | |
+No nested `intermediate/` or `ts/` subdirectories. No `conf_0001/` directories in S2–S4.
 
 ## INTER-STEP HANDOFFS
-- S1 → S2: `product_min.xyz` (Path), `e_sp` (float)
-- S2 → S3: `ts_guess.xyz`, `intermediate.xyz` (or legacy `reactant_complex.xyz`)
-- S3 → S4 (via orchestrator): `ts_final.xyz`, `sp_report` (SPMatrixReport), `ts/reactant fchk/log`, `forming_bonds` metadata
-- S4 also receives S1 artifacts: `product_thermo.csv`, precursor xyz, shermo summary
+- S0 → S1: `mechanism.json` (forming bonds, mapped SMILES, reaction type)
+- S1 → S2: `manifest.json` with `selected` candidate → resolved `selected.xyz` path
+- S2 → S3: `ts_guess.xyz`, `intermediate.xyz`, forming bonds, scan profile
+- S3 → S4: per-structure `{opt,freq,sp}/` outputs with energies and status
+- S4 → external: high-precision energies + geometries for `RPH_Postprocess`
 
 ## ANTI-PATTERNS
-- Missing `intermediate.xyz` and silently continuing into S3/S4 — must fail-fast or rescue.
-- Changing output directory layout without updating orchestrator `_resolve_s1_artifacts()` and `path_compat.py`.
-- Step implementations calling QC tools directly — all QC goes through `rph_core/utils/qc_interface.py`.
+- Reintroducing Berny/QST2/IRC rescue, `QCTaskRunner`, or V3 `step3_opt/` logic.
+- Treating S4 as feature extraction — it is high-precision QC (M062X/wB97M-V).
+- Creating `conf_0001/` directories downstream of S1 — S1 exports `selected.xyz`, S2–S4 consume only that.
+- Step implementations calling QC tools directly — all QC goes through `rph_core/utils/qc_jobs.py`.
+- Nested variant subdirectories (`product_major/intermediate/`) — use flat names (`product_major_int/`).
+
+## DEPRECATED V3 DIRECTORIES (see docs/ARCHIVE_V3.md)
+- `anchor/` — V3 S1 anchor phase (not used by V4)
+- `conformer_search/engine.py` — V3 two-stage UCE engine (V4 uses `censo_lite.py`)
+- `step3_opt/` — V3 Berny/QST2/IRC (V4 uses `step3_lowlevel/`)
+- `dr_aggregator.py`, `condition_thermo.py`, `condition_feature_merger.py`, `contracts.py` — V3-era

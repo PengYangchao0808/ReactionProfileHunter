@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>原子映射方案 · ReactionProfileHunter v3.0</title>
+<style>
+  :root {
+    --bg: #fafbfc;
+    --card: #ffffff;
+    --ink: #1f2328;
+    --ink-soft: #57606a;
+    --line: #d0d7de;
+    --line-soft: #e8ecf0;
+    --accent: #0969da;
+    --accent-soft: #ddf4ff;
+    --green: #1a7f37;
+    --green-soft: #dafbe1;
+    --amber: #9a6700;
+    --amber-soft: #fff8c5;
+    --red: #cf222e;
+    --red-soft: #ffebe9;
+    --purple: #8250df;
+    --purple-soft: #fbefff;
+    --code-bg: #f6f8fa;
+    --code-ink: #24292f;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", Helvetica, Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  .layout {
+    display: grid;
+    grid-template-columns: 240px minmax(0, 1fr);
+    max-width: 1280px;
+    margin: 0 auto;
+  }
+  nav.toc {
+    position: sticky; top: 0;
+    align-self: start;
+    max-height: 100vh;
+    overflow-y: auto;
+    padding: 28px 20px;
+    border-right: 1px solid var(--line-soft);
+    font-size: 13.5px;
+  }
+  nav.toc h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--ink-soft);
+    margin: 0 0 12px;
+  }
+  nav.toc ol {
+    list-style: none;
+    padding: 0; margin: 0;
+  }
+  nav.toc li { margin: 4px 0; }
+  nav.toc a {
+    color: var(--ink-soft);
+    text-decoration: none;
+    display: block;
+    padding: 4px 10px;
+    border-radius: 4px;
+    border-left: 2px solid transparent;
+    transition: all 0.15s;
+  }
+  nav.toc a:hover {
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-left-color: var(--accent);
+  }
+  main {
+    padding: 40px 56px 120px;
+    min-width: 0;
+  }
+  header.hero {
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 24px;
+    margin-bottom: 32px;
+  }
+  header.hero .eyebrow {
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 600;
+  }
+  header.hero h1 {
+    margin: 6px 0 8px;
+    font-size: 30px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  header.hero .meta {
+    color: var(--ink-soft);
+    font-size: 13px;
+  }
+  h2 {
+    font-size: 22px;
+    font-weight: 650;
+    margin: 48px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--line-soft);
+    letter-spacing: -0.005em;
+  }
+  h3 {
+    font-size: 17px;
+    font-weight: 600;
+    margin: 28px 0 10px;
+    color: var(--ink);
+  }
+  h4 {
+    font-size: 14.5px;
+    font-weight: 600;
+    margin: 18px 0 8px;
+    color: var(--ink);
+  }
+  p { margin: 10px 0; }
+  code, pre, kbd {
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 13px;
+  }
+  code {
+    background: var(--code-bg);
+    color: var(--code-ink);
+    padding: 1.5px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--line-soft);
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--line-soft);
+    border-radius: 6px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    line-height: 1.55;
+    color: var(--code-ink);
+  }
+  pre.diagram {
+    background: #fff;
+    font-size: 12.5px;
+    line-height: 1.45;
+    white-space: pre;
+    color: var(--ink);
+    border-left: 3px solid var(--accent);
+  }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 14px 0;
+    font-size: 13.5px;
+    background: var(--card);
+    border: 1px solid var(--line-soft);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  th, td {
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--line-soft);
+    vertical-align: top;
+  }
+  th {
+    background: var(--code-bg);
+    font-weight: 600;
+    color: var(--ink);
+    font-size: 12.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  tr:last-child td { border-bottom: none; }
+  td code { font-size: 12.5px; }
+
+  .badge {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    line-height: 1.7;
+  }
+  .badge.green { background: var(--green-soft); color: var(--green); }
+  .badge.amber { background: var(--amber-soft); color: var(--amber); }
+  .badge.red   { background: var(--red-soft);   color: var(--red); }
+  .badge.purple{ background: var(--purple-soft);color: var(--purple); }
+  .badge.gray  { background: var(--code-bg);    color: var(--ink-soft); }
+
+  .callout {
+    border-left: 3px solid;
+    padding: 10px 16px;
+    margin: 14px 0;
+    border-radius: 0 4px 4px 0;
+    font-size: 13.8px;
+  }
+  .callout.info { border-color: var(--accent); background: var(--accent-soft); }
+  .callout.warn { border-color: var(--amber);  background: var(--amber-soft); }
+  .callout.danger { border-color: var(--red);  background: var(--red-soft); }
+  .callout.tip  { border-color: var(--green);  background: var(--green-soft); }
+  .callout strong { display: block; margin-bottom: 2px; }
+
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    margin: 16px 0;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line-soft);
+    border-radius: 6px;
+    padding: 14px 16px;
+    font-size: 13.5px;
+  }
+  .card .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--ink-soft);
+    font-weight: 600;
+  }
+  .card .value {
+    font-size: 17px;
+    font-weight: 600;
+    margin-top: 2px;
+    font-family: "SFMono-Regular", Consolas, monospace;
+  }
+
+  ul, ol { padding-left: 22px; }
+  li { margin: 4px 0; }
+  strong { font-weight: 650; }
+  em { font-style: normal; color: var(--ink-soft); }
+
+  .pipeline {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    margin: 18px 0;
+  }
+  .pipeline .step {
+    background: var(--card);
+    border: 1px solid var(--line-soft);
+    border-radius: 6px;
+    padding: 12px;
+    text-align: center;
+    position: relative;
+    font-size: 13px;
+  }
+  .pipeline .step .tag {
+    display: inline-block;
+    background: var(--purple-soft);
+    color: var(--purple);
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .pipeline .step.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .pipeline .step .name { font-weight: 600; }
+  .pipeline .step .out { font-size: 11.5px; color: var(--ink-soft); margin-top: 4px; font-family: monospace; }
+
+  .footer {
+    margin-top: 60px;
+    padding-top: 16px;
+    border-top: 1px solid var(--line-soft);
+    color: var(--ink-soft);
+    font-size: 12px;
+  }
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; }
+    nav.toc { position: relative; max-height: none; border-right: none; border-bottom: 1px solid var(--line-soft); }
+    main { padding: 24px 20px 80px; }
+    .pipeline { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<nav class="toc">
+  <h2>导航</h2>
+  <ol>
+    <li><a href="#overview">1. 概览</a></li>
+    <li><a href="#spaces">2. 三种索引空间</a></li>
+    <li><a href="#pipeline">3. 跨步骤数据流</a></li>
+    <li><a href="#chain">4. 解析链总览</a></li>
+    <li><a href="#kabsch">5. Kabsch + Hungarian</a></li>
+    <li><a href="#substruct">6. SubstructMatch 兜底</a></li>
+    <li><a href="#smarts">7. SMARTS 拓扑识别</a></li>
+    <li><a href="#schema">8. atom_map_xyz.json</a></li>
+    <li><a href="#gate">9. 可用性闸门</a></li>
+    <li><a href="#pitfalls">10. 已知陷阱</a></li>
+    <li><a href="#locations">11. 代码位置</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<header class="hero">
+  <div class="eyebrow">ReactionProfileHunter · v3.0</div>
+  <h1>原子映射方案</h1>
+  <div class="meta">
+    SMILES · Map Number · XYZ 三索引空间的对齐与回退链 ·
+    <span class="badge gray">最后更新 2026-07-06</span>
+  </div>
+</header>
+
+<section id="overview">
+<h2>1. 概览</h2>
+
+<p>原子映射解决一个核心问题：<strong>把 S0 在 SMILES 上识别出的"成键原子对"翻译成 S2 在 xyz 几何上能直接操作的原子下标</strong>。S0 的输出是 <code class="language-plaintext">forming_bonds = [[1,11],[3,8]]</code> 这样的 map_number 对；S2 的 xTB 扫描必须知道这两个数对应 xyz 文件里的第几行原子。中间的转换桥梁就是 <strong>atom_map_xyz.json</strong>。</p>
+
+<div class="callout info">
+  <strong>一句话定位</strong>
+  原子映射 = "把 S0 的化学认知对齐到 S1 的几何现实" 的过程。映射质量直接决定 S2 retro_scan 能否启动。
+</div>
+
+<h3>设计目标</h3>
+<ul>
+  <li><strong>多源冗余</strong>：Kabsch 几何对齐 → SubstructMatch 图匹配 → SMARTS 拓扑识别，三道闸门层层兜底</li>
+  <li><strong>可审计</strong>：每条映射都带 <code>provenance</code>（来源、置信度、是否完整），下游可据此决定是否信任</li>
+  <li><strong>安全失败</strong>：映射失败不会污染下游，<code>_is_xyz_mapping_usable</code> 闸门会拒绝低质映射，强制走 SMARTS 兜底</li>
+</ul>
+</section>
+
+<section id="spaces">
+<h2>2. 三种索引空间</h2>
+
+<p>整个映射方案绕着三套原子编号转，理清它们的关系是理解所有代码的前提：</p>
+
+<div class="card-grid">
+  <div class="card">
+    <div class="label">SMILES idx</div>
+    <div class="value">0, 1, 2, …</div>
+    <div style="margin-top:8px;">RDKit <code>Chem.MolFromSmiles</code> 解析顺序<br>
+    <em>同分子不同 SMILES 写法会得到不同 idx</em></div>
+  </div>
+  <div class="card">
+    <div class="label">Map Number</div>
+    <div class="value">1, 2, 3, …</div>
+    <div style="margin-top:8px;">S0 机制分类器赋予的<strong>规范编号</strong><br>
+    <em>写入 <code>[C:1]</code> 形式的 mapped SMILES；反应类型确定后稳定不变</em></div>
+  </div>
+  <div class="card">
+    <div class="label">XYZ idx</div>
+    <div class="value">0, 1, 2, …</div>
+    <div style="margin-top:8px;">xyz 文件里的物理行号（含 H、含 Lewis 酸）<br>
+    <em>由构象生成器（XTB / Gaussian）的输出顺序决定，不可控</em></div>
+  </div>
+</div>
+
+<h3>转换链</h3>
+<pre class="diagram">SMILES idx  ──(S0: atom_map_smiles.json)──▶  Map Number
+                                                      │
+                                                      │  ❗ 这一步是 atom_map_xyz.json 的职责
+                                                      ▼
+                                                   XYZ idx
+                                                      ▲
+                                                      │
+SMILES idx  ──(S1: smiles_to_xyz_map.json)────────────┘
+                                                      │
+                              （另一条独立的桥，但 S2 不直接使用）</pre>
+
+<div class="callout warn">
+  <strong>设计疏漏</strong>
+  S1 阶段产出的 <code>smiles_to_xyz_map.json</code> 已经记录了 SMILES idx → XYZ idx 的对应（构象生成时由 RDKit 写入），S0 阶段的 <code>atom_map_smiles.json</code> 又有 SMILES idx → Map Number。两条独立桥本可<strong>无需 Kabsch</strong>直接组合出 Map Number → XYZ idx，但当前 S2 的解析链完全绕开了这条路径，只走 Kabsch/SubstructMatch。
+</div>
+</section>
+
+<section id="pipeline">
+<h2>3. 跨步骤数据流</h2>
+
+<div class="pipeline">
+  <div class="step">
+    <span class="tag">S0</span>
+    <div class="name">Mechanism</div>
+    <div class="out">atom_map_smiles.json<br>mechanism_summary.json<br>mechanism_graph.json</div>
+  </div>
+  <div class="step active">
+    <span class="tag">S1</span>
+    <div class="name">Conformer</div>
+    <div class="out">product_min.xyz<br>smiles_to_xyz_map.json<br>atom_map_xyz.json ★</div>
+  </div>
+  <div class="step">
+    <span class="tag">S2</span>
+    <div class="name">Retro Scan</div>
+    <div class="out">ts_guess.xyz<br>intermediate.xyz<br><em>consumes forming_bonds</em></div>
+  </div>
+  <div class="step">
+    <span class="tag">S3</span>
+    <div class="name">TS Opt</div>
+    <div class="out">ts_final.xyz<br>L2_SP/<br><em>forming_bonds 流向 S4</em></div>
+  </div>
+</div>
+
+<h3>S1→S2 关键交接物：atom_map_xyz.json</h3>
+<p>这个 JSON 是整个映射系统的核心交付物，由 <code>_build_and_save_xyz_mapping()</code> 在 S1 完成后写入。S2 通过它（结合 S0 的 mechanism_summary）就能直接拿到 xyz_idx 形式的 forming_bonds。</p>
+
+<table>
+  <thead>
+    <tr><th>字段</th><th>类型</th><th>含义</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>map_to_product_xyz_1based</code></td>
+      <td><em>Dict[str, int]</em></td>
+      <td>核心映射：Map Number → 产物 xyz 行号（1-based）</td>
+    </tr>
+    <tr>
+      <td><code>map_to_precursor_xyz_1based</code></td>
+      <td><em>Dict[str, int]</em></td>
+      <td>同上，针对前体（如果存在）</td>
+    </tr>
+    <tr>
+      <td><code>forming_bonds_full_notation</code></td>
+      <td><em>List[Dict]</em></td>
+      <td>S0 的 forming_bonds 已翻译成 xyz_idx；<br>每项含 <code>map_space</code> / <code>product_xyz_1based</code> / <code>bond_type_*</code></td>
+    </tr>
+    <tr>
+      <td><code>provenance</code></td>
+      <td><em>Dict</em></td>
+      <td>来源标记（详见 <a href="#schema">§8</a>），决定下游是否信任此映射</td>
+    </tr>
+  </tbody>
+</table>
+</section>
+
+<section id="chain">
+<h2>4. 解析链总览</h2>
+
+<p>S2 启动时通过 <code>_resolve_forming_bonds_for_s2()</code> 拿 forming_bonds，依次尝试 4 个来源，全部失败则 <code class="language-plaintext">raise RuntimeError</code>。</p>
+
+<pre class="diagram">┌────────────────────────────────────────────────────────────────────┐
+│           _resolve_forming_bonds_for_s2 (orchestrator.py:865)       │
+└────────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+   ┌────────────────────────────────────────────────────────────┐
+   │  加载三个 JSON 工件（静默失败 → 空 dict）                       │
+   │   • S0_Mechanism/mechanism_graph.json                       │
+   │   • S0_Mechanism/atom_map_smiles.json                      │
+   │   • S1_ConfGeneration/atom_map_xyz.json  ★                  │
+   └────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+   ┌────────────────────────────────────────────────────────────┐
+   │  闸门：_is_xyz_mapping_usable(atom_map_xyz) ?                │
+   │     拒绝：empty / legacy / substructure_match / ...           │
+   │     接受：kabsch_hungarian+high  或  atom_map_sidecar+validated│
+   └────────────────────────────────────────────────────────────┘
+              │ 通过                              │ 不通过
+              ▼                                   ▼
+   ┌────────────────────────┐         ┌────────────────────────┐
+   │  P1: forming_bonds_    │         │  日志：                 │
+   │      full_notation     │         │  "Skipping P1/P2/P3..."│
+   │  P2: forming_bonds_    │         └────────────────────────┘
+   │      annotated         │                     │
+   │  P3: mechanism_graph   │                     │
+   │      edges + xyz_map   │                     │
+   │  (按序尝试，命中即返)   │                     │
+   └────────────────────────┘                     │
+              │ 全空                              │
+              └─────────────┬─────────────────────┘
+                            ▼
+   ┌────────────────────────────────────────────────────────────┐
+   │  P4: SMARTSMatcher.find_reactive_bonds(product_xyz, ...)    │
+   │      不依赖 atom_map_xyz，直接从 xyz 拓扑识别                │
+   └────────────────────────────────────────────────────────────┘
+                            │
+                ┌───────────┴───────────┐
+                ▼ matched=True           ▼ matched=False
+        <span style="color:var(--green);">✓ 返回 forming_bonds</span>   <span style="color:var(--red);">✗ RuntimeError: all sources failed</span>
+</pre>
+
+<table>
+  <thead>
+    <tr><th width="60">顺序</th><th>来源</th><th>输入</th><th>失败时</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><span class="badge purple">P1</span></td>
+      <td><code>atom_map_xyz.json</code> 的 <code>forming_bonds_full_notation</code></td>
+      <td>Kabsch 已翻译好的 xyz_idx 对</td>
+      <td>返回 <code>tuple()</code>，进 P2</td>
+    </tr>
+    <tr>
+      <td><span class="badge purple">P2</span></td>
+      <td>S0/S1 注解（<code>forming_bonds_annotated</code>）</td>
+      <td>map_space + map_to_product_xyz 翻译</td>
+      <td>返回 <code>tuple()</code>，进 P3</td>
+    </tr>
+    <tr>
+      <td><span class="badge purple">P3</span></td>
+      <td>S0 mechanism_graph 边 + xyz_map</td>
+      <td>图边 + atom_map_smiles 翻译</td>
+      <td>返回 <code>tuple()</code>，进 P4</td>
+    </tr>
+    <tr>
+      <td><span class="badge amber">P4</span></td>
+      <td><strong>SMARTS 拓扑识别</strong>（独立路径）</td>
+      <td>product_min.xyz + reaction_type + SMILES</td>
+      <td><span class="badge red">RuntimeError</span></td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout info">
+  <strong>关键观察</strong>
+  P1/P2/P3 全部依赖 <code>atom_map_xyz.json</code>。一旦该映射被判定不可用（来源不在白名单），<strong>三个解析器整体跳过</strong>，直接进入 SMARTS 兜底。换言之，整个映射系统的最薄弱环节就是 atom_map_xyz 的生成质量。
+</div>
+</section>
+
+<section id="kabsch">
+<h2>5. Kabsch + Hungarian：主路径</h2>
+
+<p><code>_build_mol_to_xyz_index_mapping()</p>（orchestrator.py:1547）的核心算法。</p>
+
+<h3>五步流程</h3>
+
+<pre class="diagram">mapped_smiles ──Chem.MolFromSmiles──▶ RDKit Mol
+                                          │
+                                          ▼  rdDistGeom.EmbedMolecule
+                                     3D 参考构象 (EETKP)
+                                          │
+                          ┌───────────────┴────────────────┐
+                          ▼                                 ▼
+                  RDKit 坐标 (N×3)               XYZ 坐标 (M×3, M≥N)
+                          │                                 │
+                          │           heavy_mask ← NON_ORGANIC_XYZ_ELEMENTS
+                          │           {H, Li, Cl, Na, K, Br, I, Mg, Al}
+                          │                                 │
+                          └──────────────┬──────────────────┘
+                                         ▼
+                              ★ Kabsch 最优重叠（最小化 RMSD）
+                                         │
+                                         ▼
+                            ★ Hungarian 按元素分组二分匹配
+                                         │
+                                         ▼
+                              mol_to_xyz: {rdkit_idx: xyz_idx}
+                                         │
+                                         ▼
+                          ┌──────────────┴──────────────────┐
+                          ▼                                 ▼
+                  计算每对残差 ‖Δr‖                  元素一致性校验
+                          │                                 │
+                          ▼                                 │
+              ┌─────────────────────────┐                  │
+              │  rmsd ≤ 2.0 Å ?         │                  │
+              │  max_err ≤ 3.0 Å ?      │                  │
+              └────────────┬────────────┘                  │
+                  两条件都满足 │ 任一不满足                    │
+                           ▼  └─────────────────────────────┐
+        <span style="color:var(--green);">✓ 返回 kabsch_hungarian / high</span>      │
+                                                      ▼
+                                          <span style="color:var(--amber);">↓ 走 SubstructMatch 兜底</span></pre>
+
+<h3>两个阈值的含义</h3>
+
+<table>
+  <thead><tr><th>指标</th><th>阈值</th><th>含义</th><th>典型失败场景</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>rmsd</code></td>
+      <td>≤ 2.0 Å</td>
+      <td>所有原子平均偏差</td>
+      <td>整体构象选错（如取到了能量略高的次优构象）</td>
+    </tr>
+    <tr>
+      <td><code>max_err</code></td>
+      <td>≤ 3.0 Å</td>
+      <td>单个原子最大偏差</td>
+      <td><strong>柔性取代基旋转</strong>（如苄基、Cbz 苯环）；通常 rmsd 仍合格</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+  <strong>设计语义</strong>
+  两个阈值必须<strong>同时</strong>满足才放行。RMSD 防整体跑偏，max_err 防局部柔性取代基拖累。max_err 是更严格的闸门——大部分失败是 max_err 超 3.0 而 rmsd 合格。
+</div>
+
+<h3>NON_ORGANIC_XYZ_ELEMENTS：重金属过滤白名单</h3>
+<pre><code># rph_core/utils/cleaner_adapter.py:16
+NON_ORGANIC_XYZ_ELEMENTS = frozenset({'H', 'Li', 'Cl', 'Na', 'K', 'Br', 'I', 'Mg', 'Al'})</code></pre>
+<p>Kabsch 对齐前会把 xyz 里的这些元素剔除，只保留有机重原子参与对齐。Mg/Cl 等 Lewis 酸原子不会污染几何对齐本身——但下游的 <code>build_bond_graph</code> 仍会因缺金属半径而炸（见 <a href="#pitfalls">§10</a>）。</p>
+</section>
+
+<section id="substruct">
+<h2>6. SubstructMatch 兜底</h2>
+
+<p>Kabsch 失败后立即调用 <code>get_map_to_xyz_dict()</code>（cleaner_adapter.py:344）。</p>
+
+<h3>四步流程</h3>
+
+<pre class="diagram">mapped_smiles (带 [C:1] 编号)
+        │
+        ▼  Chem.MolFromSmiles（去掉 map number）
+   query_mol (拓扑图)
+        │
+        ▼  读取 xyz → MolFromXYZBlock → DetermineBonds
+   xyz_mol (RDKit 自动感知连接性)
+        │
+        ▼  xyz_mol.GetSubstructMatches(query_mol, uniquify=False)
+        │
+        ├── 命中 ──▶ 取第一个 match，按 map_number 还原 mol_to_xyz
+        │           <span style="color:var(--green);">✓ 返回 {smiles_idx: xyz_idx}</span>
+        │
+        └── 0 命中 ──▶ useChirality=True 再试一次
+                │
+                ├── 命中 ──▶ 返回
+                │
+                └── 仍 0 命中 ──▶ <span style="color:var(--red);">✗ 返回 {}，日志:</span>
+                                  "Caller should use SMARTS / graph-isomorphism fallback"</pre>
+
+<div class="callout danger">
+  <strong>代码注释 vs 真实情况</strong>
+  日志里的 <em>"graph-isomorphism fallback"</em> 字样<strong>极具误导性</strong>。全代码库 grep 该字符串仅此一处出现——根本没有独立的图同构算法。实际接住的只有 SMARTSMatcher 拓扑识别。这条日志是 5 年前的 TODO 痕迹。
+</div>
+
+<h3>典型失败原因</h3>
+<ul>
+  <li><code>rdDetermineBonds.DetermineBonds</code> 从纯坐标反推连接性时，对杂环/桥环/张力键的键序感知与 SMILES 不一致</li>
+  <li>反应中心成键/断键导致 query 与 xyz 的图结构略有差异（虽然对产物而言应该相同）</li>
+  <li>立体化学 chirality flag 不匹配（fallback 时关闭 chirality 通常能救回）</li>
+</ul>
+</section>
+
+<section id="smarts">
+<h2>7. SMARTS 拓扑识别（最后防线）</h2>
+
+<p>不依赖 atom_map_xyz，直接从 product_min.xyz 的几何拓扑反推 forming_bonds。<code>SMARTSMatcher.find_reactive_bonds()</code>（smarts_matcher.py:139）。</p>
+
+<h3>反应类型 → 拓扑识别函数</h3>
+
+<table>
+  <thead><tr><th>反应类型</th><th>SMARTSTemplate</th><th>识别函数</th><th>核心判据</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>[5+2]</code></td>
+      <td>topology_path_321</td>
+      <td><code>_topological_core_identification</code></td>
+      <td>链式：O–C–C–C–C–C–C，找 5 原子核</td>
+    </tr>
+    <tr>
+      <td><code>[4+3]</code></td>
+      <td>topology_ring_43</td>
+      <td><code>_topological_ring_identification_43</code></td>
+      <td><strong>(a)</strong> 7 元环 + 1 个 O 的切边分析<br><strong>(b) 失败时</strong>：找"桥氧 O(2C) + 桥头 C + 3 碳桥 BFS"</td>
+    </tr>
+    <tr>
+      <td><code>[4+2]</code></td>
+      <td>topology_ring_42</td>
+      <td><code>_topological_ring_identification_42</code></td>
+      <td>6 元环切边，4 原子核</td>
+    </tr>
+    <tr>
+      <td><code>[3+2]</code></td>
+      <td>topology_ring_32</td>
+      <td><code>_topological_ring_identification_32</code></td>
+      <td>5 元环（C/N/O 通用），3 原子核</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>[4+3] 识别双路径</h3>
+
+<pre class="diagram">     product.xyz + reaction_type="[4+3]"
+                │
+                ▼
+   ┌─────────────────────────────────────┐
+   │  路径 A：_topological_ring_core_     │
+   │           identification             │
+   │   • 找所有 7 元环                     │
+   │   • 选恰好含 1 个 O 的环              │
+   │   • 切边分析：找 3 原子片段（含 O）    │
+   └─────────────────────────────────────┘
+                │ 找到
+                ├──────────────▶ ✓ matched=True
+                │ 找不到
+                ▼
+   ┌─────────────────────────────────────┐
+   │  路径 B：_topological_core_          │
+   │           identification_43          │
+   │   • 找桥氧（O 与恰好 2 个 C 成键，    │
+   │     且距离都 > 1.30 Å）              │
+   │   • 桥头碳 h1, h2                    │
+   │   • BFS from h1_neighbors → h2       │
+   │     (排除 bridge_oxygen 和 h1)        │
+   │   • 路径含恰好 3 个内部 C → ✓         │
+   │   • 否则放宽至 {C,O,N}, 2~5 个 → ✓    │
+   └─────────────────────────────────────┘
+                │ 仍找不到
+                ▼
+        <span style="color:var(--red);">✗ matched=False
+        error_message="未找到 3-碳桥结构"</span></pre>
+
+<div class="callout warn">
+  <strong>LA 模式特殊处理</strong>
+  当 <code>la_additive</code> 非空时，SMARTSMatcher 会优先用 <code>Chem.MolFromSmiles(product_smiles)</code> 构造 RDKit Mol（绕过 xyz 反推连接性），但坐标仍用 xyz。最后会用 LA 配置过滤掉涉及 LA 原子的 forming_bonds。这是为了避免 <code>build_bond_graph</code> 在 Mg/Li 等元素上崩溃（详见 <a href="#pitfalls">§10</a>）。
+</div>
+</section>
+
+<section id="schema">
+<h2>8. atom_map_xyz.json 完整 Schema</h2>
+
+<pre><code>{
+  "map_to_product_xyz_1based": {
+    "&lt;map_number_1based&gt;": &lt;xyz_index_1based&gt;,
+    "1": 5, "2": 3, "3": 11, ...
+  },
+  "map_to_precursor_xyz_1based": {
+    "&lt;map_number_1based&gt;": &lt;xyz_index_1based&gt;
+  },
+  "forming_bonds_full_notation": [
+    {
+      "map_space": [&lt;int&gt;, &lt;int&gt;],
+      "product_xyz_1based": [&lt;int&gt;, &lt;int&gt;] | null,
+      "precursor_xyz_1based": [&lt;int&gt;, &lt;int&gt;] | null,
+      "bond_type_product": "SINGLE" | "DOUBLE" | "NONE",
+      "bond_type_precursor": "SINGLE" | "DOUBLE" | "NONE"
+    }
+  ],
+  "provenance": {
+    "mapping_source": "kabsch_hungarian" | "substructure_match" | "empty",
+    "confidence":      "high" | "medium" | "low" | "none",
+    "precursor_mapping_source": "...",
+    "precursor_confidence":     "...",
+    "complete":            &lt;bool&gt;,
+    "expected_mapped_atoms": &lt;int&gt;,
+    "actual_mapped_atoms":   &lt;int&gt;,
+    "missing_map_numbers":  [&lt;int&gt;, ...],
+    "mapping_version":      "2.0",
+    "validation": {
+      "element_validated":     &lt;bool&gt;,
+      "element_consistent":    &lt;bool&gt;,
+      "issues":                ["...", ...],
+      "forming_bond_unique_4": &lt;bool&gt;
+    }
+  },
+  "index_base_convention": "all XYZ indices are 1-based; map numbers are 1-based"
+}</code></pre>
+
+<h3>来源与置信度的全部组合</h3>
+
+<table>
+  <thead>
+    <tr><th>mapping_source</th><th>含义</th><th>典型 confidence</th><th>下游是否信任</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>kabsch_hungarian</code></td>
+      <td>Kabsch+Hungarian 几何对齐通过</td>
+      <td><span class="badge green">high</span>（双阈值都满足）</td>
+      <td><span class="badge green">是</span></td>
+    </tr>
+    <tr>
+      <td><code>substructure_match</code></td>
+      <td>Kabsch 失败，SubstructMatch 兜底成功</td>
+      <td><span class="badge amber">medium / low</span></td>
+      <td><span class="badge red">否</span>（在黑名单中）</td>
+    </tr>
+    <tr>
+      <td><code>empty</code></td>
+      <td>两条路径都失败</td>
+      <td><span class="badge red">none</span></td>
+      <td><span class="badge red">否</span></td>
+    </tr>
+    <tr>
+      <td><code>atom_map_sidecar</code></td>
+      <td>外部预先提供的映射文件</td>
+      <td>—</td>
+      <td><span class="badge green">是</span>（需 <code>validated=true</code>）</td>
+    </tr>
+    <tr>
+      <td><code>_smilesatomoutputorder</code> / <code>assumed_heavy_order</code> / <code>legacy</code></td>
+      <td colspan="3" style="color:var(--ink-soft);"><em>历史来源，全部在黑名单中，不会出现于新代码路径</em></td>
+    </tr>
+  </tbody>
+</table>
+</section>
+
+<section id="gate">
+<h2>9. 可用性闸门：_is_xyz_mapping_usable</h2>
+
+<p>所有 P1/P2/P3 解析器的前置守卫（orchestrator.py:1294）。一个 20 行的纯函数，但决定整个映射系统的命运。</p>
+
+<pre><code>def _is_xyz_mapping_usable(xyz_mapping_payload: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(xyz_mapping_payload, dict):
+        return False
+    provenance = xyz_mapping_payload.get("provenance")
+    if not isinstance(provenance, dict):
+        return False
+    source = str(provenance.get("mapping_source", "")).strip().lower()
+    confidence = str(provenance.get("confidence", "none")).strip().lower()
+
+    # 黑名单：明确拒绝
+    rejected_sources = {"substructure_match", "_smilesatomoutputorder",
+                        "assumed_heavy_order", "legacy", "empty"}
+    if source in rejected_sources:
+        return False
+
+    # 白名单：有条件接受
+    if source == "atom_map_sidecar":
+        return bool(provenance.get("validated", False))
+    if source == "kabsch_hungarian":
+        return confidence == "high"
+    return False   # 未知 source 一律拒绝</code></pre>
+
+<div class="callout tip">
+  <strong>语义总结</strong>
+  只有 <code>kabsch_hungarian + high</code> 或 <code>atom_map_sidecar + validated</code> 两种组合能通过。这导致一个反直觉的结果：<strong>SubstructMatch 即使成功也不被信任</strong>——这条路径产出的映射会被直接丢弃，转而走 SMARTS。
+</div>
+</section>
+
+<section id="pitfalls">
+<h2>10. 已知陷阱与失败模式</h2>
+
+<h3>① 柔性取代基击穿 Kabsch max_err</h3>
+<div class="card-grid">
+  <div class="card">
+    <div class="label">典型触发</div>
+    <div style="margin-top:6px;">Cbz / Bn / TBDMS / 烷基链等可绕单键自由旋转的基团</div>
+  </div>
+  <div class="card">
+    <div class="label">症状</div>
+    <div style="margin-top:6px;"><code>rmsd ≈ 1.5 Å</code> 合格<br><code>max_err ≈ 3.7~5.0 Å</code> 超阈</div>
+  </div>
+  <div class="card">
+    <div class="label">后果</div>
+    <div style="margin-top:6px;">Kabsch 失败 → 走 SubstructMatch → 也常失败 → 走 SMARTS</div>
+  </div>
+</div>
+
+<h3>② "graph-isomorphism fallback" 是幽灵代码</h3>
+<p><code>cleaner_adapter.py:420</code> 的日志承诺"Caller should use SMARTS / graph-isomorphism fallback"，但全代码库无任何图同构算法实现。真正的兜底是 SMARTSMatcher 的拓扑识别。看到这条日志不要去找图同构代码——它不存在。</p>
+
+<h3>③ molecular_graph.COVALENT_RADII 缺金属</h3>
+
+<pre><code># rph_core/utils/molecular_graph.py:22
+COVALENT_RADII = {
+    'H': 0.31, 'B': 0.85, 'C': 0.76, 'N': 0.71, 'O': 0.66,
+    'F': 0.57, 'Si': 1.11, 'P': 1.07, 'S': 1.05,
+    'Cl': 1.02, 'Br': 1.20, 'I': 1.39
+}   # ← 没有 Mg / Li / Zn / Na / K / Ca / Al ...</code></pre>
+
+<p>所有 Lewis 酸反应在 <code>build_bond_graph()</code> 调用处都会抛 <code class="language-plaintext">Unknown element radius: O, Mg</code>。该错误被 retro_scan 捕获并标 <span class="badge amber">DEGRADED</span>，由 path_search 救回。但这意味着：</p>
+<ul>
+  <li>SMARTS 兜底若依赖 <code>build_bond_graph</code>，对 LA 反应必然失败</li>
+  <li>LA 模式下 SMARTSMatcher 切换到 <code>MolFromSmiles</code> 构造 Mol 以绕开此问题</li>
+  <li>但 <code>geometry_guard.py</code> 中的多次 <code>build_bond_graph</code> 调用仍会失败</li>
+</ul>
+
+<h3>④ SMILES 桥被绕开</h3>
+<p>如 <a href="#spaces">§2</a> 所述，<code>smiles_to_xyz_map.json</code> + <code>atom_map_smiles.json</code> 已隐含完整的 map_number → xyz_idx 映射，但解析链从不读取这两条桥的组合。这是当前方案最大的设计疏漏。</p>
+
+<h3>⑤ 失败案例复盘（RXN_8ebf416f vs RXN_f5d5c7b9）</h3>
+
+<table>
+  <thead>
+    <tr><th>维度</th><th>RXN_8ebf416f <span class="badge red">失败</span></th><th>RXN_f5d5c7b9 <span class="badge green">成功</span></th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>产物特征</td>
+      <td>含 <strong>Cbz</strong>：<code>N(C(=O)OCc1ccccc1)</code></td>
+      <td>环内氨基甲酸酯（刚性）</td>
+    </tr>
+    <tr><td>Kabsch rmsd</td><td>1.578 Å <span class="badge green">✓</span></td><td>0.838 Å <span class="badge green">✓</span></td></tr>
+    <tr><td>Kabsch max_err</td><td><strong>3.784 Å</strong> <span class="badge red">✗</span></td><td>1.528 Å <span class="badge green">✓</span></td></tr>
+    <tr><td>SubstructMatch</td><td>失败</td><td>未尝试（Kabsch 已成功）</td></tr>
+    <tr><td>atom_map 来源</td><td><code>empty</code></td><td><code>kabsch_hungarian</code></td></tr>
+    <tr><td>P1 直接命中</td><td><span class="badge red">否</span></td><td><span class="badge green">是</span>（绕开后续陷阱）</td></tr>
+    <tr><td>SMARTS 兜底</td><td>失败 → RuntimeError</td><td>未触发</td></tr>
+  </tbody>
+</table>
+</section>
+
+<section id="locations">
+<h2>11. 关键代码位置</h2>
+
+<table>
+  <thead><tr><th>符号</th><th>位置</th><th>职责</th></tr></thead>
+  <tbody>
+    <tr><td><code>MolXyzMappingResult</code></td><td>orchestrator.py:105</td><td>映射结果数据类（mol_to_xyz / source / confidence）</td></tr>
+    <tr><td><code>_build_mol_to_xyz_index_mapping</code></td><td>orchestrator.py:1547</td><td>★ Kabsch + Hungarian 主入口</td></tr>
+    <tr><td><code>_kabsch_align</code></td><td>orchestrator.py:1520</td><td>纯 numpy Kabsch 实现</td></tr>
+    <tr><td><code>_hungarian_match</code></td><td>orchestrator.py:1535</td><td>按元素分组的二分图匹配</td></tr>
+    <tr><td><code>_build_and_save_xyz_mapping</code></td><td>orchestrator.py:1781</td><td>写入 atom_map_xyz.json</td></tr>
+    <tr><td><code>_resolve_forming_bonds_for_s2</code></td><td>orchestrator.py:865</td><td>★ P1/P2/P3/P4 解析链总调度</td></tr>
+    <tr><td><code>_is_xyz_mapping_usable</code></td><td>orchestrator.py:1294</td><td>★ 闸门函数（20 行）</td></tr>
+    <tr><td><code>_resolve_forming_bonds_from_xyz_mapping_artifact</code></td><td>orchestrator.py:1316</td><td>P1 解析器</td></tr>
+    <tr><td><code>_resolve_forming_bonds_from_mapping_annotations</code></td><td>orchestrator.py:1353</td><td>P2 解析器</td></tr>
+    <tr><td><code>_resolve_forming_bonds_from_graph_edges_and_xyz_mapping</code></td><td>orchestrator.py:1405</td><td>P3 解析器</td></tr>
+    <tr><td><code>_finalize_forming_bonds_for_s2</code></td><td>orchestrator.py:769</td><td>所有解析器出口的校验/过滤/LA 处理</td></tr>
+    <tr><td><code>get_map_to_xyz_dict</code></td><td>cleaner_adapter.py:344</td><td>★ SubstructMatch 兜底</td></tr>
+    <tr><td><code>NON_ORGANIC_XYZ_ELEMENTS</code></td><td>cleaner_adapter.py:16</td><td>重金属白名单</td></tr>
+    <tr><td><code>SMARTSMatchResult</code> / <code>SMARTSTemplate</code></td><td>smarts_matcher.py:38 / 48</td><td>P4 数据类与模板</td></tr>
+    <tr><td><code>_TEMPLATES</code></td><td>smarts_matcher.py:58</td><td>[5+2]/[4+3]/[4+2]/[3+2] 模板注册表</td></tr>
+    <tr><td><code>SMARTSMatcher.find_reactive_bonds</code></td><td>smarts_matcher.py:139</td><td>★ P4 入口</td></tr>
+    <tr><td><code>_topological_ring_identification_43</code></td><td>smarts_matcher.py:599</td><td>[4+3] 主路径（7 元环）</td></tr>
+    <tr><td><code>_topological_core_identification_43</code></td><td>smarts_matcher.py:618</td><td>[4+3] 回退（桥氧+BFS）</td></tr>
+    <tr><td><code>build_bond_graph</code></td><td>utils/molecular_graph.py:29</td><td>⚠ 共价半径表缺金属</td></tr>
+    <tr><td><code>COVALENT_RADII</code></td><td>utils/molecular_graph.py:22</td><td>⚠ 仅含 H/B/C/N/O/F/Si/P/S/Cl/Br/I</td></tr>
+  </tbody>
+</table>
+
+<div class="footer">
+  本文档由代码静态分析自动生成于 2026-07-06 · 对应 ReactionProfileHunter v3.0.1
+  · 代码引用基于当时的工作树状态
+</div>
+
+</section>
+
+</main>
+</div>
+</body>
+</html>

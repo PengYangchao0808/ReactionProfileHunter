@@ -1,777 +1,185 @@
-# ReactionProfileHunter v6.2 默认配置
-# =====================================
+# ReactionProfileHunter V4.0 canonical configuration
+# Only S0-S4 settings are allowed here. Legacy V3 protocol branches are removed.
 
-# ==================== 路径配置 (Executables) ====================
-# 统一管理所有量子化学软件的绝对路径
-# 支持环境变量覆盖（如 export ORCA_PATH=/custom/path/orca）
+schema_version: rph_v4_config_v1
+
 executables:
-  orca:
-    path: "/opt/software/orca/orca"  # 可执行文件的绝对路径，或命令名如 "orca"
-    ld_library_path: "/opt/openmpi418/lib:/opt/software/orca"  # OpenMPI 4.1.8 + ORCA 共享库路径
   gaussian:
-    path: "/opt/software/gaussian/g16/g16"
-    root: "/opt/software/gaussian/g16"
-    profile: "/opt/software/gaussian/g16/g16.profile"
-    use_wrapper: true
-    wrapper_path: "./scripts/run_g16_worker.sh"
-  xtb:
-    path: "/opt/software/xtb/bin/xtb"
-    fallback_paths:
-      - "/opt/xtb/bin/xtb"
-      - "/usr/local/bin/xtb"
+    path: /opt/software/gaussian/g16/g16
+    root: /opt/software/gaussian/g16
+    scratch_dir: /tmp/g16scratch
+    use_wrapper: false
+    wrapper_path: ""
+  orca:
+    path: /opt/software/orca/orca
+    ld_library_path: /opt/software/orca
+    mpi_bin_dir: /opt/openmpi418/bin
+    mpi_lib_dir: /opt/openmpi418/lib
   crest:
-    path: "/opt/software/crest/crest"
-  isostat:
-    path: "/opt/software/molclus/isostat"
-  shermo:
-    path: "/opt/software/shermo/Shermo"
+    path: /opt/software/crest/crest
+  xtb:
+    path: /opt/software/xtb/bin/xtb
+    fallback_paths:
+      - /opt/xtb/bin/xtb
+      - /usr/local/bin/xtb
+  discovery:
+    enabled: true
+    fail_on_invalid_explicit: true
 
-# ==================== 热力学配置 (Thermodynamics) ====================
-# Shermo 热力学校正参数，用于 S1 构象搜索和 S3 Gibbs 计算
+resources:
+  mem: 32GB
+  nproc: 16
+  orca_maxcore_safety: 0.65
+
 thermo:
   temperature_k: 298.15
   pressure_atm: 1.0
-  scl_zpe: 0.9905
-  ilowfreq: 2
-  imagreal: null
-  conc: null
 
-# ==================== 资源配置 (Resources) ====================
-# 内存配置格式："32GB", "16GB", "4096MB" 等
-resources:
-  mem: "48GB"  # 总内存（60GB 物理，留 12GB 给 OS/缓存）
-  nproc: 16   # 并行核数（7950X 16核）
-  # 派生值（maxcore 等）由代码根据 mem/nproc 自动计算
-  orca_maxcore_safety: 0.65  # ORCA MaxCore = mem × safety / nproc ≈ 2600 MB/core
-
-# 全局理论水平配置 (Theory Levels)
-# ================================
-# 统一管理几何优化和高精度单点能的参数
 theory:
-  # xTB 预优化级别 (用于避免原子重叠导致 Gaussian/ORCA 崩溃)
-  # 策略: xTB 粗修 → B3LYP 精修 → 高精度 SP (Houk 建议)
-  # 注意: nproc 从 resources 配置中自动派生
-  preoptimization:
-    enabled: true  # 是否启用 xTB 预优化（建议开启）
-    gfn_level: 2  # GFN-xTB 方法级别 (1 或 2, 推荐 2)
-    solvent: acetone  # 与主计算保持一致
-    # 原子重叠检测阈值（Å）
-    overlap_threshold: 1.0  # 若任意两原子距离 < 此值，触发预优化
-    # 优化收敛标准
-    opt_level: crude  # crude (快速) / normal (标准) / tight (严格)
-
-  # 几何优化级别 (用于 S1 产物优化, S3 TS 优化, 受限优化)
-  # 注意: nproc 和 mem 从 resources 配置中自动派生
-  optimization:
-    method: M062X
-    basis: def2-SVP
-    dispersion: null
-    engine: gaussian  # 可选: gaussian, orca
-    solvent: acetone
-
-  # 高精度单点能级别 (L2)
-  # 用于 S1 产物精修, S3 TS/Reactant/Fragments 精修
-  # 注意: nproc 从 resources 配置中自动派生
-  single_point:
-    method: wB97M-V
-    basis: def2-TZVPP
-    aux_basis: def2/J
-    engine: orca  # 可选: orca, gaussian
-    maxcore: 2600     # 48GB × 0.65 / 12核 ≈ 2600 MB/core
-    solvent: acetone
-    fallback_to_gaussian: false  # ORCA 失败时是否降级到 Gaussian
-    fallback_method: B3LYP
-    fallback_basis: def2-TZVP
-
-# 优化控制配置 (Optimization Control)
-# ===================================
-# 统一管理几何优化的各种控制参数
-# 这些参数会自动转换为 Gaussian/ORCA 的相应关键词
-optimization_control:
-  # 超时设置
-  timeout:
-    enabled: false
-    default_seconds: 21600
-
-  # 振荡检测
-  oscillation:
-    window_size: 10  # 检测窗口（步数）
-    energy_tolerance: 0.0001  # Hartree, 能量变化容忍阈值
-    max_oscillation_count: 3  # 最大允许振荡次数
-
-  # Hessian 控制
-  hessian:
-    initial: calcfc  # 初始 Hessian: calcfc, calcall, read, model
-    recalc_every: 10  # 每隔 N 步重算 Hessian
-
-  # 步长控制
-  step:
-    max_step: 30  # Gaussian: N/100 Bohr, ORCA: Bohr
-    trust_radius: 0.3  # 信任半径 (Bohr)
-    adaptive: true  # 自适应步长
-
-  # 收敛级别
-  convergence:
-    level: normal  # loose, normal, tight, verytight
-
-  # TS 特定设置
-  ts:
-    eigentest: false  # Gaussian: NoEigenTest
-    follow_mode: 1  # 跟踪第几个虚频 (1 或 2)
-    step_type: eigenvalue  # eigenvalue 或 step
-
-# Step 1: Product Anchor (产物锚定)
-step1:
-  protocol: lite
-  shared_handoff:
-    enabled: true
-    dft_optfreq: true
-    final_sp: true
-    ranking_after_handoff: final_sp_minimum
-  fast_sp_profiles:
-    prescreen_sp:
-      method: PBEh-3c
+  s3_low_level:
+    optimization:
+      engine: orca
+      task: opt
+      method: B97-3c
       basis: ""
       aux_basis: ""
-      timeout: 1800
-    screening_sp:
+      solvent: acetone
+      solvent_model: CPCM
+      route_minimum: "Opt"
+      route_ts: "OptTS"
+      route_extras: ""
+      max_cycles: 100
+      timeout: 864000
+      frequency:
+        enabled_for_ts: true
+        task: freq
+        imaginary_cutoff_cm1: -50.0
+        require_exactly_one: true
+    single_point:
+      engine: orca
+      task: sp
       method: r2SCAN-3c
       basis: ""
       aux_basis: ""
-      timeout: 1800
-  protocol_stack:
-    ext:
-      two_stage_enabled: true
-      ngeom_default: 3
-      ngeom_max: 6
-      funnel:
-        search_mode: crest_two_stage_gfn0_to_gfn2
-        clustering_mode: isostat
-        prescreen_mode: none
-        rerank_mode: none
-      handoff:
-        mode: optimize_all_candidates
-        fallback_mode: none
-        ranking_after_handoff: shermo_plus_sp_boltzmann
-    full:
-      two_stage_enabled: false
-      ngeom_default: 12
-      ngeom_max: 24
-      funnel:
-        search_mode: crest_gfn2
-        clustering_mode: isostat
-        prescreen_mode: low_cost_dft_sp
-        rerank_mode: r2scan3c_sp_plus_mrrho
-        prescreen_window_kcal: 4.0
-        screening_window_kcal: 3.5
-        survivor_window_kcal: 3.0
-      handoff:
-        mode: optimize_all_survivors_within_window
-        fallback_mode: none
-        ranking_after_handoff: final_sp_plus_boltzmann
-    lite:
-      two_stage_enabled: false
-      ngeom_default: 4
-      ngeom_max: 6
-      conformer_energy_window_kcal: 3.0
-      crest_energy_window_kcal: 3.0
-      funnel:
-        search_mode: crest_gfn2
-        clustering_mode: isostat
-        prescreen_mode: none
-        rerank_mode: r2scan3c_sp
-        use_mrrho_like_correction: true
-        optimize_limit: 1
-        top2_fallback_enabled: true
-        boltzmann_cutoff: 0.90
-      handoff:
-        mode: optimize_rank1
-        fallback_mode: optimize_top2_if_gap_small
-        small_gap_kcal: 1.0
-        ranking_after_handoff: final_sp_minimum
-      final_opt_sp:
-        enabled: true
-        method: r2SCAN-3c
-        freq: true
-        final_sp_enabled: true
-        selection_mode: single_lowest_energy
-        write_stage_meta: true
-        write_provenance_flags: true
-        final_sp_method: wB97M-V
-        final_sp_basis: def2-TZVPP
-    zero:
-      two_stage_enabled: false
-      ngeom_default: 3
-      ngeom_max: 4
-      conformer_energy_window_kcal: 0.5
-      crest_energy_window_kcal: 0.5
-      funnel:
-        search_mode: crest_gfn2_or_skip
-        clustering_mode: minimal
-        prescreen_mode: none
-        rerank_mode: gfn2_energy
-        narrow_window_kcal: 0.5
-        optimize_limit: 1
-      handoff:
-        mode: optimize_rank1
-        fallback_mode: optimize_all_within_0p5_kcal
-        ranking_after_handoff: final_sp_minimum
-      final_opt_sp:
-        enabled: true
-        method: r2SCAN-3c
-        freq: true
-        final_sp_enabled: true
-        selection_mode: single_lowest_energy
-        write_stage_meta: true
-        write_provenance_flags: true
-        final_sp_method: wB97M-V
-        final_sp_basis: def2-TZVPP
-
-  # ==============================================================
-  # 两阶段构象搜索配置 (v3.1 新增)
-  # 策略: GFN0(快速粗筛) → ISOSTAT(聚类) → GFN2(精细优化)
-  # ==============================================================
-  conformer_search:
-    # 两阶段开关由 protocol_stack.<protocol>.two_stage_enabled 控制
-    # 顶层值对 lite/zero/full 协议无效，仅作为 ext/default 的 fallback
-
-    # Stage 1: GFN0 粗筛 (快速覆盖构象空间)
-    stage1_gfn0:
-      enabled: true
-      gfn_level: 0  # 使用GFN0快速模式
-      energy_window_kcal: 10.0  # 宽松能量窗口,保留更多候选构象
-      # CREST专用参数 (额外标志)
-      crest_flags: "--niceprint"
-      # ISOSTAT聚类配置
-      clustering:
-        run_after: true
-        isostat_gdis: 0.5  # RMSD阈值 (Å)
-        isostat_edis: 1.0    # 能量阈值 (kcal/mol)
-
-    # Stage 2: GFN2 精细优化 (仅优化GFN0筛选出的候选)
-    stage2_gfn2:
-      enabled: true
-      gfn_level: 2  # 使用GFN2精细模式
-      energy_window_kcal: 3.0  # 严格能量窗口
-      crest_flags: "--niceprint"
-      # ISOSTAT聚类配置
-      clustering:
-        run_after: true
-        isostat_gdis: 1  # RMSD阈值 (Å)
-        isostat_edis: 1.0  # 能量阈值 (kcal/mol)
-
-    # 通用构象搜索参数 (单阶段/两阶段共用)
-    common:
       solvent: acetone
-      threads: 16       # CREST -T (V3 串行模式下独占全 16 核)
-      ngeom_default: 3
-      ngeom_max: 6
+      solvent_model: CPCM
+      timeout: 864000
 
-  # ==============================================================
-  # 遗留配置 (单阶段模式或向后兼容)
-  # ⚠️  以下配置仅在以下条件下生效:
-  #    1. conformer_search.two_stage_enabled = false (单阶段模式)
-  #    2. 向后兼容旧的 RPH 配置文件
-  # ==============================================================
-  crest:
-    gfn_level: 2  # GFN-xTB 方法级别 (0, 1, 2)
-    solvent: acetone
-    energy_window: 6.0  # kcal/mol, 构象能量窗口
-    threads: 16       # CREST -T (与 conformer_search.common.threads 一致)
+  s4_high_precision:
+    optimization:
+      engine: gaussian
+      task: opt
+      method: M062X
+      basis: def2-SVP
+      solvent: acetone
+      solvent_model: CPCM
+      route_minimum: "Opt"
+      route_ts: "Opt=(TS,CalcFC,NoEigenTest)"
+      grid: UltraFine
+      scf: XQC
+      max_cycles: 200
+      timeout: 864000
+      frequency:
+        enabled_for_ts: true
+        task: freq
+        imaginary_cutoff_cm1: -50.0
+        require_exactly_one: true
+    single_point:
+      engine: orca
+      task: sp
+      method: wB97M-V
+      basis: def2-TZVPP
+      aux_basis: def2/J
+      solvent: acetone
+      solvent_model: CPCM
+      timeout: 864000
 
-  # 是否启用 DFT 优化 (在 CREST 之后)
-  enable_dft_opt: true  # 默认使用DFT精修产物构象
-
-# Step 2: Retro Scanner (逆向扫描)
-# ================================================
-# 职责:
-# 1. 从产物结构向外扫描生成 TS 初猜
-# 2. 使用 xTB  relaxed scan 探索反应坐标
-# 3. 拓扑守护验证扫描轨迹合理性
-step2:
-  forming_bonds_required: true
-  forming_bonds_index_base: auto
-  engine_policy: xtb_path_first
-  pes_adapter:
-    enabled: true
-    mode: fallback
-    max_relax_iterations: 3
-    relax_method: r2SCAN-3c
-  
-  # 扫描策略配置
-  scan:
-    # ===== 扫描策略选择 =====
-    # policy_c: 弱双约束 (harmonic, k=0.03) - 推荐，用于难收敛反应
-    # policy_a: 单侧自由 (仅约束键B)
-    # policy_b: 单侧自由 (仅约束键A, 镜像)
-    # concerted: 传统强双约束 (fixed, k=0.5)
-    scan_policy: policy_c
-    nproc: 16
-    
-    # ===== 扫描距离参数 (单位: Angstrom) =====
-    # 扫描起点距离 - 通常设为产物形成键距离的1.2-1.5倍
-    scan_start_distance: 3.5
-    # 扫描终点距离 - 通常设为过渡态典型距离 (1.8-2.0)
-    scan_end_distance: 1.8
-    # 扫描步数 - 更多步数提高分辨率但增加计算时间
-    scan_steps: 20
-    
-    # ===== 扫描模式 =====
-    # concerted: 同时扫描所有形成键 (推荐)
-    # sequential: 依次扫描每个形成键
-    scan_mode: concerted
-    # 扫描约束力常数 - policy_c使用harmonic约束时有效
-    scan_force_constant: 0.5
-    
-    # ===== 拓扑守护配置 (防止扫描轨迹偏离反应路径) =====
-    # 启用拓扑守护 - 检测扫描过程中是否产生错误的化学键
-    topology_guard_enabled: true
-    # 拓扑图缩放因子 - 用于判断原子间距离是否形成新键
-    # 值越大判断越宽松 (1.25 = 典型共价键半径的1.25倍)
-    topology_graph_scale: 1.25
-    # 风险接触阈值 - 用于检测可能形成错误键的原子对
-    risk_contact_ratio_threshold: 0.85
-    risk_contact_abs_cutoff_A: 2.2
-    # 最小收缩比 - 用于检测原子是否过度靠近
-    min_shrink_ratio: 0.75
-    # 最大风险对数 - 最多检测多少个风险接触
-    keep_apart_max_pairs: 6
-    # 保持距离下限 - 风险接触的最小距离阈值
-    keep_apart_floor_A: 3.0
-    # 保持距离约束力常数
-    keep_apart_force_constant: 0.5
-    # 拓扑重试力常数 - 首次失败后重试时使用的力常数
-    keep_apart_retry_force_constant: 1.0
-    # 拓扑失败时是否重试一次
-    topology_retry_once: true
-    
-    # ===== 扫描质量控制 =====
-    # 有效点数阈值 - 扫描至少需要多少个有效点才能认为成功
-    min_valid_points: 5
-    
-    # ===== 边界处理 =====
-    # 是否拒绝边界最大能量点 (即能量最高点在扫描边界)
-    reject_boundary_maximum: true
-    # 边界最大时是否重试一次 (扩展扫描范围)
-    boundary_retry_once: true
-    # 边界重试的距离增量 (Angstrom)
-    boundary_retry_delta: 0.3
-    # 边界重试时额外增加的扫描步数
-    boundary_retry_extra_steps: 6
-    # 是否允许边界情况下降级处理 (不抛错, 仅记录warning)
-    allow_boundary_degradation: true
-    # 是否要求能量最高点必须是严格的局部峰值
-    # false: 接受能量最高点在边界的情况
-    require_local_peak: false
-  
-  # ===== xTB Path Finder 配置 (新模式) =====
-  # 使用 xTB 官方路径搜索替代 relaxed scan
-  # 官方文档: xtb start.xyz --path end.xyz --input path.inp
-  path_search:
-    mode: "rescue"          # "always" | "rescue" | "never"
-    nproc: 16
-    # rescue = trigger only when retro_scan is DEGRADED/FAILED
-    # always = always execute (legacy enabled=true behavior)
-    # never = never execute (legacy enabled=false behavior)
-    # Backward compat: "enabled: true" is treated as mode="always"
-    # 路径搜索优化轮数
-    nrun: 1
-    # 初始路径点数
-    npoint: 25
-    # 精细优化步数
-    anopt: 10
-    # 推力 - 从反应物出发的排斥势
-    kpush: 0.003
-    # 拉力 - 向产物的吸引势 (负值表示吸引)
-    kpull: -0.015
-    # 优化器拉力
-    ppull: 0.05
-    # 高斯宽度
-    alp: 1.2
-    # 是否写入兼容别名 (reactant_complex 作为 dipolar_intermediate 的别名)
-    write_legacy_reactant_alias: true
-  
-  # xTB 扫描引擎配置
-  xtb_settings:
-    # GFN-xTB 级别: 0 = GFN0, 2 = GFN2 (推荐)
-    gfn_level: 2
-    # 溶剂模型 (用于隐式溶剂化计算)
-    solvent: acetone
-    # 并行核数
-    nproc: 16          # xTB GFN2 扫描
-    # 电子温度 (null 表示使用默认, 可设如 300)
-    etemp: null
-
-  crest_rescue:
-    enabled: false
-    trigger: path_or_scan_failed
-    threads: 16
-    gfn_level: 2
-    constraints_from_forming_bonds: true
-
-  # Gaussian+XTB 混合 TS 优化配置 (NEW)
-  # 使用 Gaussian 调用 XTB 进行梯度计算，实现更精确的 TS 优化
-  gau_xtb:
-    enabled: false  # 设置为 true 启用 Gau_XTB TS 优化
-    # Gau_XTB 脚本目录
-    scripts_dir: "scripts/Gau_XTB"
-    # 最大优化循环数
-    max_cycles: 50
-    # 最大尝试次数
-    max_attempts: 3
-
-# Step 3: Transition Analyzer (反应中心全分析)
-# ================================================
-# 职责:
-# 1. TS 优化与验证 (Berny/QST2 + Freq)
-# 2. Reactant 高精度 SP 计算
-# 3. 片段提取与处理 (Opt + SP)
-# 4. 生成完整能量报告
-step3:
-  # [NEW] 中间体 DFT 计算配置
-  intermediate_opt:
-    enabled: true                  # 是否计算中间体 (reactant_complex)
-    charge: 0                      # 中间体电荷
-    multiplicity: 1                # 中间体自旋多重度
-
-  # Reactant 优化配置
-  reactant_opt:
-    enabled: true              # 启用 Reactant 优化（推荐保持 true）
-    charge: 0                  # Reactant 电荷（通常为 0）
-    multiplicity: 1            # 自旋多重度（通常为 1，单重态）
-    enable_nbo: false          # 是否在 Freq 中集成 NBO 分析（默认关闭以节省时间）
-
-  # Gaussian 关键词模板
-  gaussian_keywords:
-    berny: "Opt=(TS, CalcFC, NoEigenTest) Freq"
-    ts_rescue: "Opt=(TS, CalcAll, NoEigenTest, MaxCycles=80) Freq"
-    qst2: "Opt=(QST2, CalcFC) Freq"
-    irc: "IRC=(CalcFC, MaxPoints=50, StepSize=10)"
-  
-  # 严格禁用 QST2 救援策略（只使用 Berny）
-  disable_qst2_rescue: true
-
-  # TS rescue policy: 失败分型 → 选择合适 rescue 起点 → 小步长 Berny rescue
-  ts_rescue_policy:
-    enabled: true
-    trigger_after_steps: 60           # 超过此步数视为振荡/步数超限
-    max_step_rescue: null             # rescue 时 MaxStep (null=Gaussian 默认 30)
-    recalc_fc_every: null            # rescue 时 RecalcFC 频率 (null=不使用，CalcAll 替代)
-    max_cycles_rescue: 80            # rescue 时 MaxCycles (CalcAll 每步成本高，减少总步数)
-    # 失败分型对应的 rescue 起点
-    oscillation_uses_last_geometry: true     # 振荡/步数超限 → 用中断结构
-    step_exceeded_uses_last_geometry: true   # 同上
-    no_imag_uses_original_guess: true        # 0 虚频 → 回原始 TS guess
-    multi_imag_uses_failed_geometry: true    # 多虚频 → 从该结构继续
-
-  # 片段处理配置
-  fragments:
-    calculate_relaxed: true  # 是否计算松弛后的片段能量
-    opt_level: xtb          # 片段几何优化级别: xtb (快) 或 dft (准)
-    # VRM 相关 SP 固定资源设置
-    # NOTE: ORCA MPI (orca_scf_mpi/mpirun) 在部分环境/体系上可能在 SCF 收敛后异常 abort。
-    # VRM 默认强制单核运行以禁用 MPI，提升稳定性（可按需调大）。
-    vrm_sp_nproc: 1
-
-# Step 4: Feature Miner — MOVED to RPH_Postprocess/rph_features/
-# This config section is preserved for backward compatibility.
-# The DFT pipeline now stops at S3. Feature extraction runs separately via:
-#   rph-features extract --rph-run <work_dir> --output <features_dir>
-step4:
-  enable_buried_volume: false
-  enabled_plugins:
-    - thermo
-    - geometry
-    - qc_checks
-    - ts_quality
-    - step1_activation
-    - step2_cyclization
-    - multiwfn_features
-    - conformational_population
-    - conformational_preorganization
-    - torsion_flexibility
-  features:
-    - dG_activation
-    - dG_reaction
-    - E_distortion_sub
-    - E_distortion_rea
-    - E_interaction
-    - r1_forming
-    - r2_forming
-    - asynchronicity
-  outputs:
-    write_features_raw: true
-    write_features_mlr: true
-    write_feature_meta: true
-  mlr:
-    columns:
-      - sample_id
-      - thermo.dE_activation
-      - thermo.dE_reaction
-      - geom.r_avg
-      - geom.dr
-      - geom.close_contacts_density
-      - ts.n_imag
-      - ts.imag1_cm1_abs
-      - s1_dG_act
-      - s1_Keq_act
-      - s1_Nconf_eff
-      - s1_Sconf
-      - s1_E_avg_weighted
-      - s1_E_std
-      - s2_eps_homo
-      - s2_eps_lumo
-      - s2_mu
-      - s2_eta
-      - s2_omega
-      - s2_gedt_value
-      - qc.sample_weight
-  strict_qc:
-    enabled: false
-    sample_weight_policy: downweight
-
-  # V6.2 机理感知特征配置 (P0)
-  step4_features:
-    temperature_K: 298.15
-    units:
-      energy: "kcal/mol"
-      entropy: "cal/mol/K"
-    stage1:
-      small_molecule_name: "HOAc"
-      shermo_summary_filename: "shermo_summary.json"
-      conformer_energies_filename: "conformer_energies.json"
-    stage2:
-      fchk_preferred: true
-      cdft:
-        orbital_unit: "eV"
-        approx: "koopmans_orbital"
-      gedt:
-        sign_convention: "gedt_positive_if_electron_flows_nuc_to_elec"
-        charge_priority: ["NBO", "CM5", "MULLIKEN"]
-        fragment_rule: "forming_bonds_graph_cut_v1"
-    multiwfn:
+step1:
+  protocol: censo_lite
+  allowed_protocols:
+    - censo_lite
+  censo_lite:
+    crest:
+      engine: crest
+      gfn_level: 2
+      search_mode: imtd_gc
+      energy_window_kcal: 6.0
+      solvent: acetone
+      additional_flags: ""
+      timeout: 21600
+    ranking:
+      engine: orca
+      task: sp
+      method: B97-3c
+      basis: ""
+      aux_basis: ""
+      solvent: acetone
+      timeout: 864000
+    prefilter:
+      xtb_window_kcal: 5.0
+      max_candidates_soft: 60
+      extra_deduplication: true
+      preserve_torsion_clusters: true
+      min_per_cluster: 1
+    b97_3c:
+      energy_window_kcal: 4.0
+      parallel_jobs: 1
+      cores_per_job: 16
+    xtb_thermo:
       enabled: true
-      cache_dir: ".cache/step4_multiwfn"
-      timeout_sec: 120
-      modules:
-        fukui: true
-        dual_descriptor: true
-        qtaim_bcp: false
-        nci: false
+      thermo_pool_max: 30
+      failure_policy: ensemble_electronic_only
+      gfn_level: 1
+      nproc: 4
+      bhess_level: normal
+      omp_stacksize: null
+      omp_max_active_levels: 1
+      fallback_enabled: true
+      fallback_gfn_level: 0
+      fallback_nproc: 1
+      sthr: 50.0
+      imagthr: -100.0
+      temperature_k: 298.15
+      timeout: 864000
+    deduplication:
+      backend: torsion_signature
+      heavy_atom_rmsd_prefilter_A: 0.25
+      torsion_bin_deg: 20.0
+      torsion_rmsd_deg: 25.0
+      preserve_stereochemistry: true
+      preserve_mirror_pairs: true
+    selection:
+      final_window_kcal: 2.5
+      min_keep: 3
+      max_keep: 10
+    retention:
+      energy_window_kcal: 6.0
+      always_keep_lowest: true
 
-# 运行模式配置 (Run Mode)
-# ========================
-# 控制程序运行模式：dataset (数据集) — 唯一入口
-run:
-  source: dataset  # dataset: 数据集模式（唯一支持的模式）
-  # batch 模式配置 (当 source=batch 时使用)
-  batch:
-    input_file: ""      # 输入CSV文件路径
-    smiles_column: "product_smiles"  # SMILES列名
-  # dataset 模式配置 (当 source=dataset 时使用)
-  # JSON 文件会被自动识别 (通过 .json 后缀检测)
-  dataset:
-    path: "data/reaxys_cleaned.csv"  # CSV 数据集文件路径 (相对路径)
-    product_smiles_col: "product_smiles_main"  # 产物SMILES列名
-    precursor_smiles_col: "precursor_smiles"  # 前体SMILES列名
-    small_molecular_primary_col: "ylide_leaving_group"  # 小分子key列 (主, 逗号分隔)
-    id_col: "rx_id"                           # ID列名
-    delimiter: ","                            # CSV分隔符
-  # 通用运行选项
-  output_root: ./rph_output  # 输出根目录 (会被global.work_dir_base覆盖)
-  workdir_naming: "rx_{rx_id}"  # 工作目录命名模板
-  resume: true        # 是否启用断点续算 (Checkpoint/Resume)
-  resume_rehydrate: true # 当状态文件被删时，是否尝试从物理产物重建状态 (V6.3)
-  resume_rehydrate_policy: best_effort
-  resume_partial_enabled: true
-  dry_run: false      # 干运行模式（仅显示任务，不执行）
-  max_tasks: 0       # 最大任务数 (0=无限制)
-  filter_ids: []      # 精确指定要运行的记录ID (如: ["1", "2"])，留空则按顺序运行
-  reaction_type: "[4+3]_default"  # 反应类型 (从reaxys_cleaned.csv数据可知是4+3反应)
-  compute_features: false  # 默认关闭 S4 特征提取；使用 --features 启用
+step2:
+  scan:
+    topology_guard_enabled: true
+    scan_start_distance: 4.0
+    scan_end_distance: 1.5
+    scan_steps: 24
+    retry_on_boundary_maximum: true
+    retry_factor: 1.15
+  xtb_settings:
+    charge: 0
+    multiplicity: 1
+    solvent: acetone
+    nproc: null
 
-  max_workers: 1      # 并行工作进程数
-  notify:
-    enabled: true
-    backend: auto
-
-# P0-4: OldChk 复用控制
-checkpoint:
-  gaussian_oldchk_reuse:
-    enabled: false            # 默认禁用跨理论oldchk传递
-    allow_cross_theory: false # 若启用, 仅当 method/basis/charge/spin 完全一致才允许
-
-# 全局设置
-global:
-  log_level: INFO  # DEBUG, INFO, WARNING, ERROR
-  work_dir_base: ./rph_output
-  checkpoint: true  # 是否启用断点续算
-  # 程序查找顺序：配置文件 > 环境变量 > 系统 PATH
-  enable_path_search: true  # 允许自动查找（如果配置文件中的路径不存在）
-  
-  small_molecule_cache_dir: null
-
-s0:
+step3:
   enabled: true
-  persist_graph: true
-  fail_policy: degrade
-  generate_intermediates: false
-  dr_completion:
+  continue_on_structure_failure: true
+
+step4:
+  enabled: true
+  continue_on_structure_failure: true
+
+run:
+  resume: true
+  checkpoint:
     enabled: true
-    default_branch_when_unreported: true
-
-# ==================== Reference States (小分子参考态) ====================
-# 小分子离去基团目录，用于：
-#   1. Step 1 产物构象搜索时处理离去基团
-#   2. 参考态能量计算 (reference_states.py)
-#   3. 数据集中 small_molecular_primary / small_molecular_fallback 字段的解析 (legacy: ylide_leaving_group / leaving_group)
-# 配置格式：
-#   <key>:           # 离去基团标识符（数据集中使用的 key，如 "AcOH"）
-#     smiles: ""     # SMILES 字符串（必填）
-#     charge: 0      # 电荷（默认 0）
-#     multiplicity: 1  # 自旋多重度（默认 1，单重态）
-reference_states:
-  small_molecule_map:
-  # 乙酸 (Acetic Acid) - 最常见的离去基团
-    AcOH:
-      smiles: "CC(=O)O"
-      charge: 0
-      multiplicity: 1
-     
-    # 三氟乙醇 (Trifluoroethanol)
-    TFE:
-      smiles: "OCC(F)(F)F"
-      charge: 0
-      multiplicity: 1
-    
-    # DMDO (Dimethyldioxirane) - 用于联烯酰胺氧化形成 1,3-偶极子
-    DMDO:
-      smiles: "CC1(C)OO1"
-      charge: 0
-      multiplicity: 1
-    
-    # 丙酮 (Acetone) - DMDO 氧化后的共产物
-    acetone:
-      smiles: "CC(=O)C"
-      charge: 0
-      multiplicity: 1
-    
-    # 可根据数据集需要添加其他离去基团：
-    # 
-    # 水 (Water)
-    # H2O:
-    #   smiles: "O"
-    #   charge: 0
-    #   multiplicity: 1
-    # 
-    # 甲醇 (Methanol)
-    # MeOH:
-    #   smiles: "CO"
-    #   charge: 0
-    #   multiplicity: 1
-    # 
-    # 甲苯磺酸 (Tosic Acid)
-    # TsOH:
-    #   smiles: "CC1=CC=C(C=C1)S(=O)(=O)O"
-    #   charge: 0
-    #   multiplicity: 1
-
-# ==================== Reaction Reference Terms (反应参考态计量关系) ====================
-# 定义 precursor → intermediate 转化中涉及的氧化剂/共产物
-# 用于 ConditionThermoCalculator 计算完整热力学链条
-reaction_reference_terms:
-  "[4+3]_default":
-    precursor_to_intermediate:
-      reactants:
-        precursor: 1
-        DMDO: 1
-      products:
-        intermediate: 1
-        acetone: 1
-
-# ==================== Reaction Profiles (反应机理配置) ====================
-# 针对不同反应类型提供预置配置，key 以 "_" 开头表示内置模板
-# 使用方式: 在代码中根据反应类型选择对应 profile
-reaction_profiles:
-  # [5+2] 环加成反应默认配置
-  "[5+2]_default":
-    forming_bond_count: 2
-    s2_strategy: retro_scan
-    # 扫描参数
-    scan:
-      scan_start_distance: 3.5
-      scan_end_distance: 2.0
-      scan_steps: 16
-      scan_mode: concerted
-      scan_force_constant: 0.8
-      min_valid_points: 6
-      reject_boundary_maximum: true
-
-  # [4+3] 环加成反应默认配置
-  "[4+3]_default":
-    forming_bond_count: 2
-    s2_strategy: retro_scan
-    # 扫描参数
-    scan:
-      scan_start_distance: 3.5
-      scan_end_distance: 1.8
-      scan_steps: 20
-      scan_mode: concerted
-      scan_force_constant: 0.5
-      min_valid_points: 5
-      reject_boundary_maximum: true
-
-  # 通用兜底配置
-  "_universal":
-    forming_bond_count: 2
-    s2_strategy: retro_scan
-    scan:
-      scan_start_distance: 3.5
-      scan_end_distance: 1.8
-      scan_steps: 20
-      scan_mode: concerted
-      scan_force_constant: 0.5
-      min_valid_points: 5
-      reject_boundary_maximum: true
-
-# ==================== V3.0 Scheduler (调度架构) ====================
-# V3.0 调度架构：将 RPH 从 "每个目录独立跑完整 pipeline"
-# 改造为 "由 S0 驱动的 reaction/branch/condition 任务图"
-scheduler:
-  mode: v3
-  v3:
-    precompute_small_molecules: true
-    precursor_s1_once_per_reaction: true
-    branch_product_only_s1: true
-    condition_branch_thermo: true
-
-# ==================== Intra-Reaction Parallel (单反应内部并行) ====================
-intra_reaction_parallel:
-  enabled: false
-  total_cores: 16
-  total_mem: "52GB"
-
-  s1:
-    molecule_parallel: false
-    max_molecule_workers: 1
-    crest_cores: 16
-    conformer_parallel: false
-    max_conformer_workers: 1
-    opt_cores_per_job: 16
-    opt_mem_per_job: "48GB"
-    sp_cores_per_job: 16
-    sp_maxcore_per_job: 5200
-
-  s2:
-    nproc: 16
-
-  s3:
-    parallel_intermediate_ts: true
-    ts_opt_cores: 9
-    ts_opt_mem: "29GB"
-    intermediate_opt_cores: 7
-    intermediate_opt_mem: "23GB"
-    sp_parallel: true
-    sp_workers: 2
-    sp_cores_per_job: 8
-    sp_maxcore_per_job: 2600
+  output_root: ./Output

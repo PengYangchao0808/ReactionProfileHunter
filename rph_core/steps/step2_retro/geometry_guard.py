@@ -5,7 +5,7 @@ Step2 Geometry Guard - Topology and Close-Contact Validation
 Validates seed and intermediate geometries against product baseline
 to detect unintended bond formation or topology drift.
 
-Used by RetroScanner to guard against wrong-topology intermediates
+Used by the V4 PEB scanner to guard against wrong-topology intermediates
 that can arise from naive bond stretching or xTB relaxation.
 
 Author: ReactionProfileHunter Team

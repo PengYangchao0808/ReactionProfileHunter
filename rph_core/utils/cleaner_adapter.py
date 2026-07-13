@@ -13,7 +13,6 @@ from rdkit.Chem import rdDetermineBonds
 from rph_core.utils.file_io import read_xyz
 from rph_core.utils.tsv_dataset import ReactionRecord
 
-
 class CleanerAdapterError(Exception):
     pass
 
@@ -240,67 +239,6 @@ def map_pairs_to_xyz_indices(
         xyz_pairs.append((a_xyz, b_xyz))
 
     return _deduplicate_pairs(xyz_pairs)
-
-def get_map_to_xyz_dict(
-    mapped_smiles: Optional[str],
-    xyz_file: Path,
-) -> Dict[int, int]:
-    """Get mapping from MapId to MolIdx for V5.1 contracts"""
-    if not mapped_smiles:
-        return {}
-
-    mol = Chem.MolFromSmiles(mapped_smiles)
-    if mol is None:
-        return {}
-
-    map_to_query_idx: Dict[int, int] = {}
-    for atom in mol.GetAtoms():
-        map_num = atom.GetAtomMapNum()
-        if map_num > 0 and map_num not in map_to_query_idx:
-            map_to_query_idx[map_num] = atom.GetIdx()
-
-    if not map_to_query_idx:
-        return {}
-
-    coords, symbols = read_xyz(Path(xyz_file))
-    xyz_lines = [str(len(symbols)), "xyz"]
-    for symbol, coord in zip(symbols, coords):
-        xyz_lines.append(f"{symbol} {float(coord[0]):.10f} {float(coord[1]):.10f} {float(coord[2]):.10f}")
-    xyz_block = "\n".join(xyz_lines) + "\n"
-
-    xyz_mol = Chem.MolFromXYZBlock(xyz_block)
-    if xyz_mol is None:
-        return {}
-
-    try:
-        rdDetermineBonds.DetermineBonds(xyz_mol)
-    except Exception:
-        try:
-            rdDetermineBonds.DetermineConnectivity(xyz_mol)
-        except Exception:
-            return {}
-
-    query_mol = Chem.Mol(mol)
-    for atom in query_mol.GetAtoms():
-        atom.SetAtomMapNum(0)
-
-    matches = xyz_mol.GetSubstructMatches(query_mol, uniquify=False, useChirality=False)
-    if not matches:
-        if query_mol.GetNumAtoms() != xyz_mol.GetNumAtoms():
-            return {}
-        mapped_symbols = [atom.GetSymbol() for atom in query_mol.GetAtoms()]
-        if mapped_symbols != symbols:
-            return {}
-        matches = [tuple(range(query_mol.GetNumAtoms()))]
-
-    query_to_xyz: Dict[int, int] = {q_idx: int(x_idx) for q_idx, x_idx in enumerate(matches[0])}
-    
-    map_to_xyz: Dict[int, int] = {}
-    for map_num, query_idx in map_to_query_idx.items():
-        if query_idx in query_to_xyz:
-            map_to_xyz[map_num] = query_to_xyz[query_idx]
-            
-    return map_to_xyz
 
 def parse_pairs_text(pairs_text: Optional[str]) -> List[Tuple[int, int]]:
     if not pairs_text:

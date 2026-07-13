@@ -1,56 +1,80 @@
 # rph_core/AGENTS.md
 
 ## OVERVIEW
-Core package: `orchestrator.py` wires S1→S4; `steps/` holds per-step business logic; `utils/` (41 files) provides the QC/IO/logging/checkpoint infrastructure shared by all steps.
+Core package: `v4_orchestrator.py` wires S0→S4; `steps/` holds per-step business logic; `utils/` provides the QC/IO/logging/checkpoint infrastructure shared by all steps. The only supported runtime is `S0 mechanism → S1 CENSO-LITE → S2 PEB → S3 low-level → S4 high-level`.
 
 ## WHERE TO LOOK
 | Task | Location | Notes |
 |------|----------|-------|
-| Pipeline orchestration | `orchestrator.py:79` | `ReactionProfileHunter` class; `run_pipeline()` + `run_batch()` |
-| CLI entry | `orchestrator.py:1287` | `main()` — argparse; flags: --smiles, --output, --config, --log-level, --reaction-type |
-| Module run | `__main__.py` | `python -m rph_core` → calls `orchestrator.main()` |
-| S1 anchor/conformer | `steps/anchor/`, `steps/conformer_search/` | Two-stage UCE v3.1 engine |
-| S2 retro scan | `steps/step2_retro/` | SMARTS matching + bond stretching; retro_scan only |
-| S3 TS optimization | `steps/step3_opt/` | Berny + QST2 rescue + IRC + validation |
-| S4 feature extraction | `steps/step4_features/` | Plugin-based; 14 extractors |
-| QC facade | `utils/qc_interface.py` | ALL subprocess QC calls route here |
-| XTB scan | `utils/qc_interface.py:991` | `XTBInterface.scan()` — xTB scan facade used by S2 |
-| Checkpoint/resume | `utils/checkpoint_manager.py` | Hash-validated step resume (603 lines) |
-| Forming bonds S3→S4 | `utils/forming_bonds_resolver.py` | Resolves forming bond indices post-S3 |
+| Pipeline orchestration | `v4_orchestrator.py` | `V4Orchestrator` class; `run()` + CLI `main()` |
+| CLI entry | `v4_orchestrator.py` | `main()` — argparse; flags: `--csv`, `--rx-id`, `--output`, `--config`, `--stop-after` |
+| Module run | `__main__.py` | `python -m rph_core` → calls `v4_orchestrator.main()` |
+| S0 mechanism record | `steps/mechanism_classifier/s0_record.py` | `S0ReactionRecord` loaded from trusted dataset CSV |
+| S0 mechanism graph/models | `steps/mechanism_classifier/models.py`, `graph_builder.py`, `dr_completion.py` | `MechanismGraph`, `DRBranchPlan` (V3-era, not yet wired into V4 orchestrator — see P1 in master plan) |
+| S1 CENSO-LITE | `steps/conformer_search/censo_lite.py`, `censo_lite_runtime.py` | CREST/GFN2 + B97-3c SP + xTB mRRHO; no DFT OPT/FREQ |
+| S1 torsion dedup | `steps/conformer_search/torsion_signature.py`, `deduplicator.py` | Torsion-aware conformer deduplication |
+| S2 PEB | `steps/step2_retro/peb_scanner.py` → `retro_scanner.py` | xTB PEB backward scan from S1 selected product |
+| S3 low-level | `steps/step3_lowlevel/engine.py` | ORCA B97-3c OPT/OptTS → r2SCAN-3c SP |
+| S4 high-level | `steps/step4_highlevel/engine.py` | Gaussian M062X OPT/OptTS → ORCA wB97M-V SP |
+| Shared stage engine | `steps/stage_calculator.py` | OPT/Freq/SP dispatch for both S3 and S4 |
+| QC job routing | `utils/qc_jobs.py`, `qc_models.py` | `run_optimization()`, `run_frequency()`, `run_single_point()` |
+| QC interfaces | `utils/orca_interface.py`, `qc_interface.py` | ORCA + Gaussian + xTB + CREST runners |
+| Checkpoint/resume | `utils/v4_checkpoint.py` | `V4Checkpoint` — hash-validated stage resume via `pipeline.state` |
+| S4 observability | `utils/s4_progress.py` | `S4ProgressReporter` — writes `status.json` + `events.jsonl` |
+| WSL live viewer | `v4_watch.py` | `bin/rph_watch --output <run> --watch` |
+| PEB atom mapping | `utils/atom_mapping.py` | Resolves forming bonds from map-space → SMILES-space → XYZ-space |
+| Config loading | `utils/config_loader.py` | Loads `config/defaults.yaml` |
 
-## KEY NEW FEATURES
-- `reaction_profiles` config drives Step2 scan parameters: `scan_start_distance`, `scan_end_distance`, `scan_steps`, `scan_mode`, `scan_force_constant`
-- `--reaction-type` CLI arg selects reaction profile (e.g., `[4+3]_default`)
-- Forming bonds from S2 preserved through S3→S4 without recomputation
+## V4 CONFIG CONTRACT
+All methods, paths, resources and timeouts belong in `config/defaults.yaml`. Key sections:
+- `theory.s3_low_level` — ORCA B97-3c OPT/Freq + r2SCAN-3c SP (with CPCM acetone)
+- `theory.s4_high_precision` — Gaussian M062X OPT/Freq + ORCA wB97M-V SP (with CPCM acetone)
+- `step1.protocol: censo_lite` (only allowed protocol)
+- `step1.censo_lite` — CREST, ranking, xTB thermo, deduplication parameters
+- `step2.scan` — PEB backward scan parameters
+
+## V4 OUTPUT CONTRACT
+```
+S0_Mechanism/mechanism.json
+S1_ConfSearch/product/manifest.json
+S2_PEB/manifest.json
+S3_LowLevel/manifest.json
+S4_HighLevel/manifest.json
+pipeline.state
+pipeline.result.json
+```
 
 ## ARCHITECTURE NOTES
-- `ReactionProfileHunter` owns one `CheckpointManager`; step results are hashed and persisted after each step.
-- `run_batch()` uses `ProcessPoolExecutor` — each reaction gets its own `work_dir`.
-- Forming bonds resolution runs *between* S3 and S4 inside `run_pipeline()` — not inside either step.
-- `_resolve_s1_artifacts()` inside orchestrator handles v2.1 vs v3.0/v6.1 directory layout differences.
+- `V4Orchestrator` owns one `V4Checkpoint`; stages are hashed and persisted after each step.
+- The pipeline is dataset-only: `--csv <trusted.csv> --rx-id <id>`. No SMILES-only entry.
+- `--stop-after {s0,s1,s2,s3,s4}` allows partial pipeline runs.
+- Forming bonds are authoritative in the S0 manifest and use 0-based XYZ indices.
+- Each S3/S4 structure record retains input, optimized geometry, output files, energies, status and `usable_for_ml`.
+- Feature extraction and ML training are external — handled by `RPH_Postprocess`.
 
 ## CONVENTIONS
+- Absolute `rph_core...` imports only (no multi-dot relative imports).
 - `pathlib.Path` everywhere; no string path concatenation in core code.
-- `LoggerMixin` or `logging.getLogger(__name__)`; no `print()` in library code.
-- Output directories are idempotent: skip recomputation if prior output exists and checkpoint is valid.
-- All QC subprocess calls through `utils/qc_interface.py` (sandbox + toxic-path enforcement).
+- `logging.getLogger(__name__)`; no `print()` in library code.
+- Route every external QC job through `qc_jobs.py` and the existing QC interfaces.
+- Never add `subprocess.run` to a stage module.
+- Preserve XYZ, output logs and failure diagnostics when a job degrades.
+- A failed S4 job must never delete or replace usable S3 outputs.
+- Every stage writes a versioned manifest and is resumable through `pipeline.state`.
 
 ## ANTI-PATTERNS
-- Direct `subprocess.run` for QC binaries inside steps — bypasses sandbox + logging.
-- Hardcoding layout assumptions outside `orchestrator._resolve_s1_artifacts()` or `path_compat.py`.
-- Treating `rph_output/` or `test_tmpdir/` as source code.
-- Step2 scan: hardcoded scan params instead of `reaction_profiles` config
-- Step2 scan: overwriting S2-derived `forming_bonds`
+- Direct `subprocess.run` for QC binaries inside steps — bypasses `qc_jobs.py` routing.
+- Hardcoding theory methods, paths, or resources in stage code — use `config/defaults.yaml`.
+- Reintroducing V3 orchestration (`orchestrator.py`), `QCTaskRunner`, Berny/QST2/IRC rescue, or S2 pre-optimisation.
+- Reintroducing SMILES-only entry, multi-protocol S1, or S1 DFT OPT/SP.
+- Treating S4 as feature extraction — it is high-precision QC only.
+- Creating `COND_xxx/` condition directories inside S1–S4.
 
-## CODE MAP
+## DEPRECATED V3 CODE (see docs/ARCHIVE_V3.md)
+The following V3 modules remain on disk but are **not called by the V4 orchestrator**. They are preserved transitively (some V4 modules import from them) and will be removed in later P-phases:
+- `utils/qc_task_runner.py`, `utils/oscillation_detector.py`, `utils/checkpoint_manager.py`
+- `steps/anchor/`, `steps/conformer_search/engine.py` (V3 138KB engine, not `censo_lite.py`)
+- `steps/step3_opt/`, `steps/dr_aggregator.py`, `steps/condition_thermo.py`
+- `lewis_acid/`, `scheduling/v3_scheduler.py`
 
-| Symbol | Type | Location | Role |
-|--------|------|----------|------|
-| `ReactionProfileHunter` | Class | `orchestrator.py:86` | Main pipeline; `run_pipeline()`, `run_batch()`, S0-S4 lazy engines |
-| `PipelineResult` | Dataclass | `orchestrator.py:39` | Carries artifacts: smiles, xyz paths, energies, fchk/log, features_csv |
-| `run_pipeline()` | Method | `orchestrator.py:938` | 500+ line S0→S1→S2→S3→S4 flow with checkpoint gates |
-| `_resolve_forming_bonds_for_s2()` | Method | `orchestrator.py:467` | S0/cleaner/config/SMARTS fallback chain for forming bonds |
-| `_resolve_s1_artifacts()` | Method | `orchestrator.py:1748` | v2.1/v3.0/v6.1 layout compatibility resolver |
-| `main()` | Function | `orchestrator.py:2048` | CLI argparse (--smiles, --output, --config, --reaction-type, --skip-steps) |
-| `_run_tasks()` | Function | `orchestrator.py:1991` | Batch dispatcher; iterates dataset rows, calls run_pipeline() |
-| `_resolve_run_config()` | Function | `orchestrator.py:1895` | Merges CLI args + YAML config via _deep_merge_dict |
+Do not extend or depend on these modules for V4 work.

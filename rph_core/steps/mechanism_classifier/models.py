@@ -141,7 +141,7 @@ class SmilesAtomMapping(BaseModel):
     )
     product_smiles_to_map: Dict[int, int] = Field(
         default_factory=dict,
-        description="Product SMILES canonical idx → Map# (0-based idx → 1-based map)",
+        description="Geometry product SMILES canonical idx → Map# (0-based idx → 1-based map)",
     )
     map_to_precursor_smiles: Dict[int, int] = Field(
         default_factory=dict,
@@ -149,7 +149,23 @@ class SmilesAtomMapping(BaseModel):
     )
     map_to_product_smiles: Dict[int, int] = Field(
         default_factory=dict,
-        description="Map# → Product SMILES idx",
+        description="Map# → Geometry product SMILES idx",
+    )
+    map_to_mapped_product_smiles: Dict[int, int] = Field(
+        default_factory=dict,
+        description="Map# → mapped product SMILES idx (diagnostic, legacy)",
+    )
+    mapped_product_smiles_to_map: Dict[int, int] = Field(
+        default_factory=dict,
+        description="Mapped product SMILES idx → Map# (diagnostic, legacy)",
+    )
+    mapped_to_geometry_product_smiles_idx: Dict[int, int] = Field(
+        default_factory=dict,
+        description="Mapped product SMILES idx → geometry product SMILES idx (unmapped)",
+    )
+    geometry_to_mapped_product_smiles_idx: Dict[int, int] = Field(
+        default_factory=dict,
+        description="Geometry product SMILES idx → mapped product SMILES idx",
     )
 
 

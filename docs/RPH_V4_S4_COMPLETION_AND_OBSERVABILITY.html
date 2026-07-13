@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RPH V4 S4 高精度计算与可观测性规范</title>
+  <style>
+    :root {
+      --bg: #f7f9fb;
+      --surface: #ffffff;
+      --text: #1f2937;
+      --text-muted: #6b7280;
+      --border: #e5e7eb;
+      --accent: #2563eb;
+      --accent-soft: #eff6ff;
+      --success: #059669;
+      --success-soft: #d1fae5;
+      --warning: #d97706;
+      --warning-soft: #fef3c7;
+      --danger: #dc2626;
+      --danger-soft: #fee2e2;
+      --code-bg: #111827;
+      --code-text: #e5e7eb;
+      --radius: 8px;
+      --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.05);
+      --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+      --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Monaco, "Courier New", monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      font-family: var(--font-body);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.7;
+      font-size: 15px;
+    }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Layout */
+    .page {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      max-width: 1280px;
+      margin: 0 auto;
+      gap: 32px;
+      padding: 32px 24px;
+    }
+
+    @media (max-width: 960px) {
+      .page { grid-template-columns: 1fr; padding: 20px 16px; }
+      .toc { display: none; }
+    }
+
+    /* Table of contents */
+    .toc {
+      position: sticky;
+      top: 24px;
+      align-self: start;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 20px;
+      max-height: calc(100vh - 48px);
+      overflow-y: auto;
+    }
+
+    .toc-title {
+      font-weight: 700;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .toc ul { list-style: none; margin: 0; padding: 0; }
+    .toc li { margin: 6px 0; }
+    .toc a {
+      display: block;
+      font-size: 13px;
+      color: var(--text-muted);
+      padding: 4px 8px;
+      border-radius: 4px;
+      transition: all 0.15s ease;
+    }
+    .toc a:hover { background: var(--accent-soft); color: var(--accent); text-decoration: none; }
+    .toc .toc-h2 { padding-left: 8px; }
+    .toc .toc-h3 { padding-left: 20px; font-size: 12px; }
+
+    /* Main content */
+    .content {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 40px 48px;
+      min-width: 0;
+    }
+
+    @media (max-width: 640px) {
+      .content { padding: 24px 20px; }
+    }
+
+    header.doc-header {
+      border-bottom: 2px solid var(--accent);
+      padding-bottom: 20px;
+      margin-bottom: 32px;
+    }
+
+    header.doc-header h1 {
+      margin: 0 0 12px 0;
+      font-size: 32px;
+      line-height: 1.25;
+      color: #111827;
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    .meta .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-weight: 600;
+    }
+
+    section {
+      margin-bottom: 40px;
+    }
+
+    h2 {
+      font-size: 24px;
+      margin: 0 0 16px 0;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border);
+      color: #111827;
+    }
+
+    h3 {
+      font-size: 18px;
+      margin: 28px 0 12px 0;
+      color: #1f2937;
+    }
+
+    h4 {
+      font-size: 15px;
+      margin: 20px 0 8px 0;
+      color: #374151;
+    }
+
+    p { margin: 0 0 12px 0; }
+    p:last-child { margin-bottom: 0; }
+
+    ul, ol {
+      margin: 0 0 16px 0;
+      padding-left: 24px;
+    }
+
+    li { margin: 6px 0; }
+
+    strong { color: #111827; font-weight: 600; }
+
+    /* Tables */
+    .table-wrap { overflow-x: auto; margin: 16px 0 24px 0; border-radius: var(--radius); border: 1px solid var(--border); }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--surface);
+      font-size: 14px;
+    }
+    thead th {
+      background: #f3f4f6;
+      font-weight: 600;
+      text-align: left;
+      padding: 12px 16px;
+      border-bottom: 2px solid var(--border);
+      white-space: nowrap;
+    }
+    tbody td {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr:hover { background: #f9fafb; }
+
+    /* Code blocks */
+    pre {
+      background: var(--code-bg);
+      color: var(--code-text);
+      padding: 16px 20px;
+      border-radius: var(--radius);
+      overflow-x: auto;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      line-height: 1.5;
+      margin: 16px 0 20px 0;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.05);
+    }
+    code {
+      font-family: var(--font-mono);
+      font-size: 0.92em;
+      background: #f3f4f6;
+      padding: 2px 5px;
+      border-radius: 4px;
+      color: #c2410c;
+    }
+    pre code {
+      background: transparent;
+      color: inherit;
+      padding: 0;
+      border-radius: 0;
+    }
+
+    .code-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: -10px;
+      display: block;
+    }
+
+    /* Status badges */
+    .status {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .status-complete { background: var(--success-soft); color: var(--success); }
+    .status-ts_frequency_unverified { background: var(--warning-soft); color: var(--warning); }
+    .status-opt_failed_sp_complete { background: #e0e7ff; color: #3730a3; }
+    .status-degraded { background: var(--warning-soft); color: var(--warning); }
+    .status-failed { background: var(--danger-soft); color: var(--danger); }
+    .status-running { background: var(--accent-soft); color: var(--accent); }
+    .status-true { background: var(--success-soft); color: var(--success); }
+    .status-false { background: var(--danger-soft); color: var(--danger); }
+
+    /* Blockquote / callout */
+    .callout {
+      background: var(--accent-soft);
+      border-left: 4px solid var(--accent);
+      padding: 14px 18px;
+      border-radius: 0 var(--radius) var(--radius) 0;
+      margin: 16px 0 20px 0;
+      font-size: 14px;
+    }
+
+    .callout.warn {
+      background: var(--warning-soft);
+      border-left-color: var(--warning);
+    }
+
+    .callout.danger {
+      background: var(--danger-soft);
+      border-left-color: var(--danger);
+    }
+
+    /* Back to top */
+    .back-to-top {
+      display: inline-block;
+      margin-top: 32px;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+    .back-to-top:hover { color: var(--accent); }
+
+    /* Footer */
+    footer {
+      margin-top: 48px;
+      padding-top: 24px;
+      border-top: 1px solid var(--border);
+      font-size: 13px;
+      color: var(--text-muted);
+      text-align: center;
+    }
+
+    /* Selection color */
+    ::selection { background: #dbeafe; }
+  </style>
+</head>
+<body>
+  <a id="top"></a>
+  <div class="page">
+    <nav class="toc" aria-label="Table of contents">
+      <div class="toc-title">目录</div>
+      <ul>
+        <li class="toc-h2"><a href="#sec-1">1. S4 的职责边界</a></li>
+        <li class="toc-h2"><a href="#sec-2">2. 固定计算协议</a></li>
+        <li class="toc-h3"><a href="#sec-2-1">溶剂约束</a></li>
+        <li class="toc-h2"><a href="#sec-3">3. S3 → S4 结构选择与溯源</a></li>
+        <li class="toc-h2"><a href="#sec-4">4. S4 状态语义与 ML 使用规则</a></li>
+        <li class="toc-h2"><a href="#sec-5">5. 能量比较规则</a></li>
+        <li class="toc-h2"><a href="#sec-6">6. 输出契约</a></li>
+        <li class="toc-h3"><a href="#sec-6-1">status.json</a></li>
+        <li class="toc-h3"><a href="#sec-6-2">events.jsonl</a></li>
+        <li class="toc-h2"><a href="#sec-7">7. WSL 实时可视化</a></li>
+        <li class="toc-h2"><a href="#sec-8">8. 与后续 branch 架构的衔接</a></li>
+        <li class="toc-h2"><a href="#sec-9">9. 验收标准</a></li>
+        <li class="toc-h2"><a href="#sec-10">10. 后续增强</a></li>
+      </ul>
+    </nav>
+
+    <main class="content">
+      <header class="doc-header">
+        <h1>RPH V4 S4 高精度计算与可观测性规范</h1>
+        <div class="meta">
+          <span class="badge">状态：已实施基础协议</span>
+          <span class="badge">范围：HighLevelEngine</span>
+        </div>
+      </header>
+
+      <p><strong>状态：</strong>已实施基础协议、S4 结构级日志与 WSL 终端查看器；branch-aware 输入扩展与高精度 IRC 为后续工作。</p>
+      <p><strong>适用范围：</strong>RPH V4 的 S4 <code>HighLevelEngine</code>，不适用于已经迁出的 <code>RPH_Postprocess</code> 特征提取与 ML 训练。</p>
+
+      <section id="sec-1">
+        <h2>1. S4 的职责边界</h2>
+        <p>S4 是所有候选结构的最终高精度几何与电子能层，不是“只重算一个 TS”的补丁步骤。它的设计目标是：</p>
+        <ol>
+          <li>为每个来自 S3 的结构建立独立的高精度 OPT、TS Freq（仅 TS）和 SP 记录；</li>
+          <li>使高精度失败不抹掉 S3 已得到的低级别结构与能量；</li>
+          <li>输出能被后处理/ML 安全消费的结构级状态、方法、溶剂与溯源；</li>
+          <li>通过文件化事件流，使长时间 WSL 任务在终端断开、重新连接后仍可被准确观察。</li>
+        </ol>
+        <p>S4 不承担以下职责：</p>
+        <ul>
+          <li>不在 S4 重新识别反应机理、forming bonds 或立体化学；</li>
+          <li>不将某个分支自动判为“唯一正确路径”；</li>
+          <li>不以经验规则把真实 Lewis acid 的能量修正写入反应能垒；</li>
+          <li>不删除 S3 未收敛或 S4 未收敛的样本。</li>
+        </ul>
+      </section>
+
+      <section id="sec-2">
+        <h2>2. 固定计算协议</h2>
+        <p>所有理论级别只由 <code>config/defaults.yaml</code> 给出，代码不得硬编码方法或溶剂。</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>结构角色</th>
+                <th>高精度 OPT</th>
+                <th>高精度 Freq</th>
+                <th>高精度 SP</th>
+                <th>目的</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>product / precursor / intermediate</td>
+                <td>Gaussian M062X/def2-SVP, CPCM(acetone)</td>
+                <td>默认不做</td>
+                <td>ORCA wB97M-V/def2-TZVPP, CPCM(acetone)</td>
+                <td>高精度极小值几何与电子能</td>
+              </tr>
+              <tr>
+                <td>TS</td>
+                <td>Gaussian M062X/def2-SVP <code>Opt=(TS,CalcFC,NoEigenTest)</code>, CPCM(acetone)</td>
+                <td>Gaussian M062X/def2-SVP, CPCM(acetone), 独立 <code>Freq</code> 作业</td>
+                <td>ORCA wB97M-V/def2-TZVPP, CPCM(acetone)</td>
+                <td>高精度 TS 几何、虚频计数与电子能</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>S4 的 TS Freq 必须独立于 OptTS 运行，输入为 S4 优化后的几何。这避免将频率 Hessian 固定在优化前结构，也使失败能够单独记录。</p>
+
+        <h3 id="sec-2-1">溶剂约束</h3>
+        <p>S4 的 Gaussian 与 ORCA 均要求显式 CPCM。对 Gaussian，实际输入路由必须包含：</p>
+        <pre><code>SCRF=(CPCM,Solvent=acetone)</code></pre>
+        <p>仅在 YAML 中写 <code>solvent: acetone</code> 而没有将其渲染进 Gaussian route，等价于气相计算，不能接受。S4 不默认使用 SMD；若未来要变更模型，必须同时修改 YAML、计算签名、基准测试与 manifest 方法记录。</p>
+      </section>
+
+      <section id="sec-3">
+        <h2>3. S3 → S4 结构选择与溯源</h2>
+        <p>S4 对每个结构使用以下几何优先级：</p>
+        <pre><code>S3 opt_xyz  →  S3 input_xyz fallback  →  fail-fast（无 XYZ）</code></pre>
+        <p><code>S3_fallback</code> 是显式降级状态，不代表高精度优化成功。每个 S4 manifest 条目必须保留：</p>
+        <pre><code>{
+  "id": "ts_peb_peak",
+  "kind": "ts",
+  "input_source": "S3_OPT",
+  "source_s3": {
+    "structure_status": "complete",
+    "opt_status": "complete",
+    "sp_status": "complete",
+    "frequency_status": "complete",
+    "ts_frequency_valid": true,
+    "manifest": "/tmp/rph4_rx_1/S3_LowLevel/manifest.json"
+  }
+}</code></pre>
+        <p>后续 branch 重构完成后，条目还必须包含 <code>reaction_id</code>、<code>condition_id</code>、<code>branch_id</code>、<code>pathway_id</code>、<code>role</code>、<code>parent_structure_id</code> 与原子映射空间。S4 不得通过目录名猜测这些信息。</p>
+      </section>
+
+      <section id="sec-4">
+        <h2>4. S4 状态语义与 ML 使用规则</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th><code>status</code></th>
+                <th>定义</th>
+                <th><code>usable_for_ml</code></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><span class="status status-complete">complete</span></td>
+                <td>OPT 和 SP 成功；若为 TS，Freq 也通过单一显著虚频门槛</td>
+                <td><span class="status status-true">true</span></td>
+              </tr>
+              <tr>
+                <td><span class="status status-ts_frequency_unverified">ts_frequency_unverified</span></td>
+                <td>OPT、SP 成功，但 TS Freq 失败或虚频数不正确</td>
+                <td><span class="status status-true">true</span>，但必须带 TS 质量标签</td>
+              </tr>
+              <tr>
+                <td><span class="status status-opt_failed_sp_complete">opt_failed_sp_complete</span></td>
+                <td>OPT 失败，但从输入/fallback 几何完成 SP</td>
+                <td><span class="status status-true">true</span>，仅作为降级电子结构样本</td>
+              </tr>
+              <tr>
+                <td><span class="status status-degraded">degraded</span></td>
+                <td>OPT 或 SP 中至少一个失败，且未满足上一行</td>
+                <td><span class="status status-false">false</span></td>
+              </tr>
+              <tr>
+                <td><span class="status status-failed">failed</span></td>
+                <td>作业级异常、缺输入或未产生可用 SP</td>
+                <td><span class="status status-false">false</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p><code>usable_for_ml=true</code> 的含义只是“存在可用的该级别 SP”，并不表示它是已验证反应路径。下游训练必须同时使用：</p>
+        <ul>
+          <li><code>s4_status</code>；</li>
+          <li><code>input_source</code>；</li>
+          <li><code>source_s3.ts_frequency_valid</code>；</li>
+          <li>S4 <code>ts_frequency_valid</code>；</li>
+          <li>后续 branch/condition 身份。</li>
+        </ul>
+        <p>当前 S4 Freq 的自动门槛是“恰好一个 <code>&lt;= -50 cm⁻¹</code> 的虚频”。它验证的是虚频计数，<strong>尚不等价于反应坐标位移验证或 IRC 验证</strong>。这两个字段必须分别建模，不能用一个 <code>ts_valid</code> 布尔值混在一起。</p>
+      </section>
+
+      <section id="sec-5">
+        <h2>5. 能量比较规则</h2>
+        <p>只有以下身份相同的结构能量允许直接比较：</p>
+        <pre><code>同一 reaction_id
++ 同一 condition_id
++ 同一 branch_id / pathway_id
++ 同一 charge / multiplicity
++ 同一方法、基组、溶剂模型
++ 相同能量定义（SP electronic energy 或含热校正自由能）</code></pre>
+        <p>S4 的 wB97M-V SP 是电子能。除非显式引入同级别热校正，不得把它命名为 <code>ΔG‡</code>。S3 的热化学、S4 的电子能和实验选择性标签应作为不同字段进入后处理。</p>
+      </section>
+
+      <section id="sec-6">
+        <h2>6. 输出契约</h2>
+        <p>每次真正执行 S4 后，<code>S4_HighLevel/</code> 必须包含：</p>
+        <pre><code>S4_HighLevel/
+├── status.json       # 当前完整状态快照；原子替换写入
+├── events.jsonl      # 追加式事件流；一行一个 JSON 事件
+├── s4.log            # 人类可读的同源事件日志
+├── manifest.json     # S4 最终结构结果与方法快照
+└── &lt;structure_id&gt;/
+    ├── opt/
+    ├── freq/         # 仅 TS，或在配置明确要求时
+    └── sp/</code></pre>
+        <p>运行根目录额外产生 <code>rph_v4.log</code>；可用 CLI 的 <code>--log-file</code> 覆盖。</p>
+
+        <h3 id="sec-6-1"><code>status.json</code></h3>
+        <p><code>status.json</code> 不是最终结果文件，而是 WSL 查看器读取的实时快照。必须有：</p>
+        <ul>
+          <li>总体 <code>status</code>：<span class="status status-running">running</span>、<span class="status status-complete">completed</span> 或 <span class="status status-degraded">completed_with_failures</span>；</li>
+          <li><code>started_at</code>、<code>updated_at</code>、<code>finished_at</code>，统一 ISO-8601 UTC；</li>
+          <li><code>summary.total/pending/running/finished/failed/usable_for_ml</code>；</li>
+          <li>每个结构的 <code>current_task</code>、各任务状态、错误、SP 能量与 TS Freq 结果。</li>
+        </ul>
+        <p>写入采用临时文件后原子替换，查看器不会读到半截 JSON。</p>
+
+        <h3 id="sec-6-2"><code>events.jsonl</code></h3>
+        <p>事件至少覆盖：</p>
+        <pre><code>stage_started / stage_finished
+structure_started / structure_finished / structure_failed
+optimization_started / optimization_finished
+frequency_started / frequency_finished
+frequency_skipped
+single_point_started / single_point_finished</code></pre>
+        <p>每个任务事件记录 <code>structure_id</code>、engine、method、solvent、solvent_model、完成状态、输出文件、能量和错误。该文件是排查 ORCA/Gaussian 失败、重建时间线和后续 UI 的唯一增量数据源。</p>
+      </section>
+
+      <section id="sec-7">
+        <h2>7. WSL 实时可视化</h2>
+        <p>第一终端启动计算：</p>
+        <span class="code-label">Bash</span>
+        <pre><code>python bin/rph_run \
+  --csv "$RPH_ROOT/data/reaxys_cleaned.csv" \
+  --rx-id 1 \
+  --output /tmp/rph4_rx_1 \
+  --config "$RPH_ROOT/config/defaults.yaml" \
+  --stop-after s4</code></pre>
+        <p>第二终端查看动态 S4 面板：</p>
+        <span class="code-label">Bash</span>
+        <pre><code>python bin/rph_watch \
+  --output /tmp/rph4_rx_1 \
+  --watch \
+  --interval 3</code></pre>
+        <p>该面板显示总体完成数、失败数、当前结构、当前 QC 子任务和 OPT/Freq/SP 状态。它不读取正在写入的 ORCA/Gaussian 原始输出，因此不会与计算进程争抢文件。</p>
+        <p>需要原始事件时间线时：</p>
+        <span class="code-label">Bash</span>
+        <pre><code>tail -F /tmp/rph4_rx_1/S4_HighLevel/s4.log
+tail -F /tmp/rph4_rx_1/rph_v4.log</code></pre>
+        <p>任务结束后，可打印一次静态摘要：</p>
+        <span class="code-label">Bash</span>
+        <pre><code>python bin/rph_watch --output /tmp/rph4_rx_1 --no-color</code></pre>
+      </section>
+
+      <section id="sec-8">
+        <h2>8. 与后续 branch 架构的衔接</h2>
+        <p>当前实现的 S4 日志协议已经按“多个独立结构”设计，但现有 V4 编排器尚未恢复完整 DR/condition/precursor branch 拓扑。完成 branch 重构时，S4 输入应扩展为：</p>
+        <pre><code>RXN/&lt;reaction_id&gt;/
+  branches/&lt;branch_id&gt;/S4_HighLevel/
+  conditions/&lt;condition_id&gt;/branches/&lt;branch_id&gt;/S4_HighLevel/</code></pre>
+        <p>每个 branch 独立产生自己的 <code>status.json</code>、<code>events.jsonl</code> 和 checkpoint。顶层反应状态只汇总子 branch，不能将不同 branch 的能量、失败或缓存混写到同一个结构条目。</p>
+        <p>每个 branch 的 S4 最低任务数为：</p>
+        <pre><code>2 × (N_product + N_precursor + N_intermediate)
++ 3 × N_TS</code></pre>
+        <p>其中 TS 的三项为 OptTS、Freq、SP。这个公式将取代当前扁平 V4 中遗漏 precursor 的任务清单。</p>
+      </section>
+
+      <section id="sec-9">
+        <h2>9. 验收标准</h2>
+        <p>一次 S4 代码变更只有同时满足以下条件才算完成：</p>
+        <ol>
+          <li>Gaussian S4 输入中可见 <code>SCRF=(CPCM,Solvent=acetone)</code>；</li>
+          <li>ORCA S4 SP manifest 记录 CPCM；</li>
+          <li>TS 在高精度 OptTS 后确实出现独立 <code>freq/</code> 作业和频率数组；</li>
+          <li>单个结构失败不会阻止下一个结构继续执行；</li>
+          <li><code>status.json</code> 可在作业运行期间持续读取；</li>
+          <li><code>events.jsonl</code> 包含任务开始与结束事件；</li>
+          <li><code>bin/rph_watch</code> 可在无 Rich、无 jq 的原生 WSL 环境工作；</li>
+          <li>配置或 S3 输入发生变化时，S4 checkpoint 签名失效并重跑；</li>
+          <li>S4 manifest 保留 S3 溯源与降级输入来源；</li>
+          <li>回归测试覆盖 Gaussian CPCM route、Gaussian Freq、S4 日志和查看器。</li>
+        </ol>
+      </section>
+
+      <section id="sec-10">
+        <h2>10. 后续增强（不在当前自动化中隐式开启）</h2>
+        <ul>
+          <li>高精度 TS 正常模位移与 forming-bond 投影验证；</li>
+          <li>仅对通过 S3/S4 门槛的 TS 启动高精度 IRC；</li>
+          <li>分支级并发调度与资源预算；</li>
+          <li>将 <code>events.jsonl</code> 接入真正的 GUI/Web UI；</li>
+          <li>由 RPH_Postprocess 消费 S4 manifest，生成 branch-aware 特征与 ML 数据集。</li>
+        </ul>
+        <div class="callout">
+          这些功能必须建立在本文件的 manifest、状态与溯源契约之上，不能回到解析临时 stdout 或猜测目录结构的旧实现。
+        </div>
+      </section>
+
+      <a class="back-to-top" href="#top">↑ 回到顶部</a>
+
+      <footer>
+        来源：docs/RPH_V4_S4_COMPLETION_AND_OBSERVABILITY.md · ReactionProfileHunter V4
+      </footer>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,62 +1,84 @@
 # rph_core/steps/conformer_search/AGENTS.md
 
 ## OVERVIEW
-S1 Unified Conformer Engine (UCE) v3.1: two-stage xTB conformer search (GFN0 coarse → GFN2 fine) followed by DFT OPT/SP coupling. Backward-compatible single-stage mode also supported.
+V4 S1 conformer search uses **CENSO-LITE** protocol only: CREST/GFN2 conformer
+sampling → B97-3c single-point ranking → xTB mRRHO correction. No DFT OPT or
+DFT FREQ is performed in S1.
 
-## TWO-STAGE WORKFLOW (default, v3.1)
-1. **Stage 1**: GFN0-xTB rapid sampling → ISOSTAT clustering → `stage1_gfn0/cluster/cluster.xyz`
-2. **Stage 2**: GFN2-xTB fine optimization of stage-1 cluster → ISOSTAT clustering → `stage2_gfn2/cluster/cluster.xyz`
-3. **DFT**: OPT+SP on stage-2 ensemble → `finalDFT/` (Gaussian or ORCA)
+> **Note:** This directory also contains V3-era code (`engine.py`, `funnel.py`,
+> `pipeline/`, `protocols.py`, `candidates.py`, `state_manager.py`) that is
+> **not called by V4**. See `docs/ARCHIVE_V3.md`. Do not extend V3 modules.
 
-**Single-stage mode** (set `two_stage_enabled: false`): direct GFN2-xTB → cluster → DFT.
+## V4 FILES (active)
 
-## WHERE TO LOOK
-- Engine: `engine.py` → `ConformerEngine`
-- QC facade: `rph_core/utils/qc_interface.py` (xTB/CREST/Gaussian factory)
-- OPT/SP loop: `rph_core/utils/qc_task_runner.py`
-- Geometry/log parsing: `rph_core/utils/geometry_tools.py`
+| File | Role |
+|------|------|
+| `censo_lite.py` | `CensoLiteEngine` — V4 S1 orchestrator: embed → CREST → SP → mRRHO → dedup → manifest |
+| `censo_lite_runtime.py` | Runtime primitives: `embed()`, `crest_search()`, `split_ensemble()`, `extract_energy()`, `run_sp()`, `run_mrrho()` |
+| `torsion_signature.py` | `TorsionSignature` — rotatable-bond dihedral binning for dedup keys |
+| `deduplicator.py` | `TorsionAwareDeduplicator` — torsion signature + heavy-atom RMSD dedup |
+| `xtb_thermo.py` | `run_xtb_enso()` — xTB `--bhess --enso` mRRHO thermochemistry |
 
-## CONFIG SURFACES
-| Key | Type | Default | Notes |
-|-----|------|---------|-------|
-| `step1.conformer_search.two_stage_enabled` | bool | `true` | Master switch |
-| `step1.conformer_search.stage1_gfn0.gfn_level` | int | `0` | 0=GFN0 |
-| `step1.conformer_search.stage1_gfn0.energy_window_kcal` | float | `10.0` | Stage-1 energy window |
-| `step1.conformer_search.stage2_gfn2.gfn_level` | int | `2` | 2=GFN2 |
-| `step1.conformer_search.stage2_gfn2.energy_window_kcal` | float | `3.0` | Stage-2 energy window |
-| `step1.crest` | dict | — | Single-stage fallback config |
-| `executables.isostat`, `.shermo`, `.gaussian.wrapper_path` | str | — | Binary paths |
+## V4 PROTOCOL (CENSO-LITE)
 
-## DIRECTORY LAYOUT
-
-**Two-stage mode:**
 ```
-S1_ConfGeneration/<molecule_name>/
-├── crest/
-│   └── ensemble.xyz
-├── xtb/
-│   ├── stage1_gfn0/
-│   │   ├── crest_conformers.xyz
-│   │   └── cluster/
-│   │       ├── cluster.xyz        # input to Stage 2
-│   │       └── isostat.log
-│   ├── stage2_gfn2/
-│   │   ├── crest_ensemble.xyz
-│   │   └── cluster/
-│   │       └── cluster.xyz        # final ensemble → DFT
-├── cluster/                       # single-stage clustering output
-├── prescan/                       # full-protocol fast-SP pre-screening
-├── fastsp/                        # full/lite fast-SP screening
-└── finalDFT/                      # DFT OPT/SP outputs
+RDKit ETKDGv3 embed → initial.xyz
+    ↓
+CREST GFN2 conformer search → crest_conformers.xyz
+    ↓
+Split ensemble → candidates_raw/conf_####.xyz
+    ↓
+Per candidate: ORCA B97-3c SP + xTB mRRHO → s1_score = E_SP + G_mRRHO
+    ↓
+Torsion-aware dedup (signature equivalence + RMSD ≤ 0.25 Å)
+    ↓
+Energy window filter (default 6.0 kcal/mol)
+    ↓
+Sort by s1_score → manifest.json with `selected` = lowest-energy candidate
 ```
 
-**Single-stage mode:** `crest/crest_conformers.xyz` → `cluster/cluster.xyz` → `finalDFT/`
+**No DFT OPT. No DFT FREQ.** S1 only does conformer search + cheap SP ranking.
 
-## GOTCHAS
-- `engine.py` uses `subprocess.run(..., shell=True, cwd=...)` — path/escaping sensitive; prefer `utils` sandbox/toxic-path helpers when touching those calls.
-- GFN0 is ~10× faster than GFN2 but lower accuracy; two-stage strategy covers conformer space cheaply then refines.
-- Two-stage default; single-stage only for backward compatibility with older configs.
+## CONFIG
+
+| Key | Default | Notes |
+|-----|---------|-------|
+| `step1.protocol` | `censo_lite` | Only allowed protocol |
+| `step1.allowed_protocols` | `[censo_lite]` | V4 gate |
+| `step1.censo_lite.energy_window_kcal` | `6.0` | Energy window for valid candidates |
+| `step1.censo_lite.crest.*` | — | CREST search parameters |
+| `step1.censo_lite.ranking.*` | — | B97-3c SP ranking parameters |
+| `step1.censo_lite.xtb_thermo.*` | — | xTB mRRHO parameters |
+| `step1.censo_lite.deduplication.*` | — | Torsion + RMSD thresholds |
+| `step1.censo_lite.retention.*` | — | Candidate retention policy |
+
+## OUTPUT
+
+```
+S1_ConfSearch/<molecule>/
+├── manifest.json          # schema_version: s1_censo_lite_v1
+├── initial.xyz            # RDKit embed
+├── crest/                 # CREST outputs
+├── candidates_raw/        # split conformers
+└── candidates/            # ranked + deduplicated conf_####.xyz
+```
+
+The `manifest.json` `selected` field names the lowest-energy candidate. The V4
+orchestrator resolves this to an XYZ path for S2 PEB consumption.
+
+## V3 FILES (deprecated — see docs/ARCHIVE_V3.md)
+
+| File | Status |
+|------|--------|
+| `engine.py` (138 KB) | V3 `ConformerEngine` — two-stage UCE, NOT used by V4 |
+| `funnel.py` | V3 protocol funnel |
+| `pipeline/` | V3 pipeline stages (incl. `final_opt_sp.py` — V3 DFT) |
+| `protocols.py` | V3 multi-protocol definitions (ext/default/full/lite/zero) |
+| `candidates.py` | V3 candidate management |
+| `state_manager.py` | V3 state manager |
 
 ## ANTI-PATTERNS
-- Hardcoding `g16`/`orca`/`xtb` binary paths inside engine — use `config['executables']` or utils lookup.
-- Using `rph_core_backup_20260115/` behavior as a reference for new logic.
+- Reintroducing multi-protocol S1 (`ext`/`default`/`full`/`lite`/`zero`) — V4 is CENSO-LITE only.
+- Adding DFT OPT or DFT FREQ to S1 — forbidden by V4 theory contract.
+- Importing from `engine.py`, `funnel.py`, or `protocols.py` in V4 code.
+- Hardcoding binary paths — use `config['executables']`.

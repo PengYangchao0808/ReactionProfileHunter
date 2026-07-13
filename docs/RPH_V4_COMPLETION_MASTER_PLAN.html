@@ -1,0 +1,1283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RPH V4 完整化改造主计划（最新版）</title>
+  <style>
+    :root {
+      --bg: #f4f6f8;
+      --surface: #ffffff;
+      --text: #1f2937;
+      --text-muted: #6b7280;
+      --border: #e5e7eb;
+      --accent: #2563eb;
+      --accent-soft: #eff6ff;
+      --success: #059669;
+      --success-soft: #d1fae5;
+      --warning: #d97706;
+      --warning-soft: #fef3c7;
+      --danger: #dc2626;
+      --danger-soft: #fee2e2;
+      --purple: #7c3aed;
+      --purple-soft: #ede9fe;
+      --teal: #0d9488;
+      --teal-soft: #ccfbf1;
+      --code-bg: #0f172a;
+      --code-text: #e2e8f0;
+      --radius: 10px;
+      --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 4px 16px rgba(0,0,0,0.06);
+      --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+      --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Monaco, "Courier New", monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      font-family: var(--font-body);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.7;
+      font-size: 15px;
+    }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .page {
+      display: grid;
+      grid-template-columns: 300px minmax(0, 1fr);
+      max-width: 1400px;
+      margin: 0 auto;
+      gap: 32px;
+      padding: 32px 24px;
+    }
+
+    @media (max-width: 1024px) {
+      .page { grid-template-columns: 1fr; padding: 20px 16px; }
+      .toc { display: none; }
+    }
+
+    .toc {
+      position: sticky;
+      top: 24px;
+      align-self: start;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 22px;
+      max-height: calc(100vh - 48px);
+      overflow-y: auto;
+    }
+
+    .toc-title {
+      font-weight: 700;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .toc ul { list-style: none; margin: 0; padding: 0; }
+    .toc li { margin: 5px 0; }
+    .toc a {
+      display: block;
+      font-size: 13px;
+      color: var(--text-muted);
+      padding: 4px 8px;
+      border-radius: 4px;
+      transition: all 0.15s ease;
+    }
+    .toc a:hover { background: var(--accent-soft); color: var(--accent); text-decoration: none; }
+    .toc .toc-h2 { padding-left: 8px; }
+    .toc .toc-h3 { padding-left: 20px; font-size: 12px; }
+    .toc .toc-phase { padding-left: 20px; font-size: 12px; }
+
+    .content {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 44px 52px;
+      min-width: 0;
+    }
+
+    @media (max-width: 640px) {
+      .content { padding: 26px 20px; }
+    }
+
+    .hero {
+      background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%);
+      color: white;
+      border-radius: var(--radius);
+      padding: 32px 36px;
+      margin-bottom: 36px;
+    }
+    .hero h1 { margin: 0 0 14px 0; font-size: 32px; line-height: 1.2; }
+    .hero p { margin: 0; color: rgba(255,255,255,0.85); font-size: 15px; }
+    .hero .badges { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+    .hero .badge {
+      background: rgba(255,255,255,0.15);
+      color: white;
+      padding: 5px 12px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    section { margin-bottom: 44px; }
+
+    h2 {
+      font-size: 25px;
+      margin: 0 0 18px 0;
+      padding-bottom: 12px;
+      border-bottom: 2px solid var(--border);
+      color: #111827;
+    }
+    h3 { font-size: 19px; margin: 30px 0 14px 0; color: #1f2937; }
+    h4 { font-size: 16px; margin: 22px 0 10px 0; color: #374151; }
+
+    p { margin: 0 0 12px 0; }
+    p:last-child { margin-bottom: 0; }
+
+    ul, ol { margin: 0 0 16px 0; padding-left: 24px; }
+    li { margin: 6px 0; }
+    strong { color: #111827; font-weight: 600; }
+
+    hr { border: none; border-top: 1px solid var(--border); margin: 32px 0; }
+
+    .table-wrap { overflow-x: auto; margin: 16px 0 24px 0; border-radius: var(--radius); border: 1px solid var(--border); }
+    table { width: 100%; border-collapse: collapse; background: var(--surface); font-size: 14px; }
+    thead th { background: #f3f4f6; font-weight: 600; text-align: left; padding: 12px 16px; border-bottom: 2px solid var(--border); white-space: nowrap; }
+    tbody td { padding: 12px 16px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr:hover { background: #f9fafb; }
+
+    pre {
+      background: var(--code-bg);
+      color: var(--code-text);
+      padding: 18px 22px;
+      border-radius: var(--radius);
+      overflow-x: auto;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      line-height: 1.55;
+      margin: 16px 0 22px 0;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.06);
+    }
+    code { font-family: var(--font-mono); font-size: 0.92em; background: #f3f4f6; padding: 2px 5px; border-radius: 4px; color: #c2410c; }
+    pre code { background: transparent; color: inherit; padding: 0; border-radius: 0; }
+
+    .code-label { font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: -10px; display: block; }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .badge-p0 { background: var(--danger-soft); color: var(--danger); }
+    .badge-p1 { background: var(--purple-soft); color: var(--purple); }
+    .badge-p2 { background: var(--warning-soft); color: var(--warning); }
+    .badge-p3 { background: var(--accent-soft); color: var(--accent); }
+    .badge-p4 { background: var(--teal-soft); color: var(--teal); }
+    .badge-p5 { background: #fce7f3; color: #be185d; }
+    .badge-p6 { background: var(--success-soft); color: var(--success); }
+    .badge-p7 { background: #e0e7ff; color: #3730a3; }
+    .badge-p8 { background: var(--warning-soft); color: var(--warning); }
+    .badge-p9 { background: var(--success-soft); color: var(--success); }
+    .badge-done { background: var(--success-soft); color: var(--success); }
+    .badge-pending { background: var(--warning-soft); color: var(--warning); }
+    .badge-runtime { background: #e0e7ff; color: #3730a3; }
+
+    .dashboard {
+      background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%);
+      border: 2px solid var(--success);
+      border-radius: var(--radius);
+      padding: 24px 28px;
+      margin-bottom: 36px;
+    }
+    .dashboard h2 { border: none; margin-bottom: 16px; color: var(--success); }
+    .dashboard-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 12px;
+      margin: 16px 0;
+    }
+    .stat-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px;
+      text-align: center;
+    }
+    .stat-card .stat-num { font-size: 28px; font-weight: 700; color: var(--success); }
+    .stat-card .stat-label { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+    .phase-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .phase-status.done { background: var(--success-soft); color: var(--success); }
+    .phase-status.runtime { background: #e0e7ff; color: #3730a3; }
+
+    .impl-summary {
+      margin-top: 14px;
+      padding: 12px 16px;
+      background: #f0fdf4;
+      border: 1px solid #bbf7d0;
+      border-radius: 8px;
+      font-size: 13px;
+    }
+    .impl-summary code { background: #dcfce7; color: #166534; }
+    .impl-summary ul { margin: 6px 0 0 0; }
+    .impl-summary li { margin: 3px 0; }
+
+    .phase-card {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 22px 24px;
+      margin: 18px 0 24px 0;
+      background: #fafafa;
+      box-shadow: var(--shadow);
+    }
+    .phase-card .phase-header { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+    .phase-card .phase-title { font-size: 20px; font-weight: 700; margin: 0; color: #111827; }
+    .phase-card .phase-purpose { color: var(--text-muted); font-size: 14px; margin-bottom: 14px; }
+    .phase-card .delta {
+      margin: 14px 0;
+      padding: 10px 14px;
+      background: #fff7ed;
+      border-left: 4px solid var(--warning);
+      border-radius: 0 var(--radius) var(--radius) 0;
+      font-size: 13px;
+    }
+
+    .flowchart {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: center;
+      gap: 8px 4px;
+      margin: 24px 0;
+      padding: 20px;
+      background: #f8fafc;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+    .flow-node {
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      text-align: center;
+      max-width: 180px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+    }
+    .flow-node.data { background: #dbeafe; color: #1e40af; }
+    .flow-node.stage { background: #d1fae5; color: #065f46; }
+    .flow-node.context { background: #fef3c7; color: #92400e; }
+    .flow-node.variant { background: #ede9fe; color: #5b21b6; }
+    .flow-node.output { background: #fce7f3; color: #9d174d; }
+    .flow-arrow { color: var(--text-muted); font-size: 18px; font-weight: 700; }
+    .flow-split { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+
+    .tree {
+      background: var(--code-bg);
+      color: var(--code-text);
+      padding: 18px 22px;
+      border-radius: var(--radius);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      line-height: 1.6;
+      overflow-x: auto;
+      margin: 16px 0 22px 0;
+    }
+    .tree .comment { color: #6b7280; font-style: italic; }
+    .tree .dir { color: #60a5fa; }
+    .tree .file { color: #a5b4fc; }
+
+    .callout {
+      background: var(--accent-soft);
+      border-left: 4px solid var(--accent);
+      padding: 14px 18px;
+      border-radius: 0 var(--radius) var(--radius) 0;
+      margin: 16px 0 20px 0;
+      font-size: 14px;
+    }
+    .callout.warn { background: var(--warning-soft); border-left-color: var(--warning); }
+    .callout.danger { background: var(--danger-soft); border-left-color: var(--danger); }
+    .callout.success { background: var(--success-soft); border-left-color: var(--success); }
+
+    .priority-list { display: flex; flex-direction: column; gap: 10px; margin: 16px 0 24px 0; }
+    .priority-item { display: flex; align-items: flex-start; gap: 12px; padding: 12px 14px; background: #f9fafb; border: 1px solid var(--border); border-radius: 8px; }
+    .priority-item .num { font-weight: 700; color: var(--accent); min-width: 24px; }
+
+    .back-to-top { display: inline-block; margin-top: 32px; font-size: 13px; color: var(--text-muted); }
+    .back-to-top:hover { color: var(--accent); }
+
+    footer { margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--border); font-size: 13px; color: var(--text-muted); text-align: center; }
+
+    ::selection { background: #dbeafe; }
+  </style>
+</head>
+<body>
+  <a id="top"></a>
+  <div class="page">
+    <nav class="toc" aria-label="Table of contents">
+      <div class="toc-title">目录</div>
+      <ul>
+        <li class="toc-h2"><a href="#dashboard">实施完成总览</a></li>
+        <li class="toc-h2"><a href="#sec-1">1. 执行结论</a></li>
+        <li class="toc-h2"><a href="#sec-2">2. V3 与 V4 差异清单</a></li>
+        <li class="toc-h3"><a href="#sec-2-1">有意删除的 V3 逻辑</a></li>
+        <li class="toc-h3"><a href="#sec-2-2">必须恢复的 V3 化学能力</a></li>
+        <li class="toc-h2"><a href="#sec-3">3. 最终架构与数据模型</a></li>
+        <li class="toc-h3"><a href="#sec-3-1">运行、反应与结构变体上下文</a></li>
+        <li class="toc-h3"><a href="#sec-3-2">结构身份</a></li>
+        <li class="toc-h3"><a href="#sec-3-3">目录契约：阶段优先</a></li>
+        <li class="toc-h2"><a href="#sec-4">4. 目标计算协议</a></li>
+        <li class="toc-h2"><a href="#sec-5">5. 分阶段实施计划</a></li>
+        <li class="toc-phase"><a href="#p0">P0 仓库收口</a></li>
+        <li class="toc-phase"><a href="#p1">P1 S0 重建</a></li>
+        <li class="toc-phase"><a href="#p2">P2 variant-aware 编排</a></li>
+        <li class="toc-phase"><a href="#p3">P3 S1 CENSO-LITE</a></li>
+        <li class="toc-phase"><a href="#p4">P4 S2 selected-only PEB</a></li>
+        <li class="toc-phase"><a href="#p5">P5 S3/S4 完整变体集</a></li>
+        <li class="toc-phase"><a href="#p6">P6 TS 质量闭环</a></li>
+        <li class="toc-phase"><a href="#p7">P7 独立条件与 Lewis acid</a></li>
+        <li class="toc-phase"><a href="#p8">P8 日志与 UI</a></li>
+        <li class="toc-phase"><a href="#p9">P9 测试与发布</a></li>
+        <li class="toc-h2"><a href="#sec-6">6. 配置规范</a></li>
+        <li class="toc-h2"><a href="#sec-7">7. 迁移策略</a></li>
+        <li class="toc-h2"><a href="#sec-8">8. 近期优先级</a></li>
+        <li class="toc-h2"><a href="#testing-guide">实际运行测试指南</a></li>
+        <li class="toc-h2"><a href="#file-inventory">新增与修改文件清单</a></li>
+      </ul>
+    </nav>
+
+    <main class="content">
+      <div class="hero">
+        <h1>RPH V4 完整化改造主计划</h1>
+        <p>以阶段优先、结构变体扁平化的方式恢复完整反应拓扑。</p>
+        <div class="badges">
+          <span class="badge badge-done">P0–P9 代码实现完成</span>
+          <span class="badge badge-done">98 tests passed</span>
+          <span class="badge badge-runtime">待 WSL 实际运行验证</span>
+          <span class="badge">目标版本：RPH 4.0 完整版</span>
+          <span class="badge">范围：S0–S4 量化计算</span>
+        </div>
+      </div>
+
+      <div class="dashboard" id="dashboard">
+        <h2>实施完成总览</h2>
+        <div class="dashboard-grid">
+          <div class="stat-card"><div class="stat-num">10/10</div><div class="stat-label">阶段完成 (P0–P9)</div></div>
+          <div class="stat-card"><div class="stat-num">98</div><div class="stat-label">V4 测试通过</div></div>
+          <div class="stat-card"><div class="stat-num">12</div><div class="stat-label">V4 测试文件</div></div>
+          <div class="stat-card"><div class="stat-num">29</div><div class="stat-label">V3 测试已归档</div></div>
+          <div class="stat-card"><div class="stat-num">141</div><div class="stat-label">Python 文件扫描通过</div></div>
+          <div class="stat-card"><div class="stat-num">0</div><div class="stat-label">导入违规</div></div>
+        </div>
+
+        <div class="table-wrap" style="margin-top: 20px;">
+          <table>
+            <thead>
+              <tr><th>阶段</th><th>状态</th><th>核心交付物</th><th>关键文件</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><span class="badge badge-p0">P0</span> 仓库收口</td>
+                <td><span class="phase-status done">已完成</span></td>
+                <td>V3 测试归档、README/AGENTS.md 重写、ARCHIVE_V3.md</td>
+                <td><code>tests/deprecated_v3/</code> (29 files), <code>docs/ARCHIVE_V3.md</code></td>
+              </tr>
+              <tr>
+                <td><span class="badge badge-p1">P1</span> S0 反应上下文</td>
+                <td><span class="phase-status done">已完成</span></td>
+                <td>ReactionContext / RunContext / ProductVariant；S0 写出 6 个 JSON 制品</td>
+                <td><code>context.py</code>, <code>s0_artifact_writer.py</code>, <code>s0_record.py</code></td>
+              </tr>
+              <tr>
+                <td><span class="badge badge-p2">P2</span> Variant-aware 编排</td>
+                <td><span class="phase-status done">已完成</span></td>
+                <td>变体循环、失败隔离、VariantCheckpoint、run.manifest.json</td>
+                <td><code>variant_checkpoint.py</code>, <code>v4_orchestrator.py</code></td>
+              </tr>
+              <tr>
+                <td><span class="badge badge-p3">P3</span> S1 CENSO-LITE</td>
+                <td><span class="phase-status done">已完成</span></td>
+                <td>selected.xyz 导出、precursor S1、atom-map 扭转角签名、xTB 修复</td>
+                <td><code>censo_lite.py</code>, <code>torsion_signature.py</code>, <code>censo_lite_runtime.py</code></td>
+              </tr>
+              <tr>
+                <td><span class="badge badge-p4">P4</span> S2 PEB 交接</td>
+                <td><span class="phase-status done">已完成</span></td>
+                <td>S2 变体子目录、parent_variant_id / selected_id 溯源</td>
+                <td><code>v4_orchestrator.py</code> (_write_s2)</td>
+              </tr>
+              <tr>
+                <td><span class="badge badge-p5">P5</span> S3/S4 结构身份</td>
+                <td><span class="phase-status done">已完成</span></td>
+                <td>role / variant_id / parent_structure_id / source_stage 平铺传递</td>
+                <td><code>step3_lowlevel/engine.py</code>, <code>step4_highlevel/engine.py</code></td>
+              </tr>
+              <tr>
+                <td><span class="badge badge-p6">P6</span> TS 质量闭环</td>
+                <td><span class="phase-status done">已完成</span></td>
+                <td>mode displacement 投影、frequency_count_valid / mode_displacement_valid / irc_valid</td>
+                <td><code>ts_quality.py</code>, <code>stage_calculator.py</code></td>
+              </tr>
+              <tr>
+                <td><span class="badge badge-p7">P7</span> 运行条件</td>
+                <td><span class="phase-status done">已完成</span></td>
+                <td>condition_signature 进入 run.manifest.json</td>
+                <td><code>v4_orchestrator.py</code> (_write_run_manifest)</td>
+              </tr>
+              <tr>
+                <td><span class="badge badge-p8">P8</span> 统一可观测性</td>
+                <td><span class="phase-status done">已完成</span></td>
+                <td>StageProgressReporter 为 S0–S3 写 events.jsonl / status.json；rph_watch --overview</td>
+                <td><code>stage_progress.py</code>, <code>v4_watch.py</code></td>
+              </tr>
+              <tr>
+                <td><span class="badge badge-p9">P9</span> 测试与发布</td>
+                <td><span class="phase-status done">代码完成</span></td>
+                <td>98 个 V4 测试全绿；WSL 基准待实际 QC 执行</td>
+                <td><code>tests/test_v4_*.py</code> (12 files)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout" style="margin-top: 16px;">
+          <strong>验证命令：</strong>
+          <pre style="margin: 8px 0 0 0; font-size: 12px;"><code>python -m pytest tests/ -q                     # 98 passed
+python scripts/ci/check_imports.py rph_core      # PASSED
+python -m py_compile rph_core/v4_orchestrator.py  # OK</code></pre>
+        </div>
+      </div>
+
+      <section id="sec-1">
+        <h2>1. 执行结论</h2>
+        <p>当前 V4 已完成计算协议层的关键替换：可信数据集 S0、固定 CENSO-LITE S1、PEB S2、ORCA 低级别 S3、Gaussian/ORCA 高精度 S4，以及 S4 的 WSL 实时状态查看。</p>
+        <div class="callout warn">
+          但它仍是单一路径原型，尚未恢复原 RPH 的完整反应拓扑：S0 机理图、DR 结构变体、precursor、结构变体隔离 checkpoint 与统一运行面板。因此，V4 目前不应被视为 V3 的能力等价替代品。
+        </div>
+        <p>默认 V4 在 S1 选择唯一代表构象；S2–S4 不再暴露或复制 <code>conf_0001</code> 等构象目录。V4 的最终目标不是恢复 V3 的全部旧实现，而是在保持新协议简洁性的前提下，恢复 V3 中真正必要的化学信息流和分支能力。</p>
+
+        <h4>V4 完整数据流（variant-aware）</h4>
+        <div class="flowchart">
+          <div class="flow-node data">可信数据集记录 + 一次运行条件</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node stage">S0 机理图 / 映射 / variant registry</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node variant">precursor / product_major / product_minor</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node stage">S1 CENSO-LITE 搜索并选择 selected.xyz</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node stage">S2 每个 product variant 的 selected.xyz PEB</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node stage">S3 B97-3c OPT/Freq + r2SCAN-3c SP</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node stage">S4 M062X OPT/Freq + wB97M-V SP</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node output">RPH_Postprocess / ML</div>
+        </div>
+      </section>
+
+      <section id="sec-2">
+        <h2>2. V3 与 V4 差异清单</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>领域</th><th>V3 历史能力</th><th>当前 V4 状态</th><th>处理结论</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>输入</td><td>SMILES、CSV、旧批处理入口混用</td><td>仅 <code>--csv --rx-id</code></td><td>保留 V4；这是必要收敛</td></tr>
+              <tr><td>S0</td><td>机理图、映射、DR 计划、运行条件语义</td><td>恢复可信 forming bonds，但未展开完整图与结构变体计划</td><td>必须补回</td></tr>
+              <tr><td>S1</td><td>product/precursor、多个协议、S1 DFT 筛选</td><td>仅 product CENSO-LITE，无 S1 DFT</td><td>保留“仅 CENSO-LITE”；补 precursor</td></tr>
+              <tr><td>S2</td><td>多种旧扫描/预优化路径</td><td>PEB，单个 selected product 构象</td><td>保留 PEB；固定为 S1 selected-only 交接</td></tr>
+              <tr><td>S3</td><td>重型 Gaussian/Berny/QST2/rescue</td><td>ORCA B97-3c CPCM OPT/OptTS + Freq，r2SCAN-3c CPCM SP</td><td>保留新协议</td></tr>
+              <tr><td>S4</td><td>历史语义偏特征/后处理</td><td>M062X CPCM OPT/Freq，wB97M-V CPCM SP</td><td>保留为高精度 QC；特征留在外部</td></tr>
+              <tr><td>DR 变体</td><td><code>BR_MAJOR</code>、<code>BR_DR_001</code></td><td>V4 未使用</td><td>必须以 <code>product_major/product_minor</code> 形式补回</td></tr>
+              <tr><td>checkpoint</td><td>旧线性阶段状态</td><td>单路径 V4 manifest checkpoint</td><td>改为 variant-aware</td></tr>
+              <tr><td>可视化</td><td>旧任务表与旧流程绑定</td><td>S4 已有 <code>rph_watch</code></td><td>扩展至 S0–S4 和 product variant</td></tr>
+              <tr><td>测试</td><td>包含大量旧 V3 路径</td><td>V4 专项测试可运行；全量旧测试有残留</td><td>必须迁移或退役</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 id="sec-2-1">2.1 有意删除的 V3 逻辑</h3>
+        <ul>
+          <li>SMILES-only 管线入口；</li>
+          <li>S1 中的高精度几何优化和高精度单点能；</li>
+          <li>隐式、无限制的 QST2/Berny/IRC rescue 链；</li>
+          <li>依据临时目录、stdout 或文件名猜测机理或 DR 变体；</li>
+          <li>将 Lewis acid/additive 写回 canonical SMILES；</li>
+          <li>将真实 Lewis acid descriptor 写为经验能垒修正项。</li>
+        </ul>
+
+        <h3 id="sec-2-2">2.2 必须恢复的 V3 化学能力</h3>
+        <ul>
+          <li>S0 权威的机理图、forming bonds、mapped reaction、DR 结构变体计划；</li>
+          <li>product 与 precursor 的独立构象集合；</li>
+          <li>立体化学和机理 pathway 的独立结构变体身份；</li>
+          <li>S1 候选构象到唯一 <code>selected.xyz</code>、PEB/TS 的溯源；</li>
+          <li>product variant 级别的结构、能量、失败状态和 checkpoint 隔离；</li>
+          <li>计算过程中可审计的状态记录。</li>
+        </ul>
+      </section>
+
+      <section id="sec-3">
+        <h2>3. 最终架构与数据模型</h2>
+
+        <h3 id="sec-3-1">3.1 运行、反应与结构变体上下文</h3>
+        <p>V4 不再让阶段函数直接接收裸 SMILES。所有下游步骤只能消费结构化上下文：</p>
+        <pre><code>ReactionContext
+├── reaction_id
+├── source_csv / source_row_hash
+├── mapped_reaction_smiles
+├── canonical_product_smiles
+├── canonical_precursor_smiles
+├── reaction_type / topology / cyclo_mode
+├── forming_bonds_map_space
+├── mechanism_graph_ref
+└── branch_plan_ref
+
+RunContext
+├── condition_signature
+├── solvent / solvent_model
+├── temperature / pressure
+├── additive definition
+├── charge / multiplicity
+└── configuration signature
+
+ProductVariant
+├── variant_id
+├── directory_name: product_major / product_minor_001
+├── branch_id (manifest metadata only)
+├── pathway_id
+├── stereochemical role
+├── branch_product_smiles
+├── selected_structure_ref
+└── variant signature</code></pre>
+        <p><code>ReactionContext</code> 由 S0 唯一写入；<code>RunContext</code> 在根 <code>run.manifest.json</code> 中定义一次；<code>ProductVariant</code> 只能由 S0 计划创建。S1–S4 不允许自行重新推断 DR 变体，也不允许通过 <code>COND_xxx</code> 目录重建条件上下文。</p>
+
+        <h3 id="sec-3-2">3.2 结构身份</h3>
+        <p>每个结构必须携带下列字段：</p>
+        <pre><code>{
+  "structure_id": "product_major",
+  "reaction_id": "RXN_000001",
+  "condition_signature": "run_manifest.condition_signature",
+  "branch_id": "BR_MAJOR",
+  "pathway_id": "primary",
+  "role": "product",
+  "parent_structure_id": null,
+  "source_stage": "S1",
+  "atom_map_space": "mapped_reaction",
+  "geometry_index_space": "xyz_0_based"
+}</code></pre>
+        <p>允许的 <code>role</code> 为：<code>product</code>、<code>precursor</code>、<code>intermediate</code>、<code>ts</code>、<code>additive_complex</code>。不同 role、product variant 或独立运行条件的能量不得混合比较。</p>
+
+        <h3 id="sec-3-3">3.3 目录契约：阶段优先、化学对象次级、S1 唯一选择</h3>
+        <p>一次运行根目录只表达一个反应和一种条件模型。条件、电荷、多重度、additive 与 solvent model 写入 <code>run.manifest.json</code> 和 checkpoint 签名；不得在 S1–S4 中再创建 <code>COND_000_BASE/</code> 一层。需要比较不同条件时，使用独立运行根目录，例如 <code>RXN_000001_base/</code> 与 <code>RXN_000001_LiCl/</code>。</p>
+        <p>DR branch 也不再是 <code>branches/BR_xxx/S1...</code> 形式的顶层目录。它在 S0 中映射为面向化学对象的目录名：<code>product_major</code>、<code>product_minor_001</code>；<code>BR_MAJOR</code>、<code>BR_DR_001</code> 仅作为 manifest 元数据保存。</p>
+
+        <div class="tree">
+RXN_&lt;reaction_id&gt;/
+├── <span class="dir">.rph/</span>
+│   ├── <span class="file">checkpoint.json</span>
+│   ├── <span class="file">reaction_registry.json</span>
+│   └── <span class="file">events.jsonl</span>
+├── <span class="file">run.manifest.json</span>
+├── <span class="file">rph_v4.log</span>
+├── <span class="dir">S0_Mechanism/</span>
+│   ├── <span class="file">reaction_context.json</span>
+│   ├── <span class="file">mechanism_graph.json</span>
+│   ├── <span class="file">forming_bonds.json</span>
+│   └── <span class="file">variant_registry.json</span>
+├── <span class="dir">S1_ConfSearch/</span>
+│   ├── <span class="file">manifest.json</span>
+│   ├── <span class="dir">precursor/</span>
+│   │   ├── <span class="file">manifest.json</span>
+│   │   ├── <span class="file">selected.xyz</span>
+│   │   └── <span class="dir">raw_censo/</span>
+│   ├── <span class="dir">product_major/</span>
+│   │   ├── <span class="file">manifest.json</span>
+│   │   ├── <span class="file">selected.xyz</span>
+│   │   └── <span class="dir">raw_censo/</span>
+│   └── <span class="dir">product_minor_001/</span>
+│       ├── <span class="file">manifest.json</span>
+│       ├── <span class="file">selected.xyz</span>
+│       └── <span class="dir">raw_censo/</span>
+├── <span class="dir">S2_PEB/</span>
+│   ├── <span class="file">manifest.json</span>
+│   ├── <span class="dir">product_major/</span>
+│   │   ├── <span class="file">scan_profile.json</span>
+│   │   ├── <span class="file">ts_guess.xyz</span>
+│   │   └── <span class="file">intermediate.xyz</span>
+│   └── <span class="dir">product_minor_001/</span>
+│       ├── <span class="file">scan_profile.json</span>
+│       ├── <span class="file">ts_guess.xyz</span>
+│       └── <span class="file">intermediate.xyz</span>
+├── <span class="dir">S3_LowLevel/</span>
+│   ├── <span class="file">manifest.json</span>
+│   ├── <span class="file">status.json</span>
+│   ├── <span class="dir">precursor/{opt,sp}/</span>
+│   ├── <span class="dir">product_major/{opt,sp}/</span>
+│   ├── <span class="dir">product_major_int/{opt,sp}/</span>
+│   ├── <span class="dir">product_major_ts/{opt_ts,freq,sp}/</span>
+│   ├── <span class="dir">product_minor_001/{opt,sp}/</span>
+│   ├── <span class="dir">product_minor_001_int/{opt,sp}/</span>
+│   └── <span class="dir">product_minor_001_ts/{opt_ts,freq,sp}/</span>
+└── <span class="dir">S4_HighLevel/</span>
+    ├── <span class="file">manifest.json</span>
+    ├── <span class="file">status.json</span>
+    ├── <span class="file">events.jsonl</span>
+    ├── <span class="file">s4.log</span>
+    ├── <span class="dir">precursor/{opt,sp}/</span>
+    ├── <span class="dir">product_major/{opt,sp}/</span>
+    ├── <span class="dir">product_major_int/{opt,sp}/</span>
+    ├── <span class="dir">product_major_ts/{opt_ts,freq,sp}/</span>
+    ├── <span class="dir">product_minor_001/{opt,sp}/</span>
+    ├── <span class="dir">product_minor_001_int/{opt,sp}/</span>
+    └── <span class="dir">product_minor_001_ts/{opt_ts,freq,sp}/</span>
+        </div>
+
+        <p><code>conf_0001</code>、<code>conf_0002</code> 等只允许存在于 <code>S1_ConfSearch/*/raw_censo/</code> 及其 S1 manifest。S1 使用 <code>selected_id</code> 和 <code>selected.xyz</code> 输出唯一正式交接结构；S2–S4 仅处理 <code>selected.xyz</code>、PEB 的 intermediate 和 TS。</p>
+        <div class="callout warn">
+          S3/S4 必须使用平铺的完整结构对象目录，禁止 <code>product_major/intermediate/</code>、<code>product_major/ts/</code> 等嵌套目录。命名规则固定为：<code>&lt;variant&gt;</code> 表示 product，<code>&lt;variant&gt;_int</code> 表示 intermediate，<code>&lt;variant&gt;_ts</code> 表示 TS。
+        </div>
+      </section>
+
+      <section id="sec-4">
+        <h2>4. 目标计算协议</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>阶段</th><th>协议</th><th>明确约束</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>S0</td><td>可信数据集 + mapped reaction + mechanism graph + DR plan</td><td>不接受 SMILES-only 运行</td></tr>
+              <tr><td>S1</td><td>Grimme CENSO-LITE</td><td>只做构象搜索和低成本排序；不做 DFT OPT/SP</td></tr>
+              <tr><td>S2</td><td>xTB PEB 逆向扫描</td><td>只从各 product variant 的 S1 <code>selected.xyz</code> 启动</td></tr>
+              <tr><td>S3 minima</td><td>ORCA B97-3c/CPCM(acetone) OPT + r2SCAN-3c/CPCM SP</td><td>快速、完整、可用于失败保留</td></tr>
+              <tr><td>S3 TS</td><td>ORCA B97-3c/CPCM OptTS + 独立 Freq + r2SCAN-3c/CPCM SP</td><td>记录虚频、模式和失败原因</td></tr>
+              <tr><td>S4 minima</td><td>Gaussian M062X/def2-SVP/CPCM OPT + ORCA wB97M-V/def2-TZVPP/CPCM SP</td><td>所有候选结构执行</td></tr>
+              <tr><td>S4 TS</td><td>Gaussian M062X/def2-SVP/CPCM OptTS + 独立 Freq + ORCA wB97M-V/def2-TZVPP/CPCM SP</td><td>高精度 TS 质量门槛</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>S3/S4 中 <code>CPCM(acetone)</code> 必须是实际 QC 输入的一部分，不能只是 YAML 注释。Gaussian 路由应出现：</p>
+        <pre><code>SCRF=(CPCM,Solvent=acetone)</code></pre>
+      </section>
+
+      <section id="sec-5">
+        <h2>5. 分阶段实施计划</h2>
+
+        <div class="phase-card" id="p0">
+          <div class="phase-header">
+            <span class="badge badge-p0">P0</span>
+            <h3 class="phase-title">仓库收口与兼容层退役</h3>
+          </div>
+          <div class="phase-purpose">先把“V4 代码、V3 文档、V3 测试”混合状态结束掉。</div>
+          <ol>
+            <li>将旧 V3 模块测试移至 <code>tests/deprecated_v3/</code>，或改写为 V4 等价测试；</li>
+            <li>不为已删除的模块仅仅补回空壳来让旧测试通过；</li>
+            <li>更新 <code>AGENTS.md</code>、README、CLI 示例和输出契约，使其只描述 V4；</li>
+            <li>明确历史 S4 feature extraction 已迁移至 <code>RPH_Postprocess</code>，本仓库 S4 为高精度 QC；</li>
+            <li>删除无调用方的旧路径别名、旧 S1 <code>finalDFT</code> 流程、旧线性任务进度表；</li>
+            <li>建立 <code>docs/ARCHIVE_V3.md</code>，保存历史行为，不让历史文档影响运行实现。</li>
+          </ol>
+          <div class="callout success">
+            <strong>验收：</strong><code>pytest -q tests/</code> 不再因已删除模块、旧导入或缺失的 V3 依赖而收集失败。
+          </div>
+          <div class="impl-summary">
+            <strong>实际实现：</strong>
+            <ul>
+              <li>29 个 V3 测试移入 <code>tests/deprecated_v3/</code>，pytest.ini 排除收集</li>
+              <li>README.md (745行) + README.zh-CN.md (752行) 重写为 V4</li>
+              <li>6 个 AGENTS.md 更新为 V4-only（root, rph_core, steps, config, bin, conformer_search）</li>
+              <li><code>docs/ARCHIVE_V3.md</code> (287行) 创建，记录 V3 历史行为和隔离源码清单</li>
+              <li>V3 源码（qc_task_runner.py 等）暂保留（被 V4 传递依赖），标记为 deprecated</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="phase-card" id="p1">
+          <div class="phase-header">
+            <span class="badge badge-p1">P1</span>
+            <h3 class="phase-title">重建 S0 反应与 DR 结构变体计划</h3>
+          </div>
+          <div class="phase-purpose">将 V4 从“可信 forming bonds 恢复器”升级为完整反应上下文生成器。</div>
+          <ol>
+            <li>扩展 <code>S0ReactionRecord</code>：读取 precursor SMILES、mapped precursor/product、条件字段、原始行 hash；</li>
+            <li>复用 <code>MechanismGraph</code>、<code>dr_completion.py</code> 与 <code>dr_smiles_renderer.py</code>；</li>
+            <li>写出 <code>ReactionContext</code>、<code>mechanism_graph.json</code> 和 <code>dr_branch_plan.json</code>；</li>
+            <li>默认生成 <code>product_major</code>；仅当 S0 有明确 DR 依据时生成 <code>product_minor_001</code>；</li>
+            <li><code>variant_registry.json</code> 保存 <code>product_major → BR_MAJOR</code>、<code>product_minor_001 → BR_DR_001</code> 的映射；</li>
+            <li>变体生成的 product SMILES 必须保留 atom map；</li>
+            <li>将 map-space forming bonds 延迟映射至该 product variant 的 XYZ index；</li>
+            <li>禁止 S2/S3/S4 重新猜测 forming bonds、立体化学或 pathway。</li>
+          </ol>
+          <div class="callout success">
+            <strong>验收：</strong>同一数据集记录的 variant 目录名、branch metadata、SMILES、forming bonds 与计划 hash 在重复运行中稳定不变。
+          </div>
+          <div class="impl-summary">
+            <strong>实际实现：</strong>
+            <ul>
+              <li><code>context.py</code> — ReactionContext / RunContext / ProductVariant 冻结数据类</li>
+              <li><code>s0_artifact_writer.py</code> — 构建 MechanismGraph，调用 build_dr_branch_plan，写出 6 个 JSON 制品</li>
+              <li><code>s0_record.py</code> 扩展 — precursor_smiles, topology, cyclo_mode, source_row_hash, raw_row</li>
+              <li>S0 制品：mechanism.json (v2) + reaction_context.json + mechanism_graph.json + variant_registry.json + dr_branch_plan.json + atom_map_smiles.json</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="phase-card" id="p2">
+          <div class="phase-header">
+            <span class="badge badge-p2">P2</span>
+            <h3 class="phase-title">结构变体感知的编排与 checkpoint</h3>
+          </div>
+          <div class="phase-purpose">去除当前 <code>V4Orchestrator</code> 的单一路径假设。</div>
+          <div class="delta">
+            <strong>变更：</strong> 由 <code>BranchRunner</code>/<code>BranchCheckpoint</code> 改为 <code>VariantTaskRunner</code>/<code>VariantCheckpoint</code>；不再创建 <code>branches/BR_xxx/</code> 目录层。
+          </div>
+          <ol>
+            <li>拆分为 <code>ReactionRunner</code>、<code>VariantTaskRunner</code>、<code>ManifestStore</code>、<code>VariantCheckpoint</code>；</li>
+            <li><code>V4Orchestrator</code> 只保留 CLI/API 适配；</li>
+            <li>根目录 checkpoint 记录 S0 与每个结构变体任务；不再创建子 branch checkpoint 目录；</li>
+            <li>每个任务使用独立签名：reaction record + variant definition + 运行条件签名 + 上游 artifact + 配置；</li>
+            <li>一个 product variant 失败不得中止其他 product variant；</li>
+            <li>顶层 <code>run.manifest.json</code> 汇总状态，但不重新排序或覆盖不同结构变体能量。</li>
+          </ol>
+          <div class="callout success">
+            <strong>验收：</strong><code>product_major</code> 与 <code>product_minor_001</code> 能并存、独立恢复、独立失败；共享 precursor 不被重复计算；缓存不会跨 variant 误复用。
+          </div>
+          <div class="impl-summary">
+            <strong>实际实现：</strong>
+            <ul>
+              <li><code>variant_checkpoint.py</code> — VariantCheckpoint 类，per-variant checkpoint 存储于 <code>.rph/checkpoint.json</code></li>
+              <li>编排器读取 <code>variant_registry.json</code> 并循环处理每个变体</li>
+              <li>S1/S2 per-variant try/except 失败隔离，失败记录到 checkpoint 和 run.manifest.json</li>
+              <li>S3 结构 ID 使用平铺命名：<code>product_major</code>, <code>product_major_int</code>, <code>product_major_ts</code></li>
+              <li><code>run.manifest.json</code> 汇总所有变体状态</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="phase-card" id="p3">
+          <div class="phase-header">
+            <span class="badge badge-p3">P3</span>
+            <h3 class="phase-title">恢复完整 S1 CENSO-LITE</h3>
+          </div>
+          <div class="phase-purpose">让 precursor 与每个 product variant 都拥有可信构象集合，并由 S1 唯一决定下游代表构象。</div>
+          <div class="delta">
+            <strong>变更：</strong> S1 输出唯一 <code>selected.xyz</code>，S2–S4 不再使用或创建 <code>conf_0001</code> 等目录。
+          </div>
+          <ol>
+            <li>分别运行：
+              <pre style="margin:10px 0;"><code>S1_ConfSearch/precursor/
+S1_ConfSearch/product_major/
+S1_ConfSearch/product_minor_001/  # 仅 S0 产生 minor 时</code></pre>
+            </li>
+            <li>S1 保持 CENSO-LITE-only；禁止重新引入 S1 DFT OPT 或 DFT SP；</li>
+            <li>以 atom-map-aware 规范二面角签名替代按原子编号排序的 isostate 键；</li>
+            <li>对环系、等价原子与对称构象建立稳定 canonical torsion key；</li>
+            <li>修复/量化验证 xTB 能量为零、mRRHO 修正异常大的问题；</li>
+            <li>每个候选记录 CREST 来源、相对能、mRRHO、去重理由和原子映射；</li>
+            <li>保留完整候选清单供审计，但仅在 S1 manifest 写入唯一 <code>selected_id</code> 并导出 <code>selected.xyz</code>；S2–S4 不再创建或消费 <code>conf_0001</code> 等构象目录。</li>
+          </ol>
+          <div class="callout success">
+            <strong>验收：</strong>precursor、product_major 及适用的 product_minor 均有独立 manifest 和 <code>selected.xyz</code>；重复运行的候选排序、选择与去重稳定；能量单位和 mRRHO 数值通过合理性检查。
+          </div>
+          <div class="impl-summary">
+            <strong>实际实现：</strong>
+            <ul>
+              <li><code>censo_lite.py</code> — 新增 <code>shutil.copy2</code> 导出 <code>selected.xyz</code>，manifest 增加 <code>selected_xyz</code> 字段</li>
+              <li><code>v4_orchestrator.py</code> — precursor S1 在变体循环前执行（使用 <code>canonical_precursor_smiles</code>）</li>
+              <li><code>torsion_signature.py</code> — 使用 <code>GetAtomMapNum()</code> 构建原子映射感知的 canonical torsion key</li>
+              <li><code>censo_lite_runtime.py</code> — <code>extract_energy()</code> 解析失败时记录 warning（不再静默返回 0.0）</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="phase-card" id="p4">
+          <div class="phase-header">
+            <span class="badge badge-p4">P4</span>
+            <h3 class="phase-title">S2 PEB 的唯一代表构象交接</h3>
+          </div>
+          <div class="phase-purpose">让 S2 只消费 S1 的正式选择结果，保持后续目录和任务身份简洁。</div>
+          <div class="delta">
+            <strong>重大变更：</strong> 由“多 product seed PEB”改为“每个 product variant 只从 <code>selected.xyz</code> 启动一次 PEB”；<code>input_policy: s1_selected_only</code>。
+          </div>
+          <p>建议配置：</p>
+          <pre><code>step2:
+  input_policy: s1_selected_only</code></pre>
+          <ol>
+            <li>每个 product variant 只从其 <code>S1_ConfSearch/&lt;variant&gt;/selected.xyz</code> 启动一次 PEB；</li>
+            <li>PEB 直接写入 <code>S2_PEB/&lt;variant&gt;/</code>，不再引入 <code>seed_conf_xxx/</code>；</li>
+            <li>记录 <code>parent_variant_id</code>、<code>selected_id</code>、forming bonds、scan profile、PEB peak 与 intermediate；</li>
+            <li>PEB 不成功时保留 scan 信息、失败类别和可用几何；</li>
+            <li><code>product_major</code> 与 <code>product_minor_001</code> 目录相互隔离，不允许覆盖同名产物。</li>
+          </ol>
+          <div class="callout success">
+            <strong>验收：</strong>每个 S2 输出可追溯至唯一 S1 <code>selected_id</code>；S2–S4 路径中不存在 <code>conf_0001</code>、<code>seed_conf_0001</code> 等构象目录。
+          </div>
+          <div class="impl-summary">
+            <strong>实际实现：</strong> P2 变体循环已将 S2 写入 <code>S2_PEB/&lt;variant&gt;/</code>。P4 在此基础上增加 <code>_write_s2()</code> 的 variant_id / parent_variant_id / selected_id / selected_xyz_ref 溯源字段。无 <code>seed_conf_xxx</code>。
+          </div>
+        </div>
+
+        <div class="phase-card" id="p5">
+          <div class="phase-header">
+            <span class="badge badge-p5">P5</span>
+            <h3 class="phase-title">完整结构变体集合的 S3/S4</h3>
+          </div>
+          <div class="phase-purpose">使所有必要结构进入低级别与高精度计算，而不只优化一个 TS。</div>
+          <div class="delta">
+            <strong>变更：</strong> 由“每个 branch 9 个任务”改为“每次运行 16 个任务（precursor + major + minor 全结构集）”；目录平铺，无 <code>intermediate/</code> 或 <code>ts/</code> 嵌套。
+          </div>
+          <p>每次运行的结构集合：</p>
+          <pre><code>selected precursor
+每个 product variant 的 selected product
+每个 product variant 的 intermediate
+每个 product variant 的 TS candidate</code></pre>
+          <p>若存在一个 precursor、一个 major product 与一个 minor product，则 S3 共 16 个任务：</p>
+          <pre><code>precursor                                 OPT + SP          = 2
+product_major + intermediate + TS         = 2 + 2 + 3 = 7
+product_minor_001 + intermediate + TS     = 2 + 2 + 3 = 7
+总计                                                   = 16</code></pre>
+          <ol>
+            <li>所有结构传递 <code>role</code>、<code>variant_id</code>、运行条件签名、charge、multiplicity 和 parent identity，并使用平铺目录名：<code>precursor</code>、<code>product_major</code>、<code>product_major_int</code>、<code>product_major_ts</code>、<code>product_minor_001</code>、<code>product_minor_001_int</code>、<code>product_minor_001_ts</code>；</li>
+            <li>S3 失败保留低级别输入/输出、SP、错误和 ML 可用性；</li>
+            <li>S4 对所有 S3 结构执行高精度任务；</li>
+            <li>S4 manifest 不丢失 S3 溯源、TS Freq 结果或降级输入来源；</li>
+            <li>不跨 product variant 或跨独立运行条件计算相对能。</li>
+          </ol>
+          <div class="callout success">
+            <strong>验收：</strong>S3/S4 manifest 可重建 precursor、product_major、product_major_int、product_major_ts 及对应 minor 对象；目录不存在下游构象层或 <code>intermediate/</code>、<code>ts/</code> 嵌套层。
+          </div>
+          <div class="impl-summary">
+            <strong>实际实现：</strong>
+            <ul>
+              <li>S3 结构字典增加 <code>structure_id</code>, <code>variant_id</code>, <code>role</code>, <code>branch_id</code>, <code>pathway_id</code>, <code>parent_structure_id</code>, <code>source_stage</code></li>
+              <li>S4 结构继承 S3 身份 + <code>source_s3</code> 溯源</li>
+              <li><code>step3_lowlevel/engine.py</code> 和 <code>step4_highlevel/engine.py</code> 透传身份字段到 manifest</li>
+              <li>TS 结构额外携带 <code>forming_bonds</code> 供 P6 质量分析使用</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="phase-card" id="p6">
+          <div class="phase-header">
+            <span class="badge badge-p6">P6</span>
+            <h3 class="phase-title">TS 质量闭环</h3>
+          </div>
+          <div class="phase-purpose">将“存在一个虚频”升级为“化学上可信的 TS”。</div>
+          <ol>
+            <li>计算显著虚频数，默认阈值 <code>&lt;= -50 cm⁻¹</code>；</li>
+            <li>解析虚频位移向量，检查 forming bonds 的拉伸/收缩投影；</li>
+            <li>将 <code>frequency_count_valid</code>、<code>mode_displacement_valid</code>、<code>irc_valid</code> 分开记录；</li>
+            <li>仅对通过低级别门槛的 TS 选择性运行高精度 IRC；</li>
+            <li>IRC 端点与 product/intermediate 连接性比较使用 atom map，而不是文件名；</li>
+            <li>失败 TS 仍保留为训练样本，但附带完整质量标签。</li>
+          </ol>
+          <div class="callout success">
+            <strong>验收：</strong>TS 质量报告可说明"频率失败、模式失败、IRC 失败"中的具体一项，而不是笼统 <code>ts_failed</code>。
+          </div>
+          <div class="impl-summary">
+            <strong>实际实现：</strong>
+            <ul>
+              <li><code>ts_quality.py</code> — analyze_ts_quality() 函数：虚频计数 + 模式位移投影 + 质量摘要</li>
+              <li>模式位移投影：解析 Gaussian 频率日志，计算成键方向的相对位移投影（阈值 0.3）</li>
+              <li><code>stage_calculator.py</code> — 集成质量分析，输出 <code>frequency_count_valid</code>, <code>mode_displacement_valid</code>, <code>irc_valid</code>, <code>ts_quality_summary</code></li>
+              <li>irc_valid = None（V4 不包含 IRC runner，留待后续）</li>
+              <li>位移解析失败时 mode_displacement_valid = None（"未检查"而非"失败"），优雅降级</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="phase-card" id="p7">
+          <div class="phase-header">
+            <span class="badge badge-p7">P7</span>
+            <h3 class="phase-title">独立运行条件与 Lewis acid 模型</h3>
+          </div>
+          <div class="phase-purpose">支持条件建模，但不在一次运行内部制造 <code>COND_xxx</code> 目录层或污染化学身份。</div>
+          <div class="delta">
+            <strong>重大变更：</strong> 删除 <code>COND_000_BASE/</code> 目录层；不同条件使用独立运行根目录，如 <code>RXN_000001_base/</code> 与 <code>RXN_000001_LiCl/</code>。
+          </div>
+          <ol>
+            <li>一次运行只有一个 <code>run_manifest.condition_signature</code>；基线条件无需命名为 <code>COND_000_BASE</code>；</li>
+            <li>LiCl 等 surrogate 作为本次运行的 geometry additive，不写入 canonical organic SMILES；</li>
+            <li>additive 原子索引、元素、电荷、多重度、配位信息进入根 manifest 与 checkpoint hash；</li>
+            <li>不同条件使用独立根目录，例如 <code>RXN_000001_base/</code> 与 <code>RXN_000001_LiCl/</code>；</li>
+            <li>真实 Lewis acid descriptor 仅作为外部 ML 特征，不直接修正量子化学能量；</li>
+            <li>禁止不同独立条件运行间的直接相对能排序。</li>
+          </ol>
+          <div class="callout success">
+            <strong>验收：</strong>基线与 LiCl 运行的根目录、缓存、几何、能量与日志完全隔离，且任一 S1–S4 阶段中不存在 <code>COND_xxx/</code> 目录。
+          </div>
+          <div class="impl-summary">
+            <strong>实际实现：</strong> run.manifest.json 写入 <code>condition_signature</code> (SHA-256 hash of solvent+temperature+additive+charge+multiplicity) 和 <code>conditions</code> 字典。不同条件使用独立运行根目录，无 <code>COND_xxx/</code> 目录层。
+          </div>
+        </div>
+
+        <div class="phase-card" id="p8">
+          <div class="phase-header">
+            <span class="badge badge-p8">P8</span>
+            <h3 class="phase-title">统一日志、WSL 可视化与 UI</h3>
+          </div>
+          <div class="phase-purpose">使用户无需阅读原始 QC stdout 也能准确知道运行状态。</div>
+          <p><strong>已完成：</strong></p>
+          <ul>
+            <li>S4 <code>status.json</code>、<code>events.jsonl</code>、<code>s4.log</code>；</li>
+            <li><code>bin/rph_watch --output &lt;run&gt; --watch</code>；</li>
+            <li>根目录 <code>rph_v4.log</code>。</li>
+          </ul>
+          <p><strong>后续工作：</strong></p>
+          <ol>
+            <li>将相同事件协议扩展至 S0、S1、S2、S3；</li>
+            <li>每个事件记录 stage、variant、运行条件签名、平铺 <code>structure_id</code>、task、方法、状态、输出路径和错误；</li>
+            <li><code>rph_watch</code> 支持总览、单 product variant、单结构和失败筛选；</li>
+            <li>总览显示 S1 product/precursor 选择、S2 PEB、S3 OPT/Freq/SP、S4 高精度任务；</li>
+            <li>不再使用旧 <code>task_progress.py</code> 中包含 Berny/QST2/特征提取的过时任务表；</li>
+            <li>后续 GUI 只消费 <code>events.jsonl</code> 和 <code>status.json</code>，不解析 stdout。</li>
+          </ol>
+          <div class="callout success">
+            <strong>验收：</strong>在 WSL 断开并重新连接后，用户可从文件状态准确恢复所有 stage/variant 的进度。
+          </div>
+          <div class="impl-summary">
+            <strong>实际实现：</strong>
+            <ul>
+              <li><code>stage_progress.py</code> — StageProgressReporter 类，为任何阶段写 events.jsonl + status.json</li>
+              <li><code>scan_all_stages()</code> 函数扫描 S0–S4 所有 status.json 返回统一字典</li>
+              <li><code>v4_watch.py</code> 新增 <code>--overview</code> 标志，显示跨阶段总览 + 条件信息</li>
+              <li>S4 保留原有 S4ProgressReporter（不修改）；S0–S3 使用新的 StageProgressReporter</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="phase-card" id="p9">
+          <div class="phase-header">
+            <span class="badge badge-p9">P9</span>
+            <h3 class="phase-title">测试、基准与发布门槛</h3>
+          </div>
+          <div class="phase-purpose">确保 V4 的可靠性与能力等价替代。</div>
+
+          <h4>单元与集成测试</h4>
+          <ul>
+            <li>dataset-only CLI 拒绝 SMILES 模式；</li>
+            <li>S0 map-space → variant geometry-space forming bonds；</li>
+            <li>DR variant 稳定性与 <code>product_major/product_minor</code> 目录隔离；</li>
+            <li>product/precursor 双 S1；</li>
+            <li>CENSO map-aware isostate 去重；</li>
+            <li>S1 <code>selected.xyz</code> → 单一 PEB 的交接；</li>
+            <li>S3/S4 CPCM route、TS Freq、失败隔离；</li>
+            <li>checkpoint 不跨 product variant/独立条件运行复用；</li>
+            <li>日志快照与 WSL viewer；</li>
+            <li>不存在旧 V3 导入、旧 <code>orchestrator.py</code> 依赖或废弃测试收集错误。</li>
+          </ul>
+
+          <h4>WSL 分层基准</h4>
+          <ol>
+            <li><strong>烟雾测试：</strong><code>rx_id=1</code>，<code>--stop-after s1</code>；</li>
+            <li><strong>PEB 测试：</strong>同一记录，<code>--stop-after s2</code>，检查方向与 forming bonds；</li>
+            <li><strong>低级别测试：</strong><code>--stop-after s3</code>，检查 product、precursor、intermediate、TS；</li>
+            <li><strong>高精度测试：</strong>独立新输出目录运行 S4，检查 Gaussian CPCM route、TS Freq、ORCA SP；</li>
+            <li><strong>DR variant 测试：</strong>至少一个有明确 DR 的反应，检查 <code>product_major/product_minor_001</code>；</li>
+            <li><strong>条件测试：</strong>基线与 LiCl 使用两个独立运行根目录；</li>
+            <li><strong>小型 benchmark：</strong>20–50 条代表反应，统计成功率、耗时、TS Freq 通过率、结构保留率与 ML 特征覆盖率。</li>
+          </ol>
+
+          <h4>发布门槛</h4>
+          <p>RPH V4 只有满足以下条件才可声明“能力等价替代 V3”：</p>
+          <ol>
+            <li>所有支持的反应都经 dataset-only S0 输入；</li>
+            <li><code>product_major</code> 与适用的 <code>product_minor_001</code> 可端到端运行；</li>
+            <li>product 和 precursor 均经过 S1–S4；</li>
+            <li>PEB 严格从 S1 manifest 的唯一 <code>selected.xyz</code> 运行；</li>
+            <li>S3/S4 不会因一个结构失败而丢弃其它结构；</li>
+            <li>所有高精度输入明确使用配置指定的溶剂模型；</li>
+            <li>TS 质量状态可审计；</li>
+            <li>所有运行状态可在 WSL 中重连查看；</li>
+            <li>V4 测试套件全绿，历史 V3 测试已迁移或明确归档；</li>
+            <li>基准结果证实 V4 的成功率、成本和 ML 数据完整性优于或不劣于 V3。</li>
+          </ol>
+        </div>
+      </section>
+
+      <section id="sec-6">
+        <h2>6. 配置规范</h2>
+        <p>所有运行参数只能位于 <code>config/defaults.yaml</code>。建议新增/规范以下区块：</p>
+        <pre><code>variants:
+  dr:
+    enabled: true
+    include_major: true
+    max_product_variants: 2
+  pathways:
+    enabled: s0_declared_only
+  continue_on_variant_failure: true
+
+step1:
+  protocol: censo_lite
+  roles: [product, precursor]
+  downstream_selection: single_selected_only
+
+step2:
+  input_policy: s1_selected_only
+
+observability:
+  events_jsonl: true
+  status_snapshot: true
+  wsl_viewer: true</code></pre>
+        <div class="callout warn">
+          禁止为不同 variant、测试或机器复制出新的 <code>defaults.yaml</code>。条件是一次运行根目录的身份，必须进入 <code>run.manifest.json</code> 与 checkpoint 签名，而非变成 S1–S4 的目录层。
+        </div>
+      </section>
+
+      <section id="sec-7">
+        <h2>7. 迁移策略</h2>
+        <p>当前扁平输出，例如：</p>
+        <pre><code>/tmp/rph4_rx_1/</code></pre>
+        <p>不能直接视为结构变体感知的正式结果。原因是其缺少 precursor、variant identity、S1 的唯一选择记录和完整来源。</p>
+        <p><strong>迁移规则：</strong></p>
+        <ol>
+          <li>旧结果最多作为 <code>product_major</code> 的只读参考；</li>
+          <li>不复用旧 S2/S3/S4 checkpoint；</li>
+          <li>完整 variant 架构上线后使用新的输出目录重新运行；</li>
+          <li>若需要比较，只比较同一输入、同一理论级别、同一 solvent model 的结果；</li>
+          <li>在新 manifest 中明确 <code>migrated_from</code>，但不伪装成原生 V4 variant 结果。</li>
+        </ol>
+      </section>
+
+      <section id="sec-8">
+        <h2>8. 近期优先级</h2>
+        <p>下一轮开发应严格按以下顺序推进：</p>
+        <div class="priority-list">
+          <div class="priority-item">
+            <span class="num">1.</span>
+            <div><strong>P0：</strong>清理 V3 测试/文档残留；</div>
+          </div>
+          <div class="priority-item">
+            <span class="num">2.</span>
+            <div><strong>P1：</strong>S0 <code>ReactionContext</code> 与 DR variant plan；</div>
+          </div>
+          <div class="priority-item">
+            <span class="num">3.</span>
+            <div><strong>P2：</strong>variant-aware orchestrator/checkpoint；</div>
+          </div>
+          <div class="priority-item">
+            <span class="num">4.</span>
+            <div><strong>P3：</strong>product + precursor CENSO-LITE、isostate 修复与唯一 <code>selected.xyz</code>；</div>
+          </div>
+          <div class="priority-item">
+            <span class="num">5.</span>
+            <div><strong>P4：</strong>S1 selected-only PEB；</div>
+          </div>
+          <div class="priority-item">
+            <span class="num">6.</span>
+            <div><strong>P5：</strong>完整 variant S3/S4 结构集；</div>
+          </div>
+          <div class="priority-item">
+            <span class="num">7.</span>
+            <div><strong>P6–P8：</strong>TS 连通性、条件/Lewis acid、全流程 UI；</div>
+          </div>
+          <div class="priority-item">
+            <span class="num">8.</span>
+            <div><strong>P9：</strong>系统性 WSL benchmark 与发布评估。</div>
+          </div>
+        </div>
+        <div class="callout danger">
+          在 P1–P5 完成前，不应将当前单路径 V4 的高精度能量用于正式的 variant/选择性比较或作为完整 ML 训练集。
+        </div>
+      </section>
+
+      <a class="back-to-top" href="#top">↑ 回到顶部</a>
+
+      <section id="testing-guide">
+        <h2>实际运行测试指南</h2>
+        <p>以下命令用于在 WSL 中验证 V4 完整管线。需要真实 Gaussian 16 / ORCA / xTB / CREST 安装。</p>
+
+        <h3>分层测试命令</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>层</th><th>命令</th><th>检查项</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>T0 烟雾</td>
+                <td><pre style="margin:0;font-size:12px;"><code>bin/rph_run --csv data/reaxys_cleaned.csv --rx-id 1 --output /tmp/rph4_t0 --stop-after s1</code></pre></td>
+                <td>S0 写出 6 个 JSON；S1 有 selected.xyz；<code>S1_ConfSearch/product_major/</code> 存在</td>
+              </tr>
+              <tr>
+                <td>T1 PEB</td>
+                <td><pre style="margin:0;font-size:12px;"><code>bin/rph_run --csv data/reaxys_cleaned.csv --rx-id 1 --output /tmp/rph4_t1 --stop-after s2</code></pre></td>
+                <td><code>S2_PEB/product_major/ts_guess.xyz</code> + <code>intermediate.xyz</code>；forming bonds 方向正确；manifest 有 variant_id 溯源</td>
+              </tr>
+              <tr>
+                <td>T2 低级别</td>
+                <td><pre style="margin:0;font-size:12px;"><code>bin/rph_run --csv data/reaxys_cleaned.csv --rx-id 1 --output /tmp/rph4_t2 --stop-after s3</code></pre></td>
+                <td><code>S3_LowLevel/product_major_ts/</code> 有 opt+freq+sp；TS Freq 有虚频；manifest 有 role/variant_id/parent_structure_id</td>
+              </tr>
+              <tr>
+                <td>T3 高精度</td>
+                <td><pre style="margin:0;font-size:12px;"><code>bin/rph_run --csv data/reaxys_cleaned.csv --rx-id 1 --output /tmp/rph4_t3</code></pre></td>
+                <td><code>S4_HighLevel/</code> 有 Gaussian M062X route 含 <code>SCRF=(CPCM,Solvent=acetone)</code>；ORCA wB97M-V SP 完成</td>
+              </tr>
+              <tr>
+                <td>T4 可观测</td>
+                <td><pre style="margin:0;font-size:12px;"><code>bin/rph_watch --output /tmp/rph4_t3 --overview</code></pre></td>
+                <td>跨阶段总览显示 S0–S4 status.json；run.manifest.json 有 condition_signature</td>
+              </tr>
+              <tr>
+                <td>T5 重连</td>
+                <td><pre style="margin:0;font-size:12px;"><code># 运行中途 Ctrl+C，再运行相同命令
+bin/rph_run --csv data/reaxys_cleaned.csv --rx-id 1 --output /tmp/rph4_t3</code></pre></td>
+                <td>checkpoint 跳过已完成阶段；.rph/checkpoint.json 有 per-variant 状态</td>
+              </tr>
+              <tr>
+                <td>T6 DR 变体</td>
+                <td><pre style="margin:0;font-size:12px;"><code># 使用有明确 DR 的反应
+bin/rph_run --csv data/reaxys_cleaned.csv --rx-id &lt;DR_rx_id&gt; --output /tmp/rph4_dr</code></pre></td>
+                <td><code>S0_Mechanism/variant_registry.json</code> 同时列出 product_major 和 product_minor_001</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>实际运行后检查清单</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>检查项</th><th>文件路径</th><th>期望内容</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>S0 制品完整性</td><td><code>S0_Mechanism/*.json</code></td><td>6 个文件：mechanism, reaction_context, mechanism_graph, variant_registry, dr_branch_plan, atom_map_smiles</td></tr>
+              <tr><td>S1 selected.xyz</td><td><code>S1_ConfSearch/product_major/selected.xyz</code></td><td>物理文件存在，与 manifest 的 selected 候选一致</td></tr>
+              <tr><td>S1 precursor</td><td><code>S1_ConfSearch/precursor/manifest.json</code></td><td>precursor S1 已执行（如果 CSV 有 precursor SMILES）</td></tr>
+              <tr><td>S2 变体隔离</td><td><code>S2_PEB/product_major/</code></td><td>独立目录，manifest 有 variant_id + selected_id</td></tr>
+              <tr><td>S3 结构身份</td><td><code>S3_LowLevel/manifest.json</code></td><td>每个结构有 role, variant_id, parent_structure_id, source_stage</td></tr>
+              <tr><td>S3 TS 质量</td><td><code>S3_LowLevel/manifest.json</code></td><td>TS 结构有 frequency_count_valid, mode_displacement_valid, ts_quality_summary</td></tr>
+              <tr><td>S4 溶剂模型</td><td><code>S4_HighLevel/product_major_ts/opt/</code></td><td>Gaussian .gjf 含 <code>SCRF=(CPCM,Solvent=acetone)</code></td></tr>
+              <tr><td>run.manifest.json</td><td><code>run.manifest.json</code></td><td>有 condition_signature, conditions, variant_status, completed_through</td></tr>
+              <tr><td>checkpoint</td><td><code>.rph/checkpoint.json</code></td><td>per-variant s1/s2 条目，s3/s4 顶层条目</td></tr>
+              <tr><td>事件日志</td><td><code>S*/events.jsonl</code></td><td>S0–S4 每个阶段目录有 events.jsonl 和 status.json</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="file-inventory">
+        <h2>新增与修改文件清单</h2>
+        <h3>P0–P9 新增文件</h3>
+        <div class="tree">
+<span class="comment"># P0</span>
+tests/deprecated_v3/README.md
+docs/ARCHIVE_V3.md
+
+<span class="comment"># P1</span>
+rph_core/steps/mechanism_classifier/context.py
+rph_core/steps/mechanism_classifier/s0_artifact_writer.py
+
+<span class="comment"># P2</span>
+rph_core/utils/variant_checkpoint.py
+
+<span class="comment"># P6</span>
+rph_core/utils/ts_quality.py
+
+<span class="comment"># P7+P8</span>
+rph_core/utils/stage_progress.py
+
+<span class="comment"># 测试</span>
+tests/test_v4_s0_context.py
+tests/test_v4_variant_orchestration.py
+tests/test_v4_s1_full.py
+tests/test_v4_p4p5_structure_identity.py
+tests/test_v4_p6_ts_quality.py
+tests/test_v4_p7p8_conditions_observability.py
+        </div>
+
+        <h3>P0–P9 修改文件</h3>
+        <div class="tree">
+<span class="comment"># P0</span>
+README.md, README.zh-CN.md, pytest.ini
+AGENTS.md (root + 5 sub-AGENTS.md)
+
+<span class="comment"># P1</span>
+rph_core/steps/mechanism_classifier/s0_record.py
+rph_core/v4_orchestrator.py
+
+<span class="comment"># P2</span>
+rph_core/v4_orchestrator.py
+
+<span class="comment"># P3</span>
+rph_core/steps/conformer_search/censo_lite.py
+rph_core/steps/conformer_search/censo_lite_runtime.py
+rph_core/steps/conformer_search/torsion_signature.py
+rph_core/v4_orchestrator.py
+
+<span class="comment"># P4+P5</span>
+rph_core/v4_orchestrator.py
+rph_core/steps/step3_lowlevel/engine.py
+rph_core/steps/step4_highlevel/engine.py
+
+<span class="comment"># P6</span>
+rph_core/steps/stage_calculator.py
+rph_core/v4_orchestrator.py
+
+<span class="comment"># P7+P8</span>
+rph_core/v4_orchestrator.py
+rph_core/v4_watch.py
+        </div>
+
+        <h3>V4 测试套件</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>测试文件</th><th>覆盖阶段</th><th>测试数</th></tr></thead>
+            <tbody>
+              <tr><td><code>test_v4_protocol_contract.py</code></td><td>P0 — censo_lite 唯一协议</td><td>3</td></tr>
+              <tr><td><code>test_v4_checkpoint.py</code></td><td>P0 — V4Checkpoint 基础</td><td>3</td></tr>
+              <tr><td><code>test_v4_stage_calculator.py</code></td><td>P0 — StageCalculator S3/S4 映射</td><td>2</td></tr>
+              <tr><td><code>test_v4_s4_observability.py</code></td><td>P0 — S4 events/status/CPCM</td><td>2</td></tr>
+              <tr><td><code>test_v4_stop_after.py</code></td><td>P0 — CLI stop-after / SMILES 拒绝</td><td>3</td></tr>
+              <tr><td><code>test_v4_frequency_job.py</code></td><td>P0 — ORCA numfreq 路由</td><td>1</td></tr>
+              <tr><td><code>test_s0_record_restore.py</code></td><td>P1 — S0 记录加载 + 形成键</td><td>3</td></tr>
+              <tr><td><code>test_atom_mapping_peb.py</code></td><td>P1 — PEB 原子映射</td><td>~10</td></tr>
+              <tr><td><code>test_v4_s0_context.py</code></td><td>P1 — S0 制品写出验证</td><td>1</td></tr>
+              <tr><td><code>test_v4_variant_orchestration.py</code></td><td>P2 — 变体循环/隔离/checkpoint</td><td>4</td></tr>
+              <tr><td><code>test_v4_s1_full.py</code></td><td>P3 — selected.xyz/precursor/扭转角</td><td>5</td></tr>
+              <tr><td><code>test_v4_p4p5_structure_identity.py</code></td><td>P4+P5 — 结构身份传递</td><td>2</td></tr>
+              <tr><td><code>test_v4_p6_ts_quality.py</code></td><td>P6 — TS 质量分析</td><td>6</td></tr>
+              <tr><td><code>test_v4_p7p8_conditions_observability.py</code></td><td>P7+P8 — 条件元数据/可观测性</td><td>4</td></tr>
+              <tr><td><code>test_executable_resolution.py</code></td><td>通用 — 可执行文件解析</td><td>~15</td></tr>
+              <tr><td><code>test_resource_resolution.py</code></td><td>通用 — 资源解析</td><td>~34</td></tr>
+              <tr><td colspan="2"><strong>总计</strong></td><td><strong>98</strong></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <footer>
+        来源：docs/RPH_V4_COMPLETION_MASTER_PLAN.md · P0–P9 代码实现完成 · 98 tests passed · ReactionProfileHunter V4
+      </footer>
+    </main>
+  </div>
+</body>
+</html>

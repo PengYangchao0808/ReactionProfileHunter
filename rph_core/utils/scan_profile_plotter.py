@@ -53,12 +53,6 @@ def plot_scan_profile(
     figsize: Tuple[int, int] = (10, 6),
     ts_distance: Optional[float] = None,
     dipole_distance: Optional[float] = None,
-    path_ts_distance: Optional[float] = None,
-    path_ts_energy: Optional[float] = None,
-    gau_xtb_distance: Optional[float] = None,
-    gau_xtb_energy: Optional[float] = None,
-    gau_xtb2_distance: Optional[float] = None,
-    gau_xtb2_energy: Optional[float] = None,
 ) -> Optional[Path]:
     """
     Plot scan energy profile from scan_profile.json.
@@ -71,10 +65,6 @@ def plot_scan_profile(
         figsize: Figure size (width, height) in inches
         ts_distance: TS guess distance from knee point algorithm (Angstrom)
         dipole_distance: Dipole intermediate distance from knee point algorithm (Angstrom)
-        path_ts_distance: TS guess distance from xTB path search (Angstrom)
-        path_ts_energy: TS guess energy from xTB path search (Hartree)
-        gau_xtb_distance: TS guess distance from Gau_XTB optimization (Angstrom)
-        gau_xtb_energy: TS guess energy from Gau_XTB optimization (Hartree)
     
     Returns:
         Path to saved plot, or None if plotting failed
@@ -150,33 +140,6 @@ def plot_scan_profile(
         ax.axvline(x=ts_dist, color="orange", linestyle="-.", alpha=0.7)
         markers_added.append("ts")
     
-    if path_ts_distance is not None and energies:
-        if path_ts_energy is not None:
-            path_e = path_ts_energy * HARTREE_TO_KCAL if energy_unit == "kcal" else path_ts_energy
-        else:
-            path_idx = min(range(len(distances)), key=lambda i: abs(distances[i] - path_ts_distance))
-            path_e = energies[path_idx]
-        ax.scatter([path_ts_distance], [path_e], color="purple", s=200, zorder=7, marker="D", label=f"Path TS (d={path_ts_distance:.2f}Å, E={path_e:.2f})")
-        ax.axvline(x=path_ts_distance, color="purple", linestyle="--", alpha=0.8)
-    
-    if gau_xtb_distance is not None and energies:
-        if gau_xtb_energy is not None:
-            gau_e = gau_xtb_energy * HARTREE_TO_KCAL if energy_unit == "kcal" else gau_xtb_energy
-        else:
-            gau_idx = min(range(len(distances)), key=lambda i: abs(distances[i] - gau_xtb_distance))
-            gau_e = energies[gau_idx]
-        ax.scatter([gau_xtb_distance], [gau_e], color="brown", s=250, zorder=8, marker="p", label=f"Gau_XTB S2.1 (d={gau_xtb_distance:.2f}Å, E={gau_e:.2f})")
-        ax.axvline(x=gau_xtb_distance, color="brown", linestyle="-", linewidth=2, alpha=0.8)
-    
-    if gau_xtb2_distance is not None and energies:
-        if gau_xtb2_energy is not None:
-            gau2_e = gau_xtb2_energy * HARTREE_TO_KCAL if energy_unit == "kcal" else gau_xtb2_energy
-        else:
-            gau2_idx = min(range(len(distances)), key=lambda i: abs(distances[i] - gau_xtb2_distance))
-            gau2_e = energies[gau2_idx]
-        ax.scatter([gau_xtb2_distance], [gau2_e], color="red", s=300, zorder=9, marker="h", label=f"Gau_XTB S2.2 (d={gau_xtb2_distance:.2f}Å, E={gau2_e:.2f})")
-        ax.axvline(x=gau_xtb2_distance, color="red", linestyle="-", linewidth=2, alpha=0.8)
-    
     forming_bonds = data.get("forming_bonds", [])
     if forming_bonds:
         bond_str = ", ".join([f"{a}-{b}" for a, b in forming_bonds])
@@ -202,96 +165,6 @@ def plot_scan_profile(
     plt.close()
     
     logger.info(f"Scan profile plot saved to: {output_path}")
-    return output_path
-
-
-def plot_path_search_profile(
-    path_profile_json: Path,
-    output_path: Optional[Path] = None,
-    figsize: Tuple[int, int] = (10, 6),
-) -> Optional[Path]:
-    """
-    Plot path search energy profile from path_profile.json.
-    
-    Args:
-        path_profile_json: Path to path_profile.json
-        output_path: Optional output path for the plot
-        figsize: Figure size (width, height) in inches
-    
-    Returns:
-        Path to saved plot, or None if plotting failed
-    """
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError:
-        logger.warning("matplotlib not available, skipping plot generation")
-        return None
-    
-    path_profile_json = Path(path_profile_json)
-    if not path_profile_json.exists():
-        logger.error(f"Path profile JSON not found: {path_profile_json}")
-        return None
-    
-    with open(path_profile_json) as f:
-        data = json.load(f)
-    
-    energies = data.get("energies", {})
-    barrier_forward = energies.get("barrier_forward_kcal")
-    barrier_backward = energies.get("barrier_backward_kcal")
-    reaction_energy = energies.get("reaction_energy_kcal")
-    
-    if not any([barrier_forward, barrier_backward, reaction_energy]):
-        logger.error("No energy data found in path profile")
-        return None
-    
-    fig, ax = plt.subplots(figsize=figsize)
-    
-    labels = []
-    values = []
-    colors = []
-    
-    if barrier_forward is not None:
-        labels.append("Forward Barrier (‡→P)")
-        values.append(barrier_forward)
-        colors.append("green")
-    
-    if reaction_energy is not None:
-        labels.append("Reaction Energy (R→P)")
-        values.append(reaction_energy)
-        colors.append("blue")
-    
-    if barrier_backward is not None:
-        labels.append("Backward Barrier (‡→R)")
-        values.append(barrier_backward)
-        colors.append("orange")
-    
-    bars = ax.bar(labels, values, color=colors, alpha=0.7)
-    
-    for bar, val in zip(bars, values):
-        height = bar.get_height()
-        ax.annotate(
-            f"{val:.1f} kcal/mol",
-            xy=(bar.get_x() + bar.get_width() / 2, height),
-            xytext=(0, 3),
-            textcoords="offset points",
-            ha="center", va="bottom",
-            fontsize=10
-        )
-    
-    ax.set_ylabel("Energy (kcal/mol)")
-    ax.set_title("S2.2 Path Search Energy Profile")
-    ax.axhline(y=0, color="black", linestyle="-", linewidth=0.5)
-    ax.grid(True, axis="y", alpha=0.3)
-    
-    plt.tight_layout()
-    
-    if output_path is None:
-        output_path = path_profile_json.with_suffix(".png")
-    
-    plt.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close()
-    
-    logger.info(f"Path search profile plot saved to: {output_path}")
     return output_path
 
 

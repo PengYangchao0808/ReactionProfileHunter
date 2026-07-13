@@ -45,7 +45,7 @@ theory:
     enabled: true
     gfn_level: 2
     solvent: acetone
-    nproc: 4
+    nproc: null
     overlap_threshold: 1.0
     opt_level: crude  # 快速模式
 
@@ -55,7 +55,7 @@ theory:
     basis: def2-SVP
     dispersion: GD3BJ
     engine: orca  # 改为orca避免Gaussian AVX指令集不兼容
-    nproc: 8
+    nproc: null
     mem: 32GB
     solvent: acetone
 
@@ -64,7 +64,7 @@ theory:
     method: wB97X-D3BJ
     basis: def2-SVP  # 验证时临时降低，生产用def2-TZVPP
     engine: orca
-    nproc: 8
+    nproc: null
     maxcore: 1000
     solvent: acetone
     fallback_to_gaussian: true

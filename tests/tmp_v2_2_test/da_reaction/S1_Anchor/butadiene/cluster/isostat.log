@@ -1,1 +1,0 @@
-isostat executable not found; skipping clustering. Set config.executables.isostat.path or ensure isostat on PATH.

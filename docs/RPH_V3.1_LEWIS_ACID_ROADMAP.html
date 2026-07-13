@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RPH V3.1 — Lewis Acid Module Integration Roadmap</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --card: #1e293b;
+    --border: #334155;
+    --text: #e2e8f0;
+    --text-dim: #94a3b8;
+    --accent: #38bdf8;
+    --accent2: #a78bfa;
+    --green: #22c55e;
+    --yellow: #eab308;
+    --red: #ef4444;
+    --orange: #f97316;
+    --pipeline-s0: #6366f1;
+    --pipeline-s1: #8b5cf6;
+    --pipeline-s2: #a78bfa;
+    --pipeline-s3: #c084fc;
+    --la-a: #06b6d4;
+    --la-b: #10b981;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 2rem;
+  }
+  .container {
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+
+  /* Header */
+  .header {
+    text-align: center;
+    padding: 3rem 0 2rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 2rem;
+  }
+  .header h1 {
+    font-size: 2.5rem;
+    font-weight: 700;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 0.5rem;
+  }
+  .header .subtitle {
+    color: var(--text-dim);
+    font-size: 1.1rem;
+  }
+  .header .badge-row {
+    margin-top: 1rem;
+    display: flex;
+    justify-content: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+  .badge {
+    display: inline-block;
+    padding: 0.25rem 0.75rem;
+    border-radius: 9999px;
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+  .badge.v3-0 { background: var(--pipeline-s1); color: #fff; }
+  .badge.v3-1 { background: var(--la-a); color: #0f172a; }
+  .badge.status-design { background: var(--yellow); color: #0f172a; }
+  .badge.status-ready { background: var(--green); color: #0f172a; }
+
+  /* Cards */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+  }
+  .card h2 {
+    font-size: 1.4rem;
+    font-weight: 600;
+    margin-bottom: 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .card h3 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin: 1rem 0 0.5rem;
+    color: var(--accent);
+  }
+
+  /* Pipeline Flow */
+  .pipeline-flow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 1.5rem 0;
+    flex-wrap: wrap;
+  }
+  .pipeline-step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 80px;
+  }
+  .pipeline-step .box {
+    width: 80px;
+    height: 80px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 1.2rem;
+    color: #fff;
+    transition: transform 0.2s;
+  }
+  .pipeline-step .box:hover { transform: scale(1.05); }
+  .pipeline-step .box.s0 { background: var(--pipeline-s0); }
+  .pipeline-step .box.s1 { background: var(--pipeline-s1); }
+  .pipeline-step .box.s2 { background: var(--pipeline-s2); }
+  .pipeline-step .box.s3 { background: var(--pipeline-s3); }
+  .pipeline-step .box.la { background: var(--la-a); }
+  .pipeline-step .label {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    margin-top: 0.3rem;
+    text-align: center;
+  }
+  .pipeline-arrow {
+    color: var(--text-dim);
+    font-size: 1.5rem;
+    font-weight: 300;
+  }
+  .pipeline-legend {
+    display: flex;
+    justify-content: center;
+    gap: 1.5rem;
+    margin-top: 0.5rem;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    flex-wrap: wrap;
+  }
+  .pipeline-legend span { display: flex; align-items: center; gap: 0.3rem; }
+  .pipeline-legend .dot {
+    width: 10px; height: 10px;
+    border-radius: 50%; display: inline-block;
+  }
+  .dot.s0 { background: var(--pipeline-s0); }
+  .dot.s1 { background: var(--pipeline-s1); }
+  .dot.s2 { background: var(--pipeline-s2); }
+  .dot.s3 { background: var(--pipeline-s3); }
+  .dot.la { background: var(--la-a); }
+
+  /* Grid */
+  .grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+  }
+  @media (max-width: 768px) { .grid-2 { grid-template-columns: 1fr; } }
+
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+    margin: 0.75rem 0;
+  }
+  th, td {
+    padding: 0.6rem 0.75rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    color: var(--accent);
+    font-weight: 600;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  tr:hover { background: rgba(56, 189, 248, 0.04); }
+
+  /* Tags */
+  .tag {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .tag.green { background: rgba(34, 197, 94, 0.15); color: var(--green); }
+  .tag.yellow { background: rgba(234, 179, 8, 0.15); color: var(--yellow); }
+  .tag.red { background: rgba(239, 68, 68, 0.15); color: var(--red); }
+  .tag.blue { background: rgba(56, 189, 248, 0.15); color: var(--accent); }
+  .tag.purple { background: rgba(167, 139, 250, 0.15); color: var(--accent2); }
+
+  /* Lists */
+  ul, ol { padding-left: 1.2rem; margin: 0.5rem 0; }
+  li { margin-bottom: 0.3rem; }
+  .checklist { list-style: none; padding-left: 0; }
+  .checklist li::before {
+    content: "☐ ";
+    color: var(--text-dim);
+  }
+  .checklist li.done::before {
+    content: "✅ ";
+  }
+
+  /* Divider */
+  hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 1.5rem 0;
+  }
+
+  /* Risks */
+  .risk-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.25rem 0;
+  }
+  .risk-bar .fill {
+    height: 6px;
+    border-radius: 3px;
+    flex: 1;
+    max-width: 120px;
+  }
+  .risk-bar .fill.high { background: var(--red); }
+  .risk-bar .fill.medium { background: var(--yellow); }
+  .risk-bar .fill.low { background: var(--green); }
+
+  /* Arch diagram */
+  .arch-box {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    margin: 0.5rem 0;
+  }
+  .arch-box.part-a { border-color: var(--la-a); }
+  .arch-box.part-b { border-color: var(--la-b); }
+  .arch-box h4 {
+    font-size: 0.9rem;
+    margin-bottom: 0.5rem;
+  }
+
+  /* Timeline */
+  .timeline {
+    position: relative;
+    padding-left: 2rem;
+  }
+  .timeline::before {
+    content: '';
+    position: absolute;
+    left: 8px;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--border);
+  }
+  .timeline-item {
+    position: relative;
+    margin-bottom: 1rem;
+    padding-left: 1rem;
+  }
+  .timeline-item::before {
+    content: '';
+    position: absolute;
+    left: -1.65rem;
+    top: 0.5rem;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid var(--bg);
+  }
+  .timeline-item .tl-day {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    font-weight: 600;
+  }
+  .timeline-item .tl-task {
+    font-size: 0.9rem;
+  }
+
+  /* Summary bar */
+  .summary-bar {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+    margin: 1rem 0;
+  }
+  .stat {
+    flex: 1;
+    min-width: 120px;
+    text-align: center;
+    padding: 1rem;
+    background: rgba(56, 189, 248, 0.05);
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+  .stat .num {
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .stat .desc {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    margin-top: 0.2rem;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<!-- ===== HEADER ===== -->
+<div class="header">
+  <h1>RPH V3.1 — Lewis Acid Module</h1>
+  <div class="subtitle">ReactionProfileHunter · Neutral Lithium-Salt Chelation Surrogate · Descriptor Registry</div>
+  <div class="badge-row">
+    <span class="badge v3-0">V3.0.0 Baseline</span>
+    <span class="badge v3-1">V3.1.0 Target</span>
+    <span class="badge status-design">Design Complete</span>
+    <span class="badge status-ready">Ready for Implementation</span>
+  </div>
+</div>
+
+<!-- ===== SUMMARY STATS ===== -->
+<div class="summary-bar">
+  <div class="stat"><div class="num">~500</div><div class="desc">Net New Lines</div></div>
+  <div class="stat"><div class="num">10</div><div class="desc">Modified Files</div></div>
+  <div class="stat"><div class="num">2</div><div class="desc">New Files</div></div>
+  <div class="stat"><div class="num">~2 wk</div><div class="desc">Implementation</div></div>
+</div>
+
+<!-- ===== V3.0.0 PIPELINE ===== -->
+<div class="card">
+  <h2>V3.0.0 Pipeline Architecture (Current)</h2>
+  <div class="pipeline-flow">
+    <div class="pipeline-step">
+      <div class="box s0">S0</div>
+      <div class="label">Mechanism<br>Classification</div>
+    </div>
+    <div class="pipeline-arrow">→</div>
+    <div class="pipeline-step">
+      <div class="box s1">S1</div>
+      <div class="label">Anchor /<br>Conformer Search</div>
+    </div>
+    <div class="pipeline-arrow">→</div>
+    <div class="pipeline-step">
+      <div class="box s2">S2</div>
+      <div class="label">Retro Scan /<br>TS Guess</div>
+    </div>
+    <div class="pipeline-arrow">→</div>
+    <div class="pipeline-step">
+      <div class="box s3">S3</div>
+      <div class="label">TS Opt /<br>Validation</div>
+    </div>
+    <div class="pipeline-arrow">┄→</div>
+    <div class="pipeline-step">
+      <div class="box" style="background:#475569; width:60px; height:60px; font-size:0.9rem;">S4</div>
+      <div class="label">External<br>RPH_PP</div>
+    </div>
+  </div>
+  <div class="pipeline-legend">
+    <span><span class="dot s0"></span>S0 · Optional mechanism classifier</span>
+    <span><span class="dot s1"></span>S1 · CREST → xTB → DFT OPT/SP</span>
+    <span><span class="dot s2"></span>S2 · SMARTS + xTB scan + Gau_XTB</span>
+    <span><span class="dot s3"></span>S3 · Berny → QST2 → IRC</span>
+  </div>
+
+  <h3 style="margin-top:1.5rem;">Key Design Properties</h3>
+  <table>
+    <tr><th>Property</th><th>Detail</th></tr>
+    <tr><td>Molecule Handling</td><td>AnchorPhase accepts arbitrary <code>{name: SMILES}</code> dict; each molecule gets independent conformer search in <code>S1_ConfGeneration/{name}/</code></td></tr>
+    <tr><td>SMARTS Matching</td><td>Builds RDKit Mol from product XYZ; matches C/O ring patterns; returns 0-based atom indices relative to XYZ</td></tr>
+    <tr><td>Forming Bonds</td><td>5-stage resolution: cleaner data → atom map → S0 graph → SMARTS → deferred; validated against product geometry</td></tr>
+    <tr><td>TS Validation</td><td>Convergence check + imaginary frequency count; Berny → QST2 rescue on failure; optional IRC</td></tr>
+    <tr><td>Checkpoint</td><td><code>pipeline.state</code> JSON with <code>product_smiles</code>-based identity hashing</td></tr>
+    <tr><td>Small Molecules</td><td><code>SmallMoleculeCache</code> with key = <code>{formula}_{canonical_smiles}</code>; <code>SmallMoleculeCatalog</code> from config</td></tr>
+  </table>
+</div>
+
+<!-- ===== DUAL PART ARCHITECTURE ===== -->
+<div class="card">
+  <h2>V3.1 Lewis Acid Module — Dual-Part Architecture</h2>
+
+  <div class="grid-2">
+    <div class="arch-box part-a">
+      <h4 style="color:var(--la-a);">Part A · Descriptor Registry</h4>
+      <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:0.5rem;">Independent pre-computation. NOT a ΔG‡ corrector.</p>
+      <table>
+        <tr><th>Descriptor</th><th>v1 Status</th></tr>
+        <tr><td>acetone_affinity_kcal_mol</td><td><span class="tag green">Planned</span></td></tr>
+        <tr><td>thf_affinity_kcal_mol</td><td><span class="tag yellow">Optional</span></td></tr>
+        <tr><td>acetonitrile_affinity_kcal_mol</td><td><span class="tag yellow">Optional</span></td></tr>
+        <tr><td>lumo_energy_ev</td><td><span class="tag yellow">Optional</span></td></tr>
+        <tr><td>preferred_coordination_number</td><td><span class="tag blue">Literature</span></td></tr>
+      </table>
+      <p style="font-size:0.8rem;color:var(--text-dim);margin-top:0.5rem;">
+        Descriptors enter ML/post-analysis as independent features,<br>
+        interacting with LiCl geometry features through learned weights.
+      </p>
+    </div>
+    <div class="arch-box part-b">
+      <h4 style="color:var(--la-b);">Part B · LiCl Additive</h4>
+      <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:0.5rem;">Geometry-level integration. Canonical SMILES NEVER mutated.</p>
+      <table>
+        <tr><th>Module</th><th>Change</th></tr>
+        <tr><td>Config</td><td><span class="tag green">New section</span></td></tr>
+        <tr><td>Orchestrator</td><td><span class="tag blue">LewisAcidAdditive + geometry prep</span></td></tr>
+        <tr><td>S1</td><td><span class="tag blue">CREST NCI mode + wall potential</span></td></tr>
+        <tr><td>S2</td><td><span class="tag blue">Quality gate + Li–O trace</span></td></tr>
+        <tr><td>S3</td><td><span class="tag blue">Imaginary mode projection check</span></td></tr>
+        <tr><td>Checkpoint</td><td><span class="tag blue">Hash = canonical SMILES + LA config</span></td></tr>
+        <tr><td>S4 (External)</td><td><span class="tag purple">LiCl features + Δfeatures</span></td></tr>
+      </table>
+    </div>
+  </div>
+
+  <h3>Central Rule</h3>
+  <table>
+    <tr><th>What</th><th>Value</th></tr>
+    <tr><td><code>canonical_product_smiles</code></td><td>Original organic product SMILES — <strong style="color:var(--red);">NEVER mutated</strong></td></tr>
+    <tr><td><code>geometry_product_smiles</code></td><td>Original SMILES + <code>.[Li]Cl</code> — for S1 geometry only</td></tr>
+    <tr><td>checkpoint_identity_hash</td><td><code>hash(canonical SMILES + LA config + theory)</code> — not the geometry SMILES</td></tr>
+    <tr><td>SMARTS matching</td><td>Built from <strong>original product SMILES</strong>, not from XYZ</td></tr>
+    <tr><td>XYZ / DFT geometry</td><td>Organic product + LiCl atoms</td></tr>
+    <tr><td>additive_atom_indices</td><td>Explicitly tracked Li/Cl indices (0-based, in XYZ order)</td></tr>
+  </table>
+</div>
+
+<!-- ===== PIPELINE COMPARISON ===== -->
+<div class="card">
+  <h2>Pipeline Comparison: V3.0.0 vs V3.1.0</h2>
+
+  <div class="pipeline-flow">
+    <div class="pipeline-step">
+      <div class="box s0">S0</div>
+      <div class="label">Mechanism<br>Classification</div>
+    </div>
+    <div class="pipeline-arrow">→</div>
+    <div class="pipeline-step">
+      <div class="box la">LA</div>
+      <div class="label" style="color:var(--la-a);font-weight:600;">LiCl Prep</div>
+    </div>
+    <div class="pipeline-arrow">→</div>
+    <div class="pipeline-step">
+      <div class="box s1">S1</div>
+      <div class="label">NCI CREST<br>+ LiCl→DFT</div>
+    </div>
+    <div class="pipeline-arrow">→</div>
+    <div class="pipeline-step">
+      <div class="box s2">S2</div>
+      <div class="label">Scan +<br>Li–O Trace</div>
+    </div>
+    <div class="pipeline-arrow">→</div>
+    <div class="pipeline-step">
+      <div class="box s3">S3</div>
+      <div class="label">TS Opt +<br>Mode Check</div>
+    </div>
+    <div class="pipeline-arrow">┄→</div>
+    <div class="pipeline-step">
+      <div class="box" style="background:#475569; width:60px; height:60px; font-size:0.9rem;">S4</div>
+      <div class="label">+LiCl Feat.<br>+Δfeatures</div>
+    </div>
+  </div>
+
+  <table>
+    <tr><th>Stage</th><th>V3.0.0 Behavior</th><th>V3.1.0 Addition</th><th>Risk</th></tr>
+    <tr>
+      <td><strong>Orchestrator</strong></td>
+      <td>Builds <code>molecules = {"product": SMILES, ...}</code> from canonical SMILES</td>
+      <td>Creates <code>geometry_product = product + ".[Li]Cl"</code>; canonical SMILES unchanged; stores <code>LewisAcidAdditive</code> in PipelineResult</td>
+      <td><span class="tag green">Low</span></td>
+    </tr>
+    <tr>
+      <td><strong>S1 Conformer</strong></td>
+      <td>CREST → xTB GFN0/GFN2 → DFT OPT/SP per molecule independently</td>
+      <td>Product geometry includes LiCl; CREST uses NCI mode + wall potential to prevent LiCl dissociation; post-S1 validation checks Li–O contact</td>
+      <td><span class="tag yellow">Medium</span></td>
+    </tr>
+    <tr>
+      <td><strong>S2 SMARTS</strong></td>
+      <td>Builds Mol from product XYZ; matches C/O ring patterns</td>
+      <td>Builds Mol from <strong>canonical product SMILES</strong> (not XYZ); additive atoms ignored; forming bonds resolved from clean SMILES</td>
+      <td><span class="tag green">Low</span></td>
+    </tr>
+    <tr>
+      <td><strong>S2 Scan</strong></td>
+      <td>xTB constrained scan on product; returns ts_guess + intermediate</td>
+      <td>LiCl present as spectator; Li–O / Li–Cl distances traced per step; quality gate validates coordination envelope</td>
+      <td><span class="tag yellow">Medium</span></td>
+    </tr>
+    <tr>
+      <td><strong>S3 TS Opt</strong></td>
+      <td>Berny → QST2; validates convergence + imaginary freq count</td>
+      <td>Adds imaginary mode projection check; excludes LiCl floppy modes; requires reaction mode projection ≥ 0.35</td>
+      <td><span class="tag yellow">Medium</span></td>
+    </tr>
+    <tr>
+      <td><strong>Checkpoint</strong></td>
+      <td>Identity = <code>product_smiles</code>; step state with output_files + metadata</td>
+      <td>Identity = <code>hash(canonical SMILES + LA config + theory)</code>; LA-on and LA-off produce different hashes</td>
+      <td><span class="tag green">Low</span></td>
+    </tr>
+  </table>
+</div>
+
+<!-- ===== DATA MODEL ===== -->
+<div class="card">
+  <h2>Key Data Structures</h2>
+
+  <div class="grid-2">
+    <div>
+      <h3>LewisAcidAdditive</h3>
+      <pre style="background:var(--bg);padding:1rem;border-radius:8px;font-size:0.8rem;overflow-x:auto;">
+<span style="color:var(--accent2);">@dataclass</span>
+<span style="color:var(--accent);">class LewisAcidAdditive</span>:
+    enabled: bool = False
+    mode: str = "neutral_lithium_salt_chelation_surrogate"
+    surrogate_name: str = "LiCl"
+    surrogate_smiles: str = "[Li]Cl"
+    charge: int = 0
+    multiplicity: int = 1
+    additive_atom_indices: Tuple[int, ...] = ()
+    additive_elements: Tuple[str, ...] = ("Li","Cl")
+    li_coordination_site: Optional[str] = None
+    li_o_distance_initial: Optional[float] = None
+    li_cl_distance_initial: Optional[float] = None
+    config_snapshot: Optional[Dict] = None</pre>
+    </div>
+    <div>
+      <h3>Checkpoint Identity Hash</h3>
+      <pre style="background:var(--bg);padding:1rem;border-radius:8px;font-size:0.8rem;overflow-x:auto;">
+checkpoint_identity = hash({
+    "product_smiles": <span style="color:var(--green);">product_smiles</span>,   <span style="color:var(--text-dim);"># Clean</span>
+    "precursor_smiles": <span style="color:var(--green);">precursor</span>,       <span style="color:var(--text-dim);"># Clean</span>
+    "reaction_type": reaction_type,
+    "lewis_acid": {
+        "enabled": True,
+        "mode": "...chelation_surrogate",
+        "surrogate_name": "LiCl",
+        "surrogate_smiles": "[Li]Cl",
+    },
+    "theory": theory_config,
+    "solvent": solvent_config,
+})</pre>
+    </div>
+  </div>
+</div>
+
+<!-- ===== S2 + S3 QUALITY GATES ===== -->
+<div class="card">
+  <h2>Quality Gates (Mandatory)</h2>
+  <div class="grid-2">
+    <div>
+      <h3>S2 Quality Gate</h3>
+      <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:0.5rem;">A LiCl-enabled scan is accepted only if:</p>
+      <table>
+        <tr><th>Condition</th><th>Threshold</th></tr>
+        <tr><td>Forming bonds contain no Li/Cl</td><td><span class="tag green">Must pass</span></td></tr>
+        <tr><td>Li–Cl distance</td><td>≤ 3.5 Å</td></tr>
+        <tr><td>Li–O distance (nearest)</td><td>≤ 2.6 Å</td></tr>
+        <tr><td>Cl–reaction center distance</td><td>≥ 3.2 Å</td></tr>
+        <tr><td>Coordination site switch</td><td><span class="tag red">Forbidden</span></td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>S3 Quality Gate</h3>
+      <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:0.5rem;">A LiCl-enabled TS is accepted only if:</p>
+      <table>
+        <tr><th>Condition</th><th>Threshold</th></tr>
+        <tr><td>Chemically relevant imaginary modes (after excluding LiCl floppy modes)</td><td>≥ 1</td></tr>
+        <tr><td>Dominant mode projection onto forming bonds</td><td>≥ 0.35</td></tr>
+        <tr><td>LiCl motion contribution</td><td>≤ 0.25</td></tr>
+        <tr><td>IRC for flagged TS</td><td>Required if projection &lt; 0.50</td></tr>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ===== S4 LICL FEATURES ===== -->
+<div class="card">
+  <h2>S4 — LiCl Feature Mining (via RPH_Postprocess)</h2>
+  <div class="grid-2">
+    <div>
+      <h3>Coordination Features</h3>
+      <table>
+        <tr><th>Feature</th><th>Description</th></tr>
+        <tr><td><code>d_LiCl</code></td><td>Li–Cl distance (Å)</td></tr>
+        <tr><td><code>d_LiO_min</code></td><td>Nearest substrate O distance (Å)</td></tr>
+        <tr><td><code>d_LiO_second</code></td><td>Second-nearest O distance (Å)</td></tr>
+        <tr><td><code>CN_Li_hetero</code></td><td>Li coordination number (heteroatoms)</td></tr>
+        <tr><td><code>CN_Li_total</code></td><td>Total Li coordination number</td></tr>
+        <tr><td><code>angle_O_Li_O</code></td><td>O–Li–O angle (degrees)</td></tr>
+        <tr><td><code>angle_Cl_Li_O</code></td><td>Cl–Li–O angle (degrees)</td></tr>
+        <tr><td><code>chelation_ring_size</code></td><td>Size of chelation ring if applicable</td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>Activation Features</h3>
+      <table>
+        <tr><th>Feature</th><th>Description</th></tr>
+        <tr><td><code>d_CO_elongation</code></td><td>C=O bond elongation vs no-LA</td></tr>
+        <tr><td><code>delta_q_carbonyl_O</code></td><td>Carbonyl O charge shift</td></tr>
+        <tr><td><code>delta_q_carbonyl_C</code></td><td>Carbonyl C charge shift</td></tr>
+        <tr><td><code>delta_Wiberg_CO</code></td><td>C=O Wiberg bond order shift</td></tr>
+        <tr><td><code>delta_dipole</code></td><td>Total dipole moment shift</td></tr>
+      </table>
+      <h3 style="margin-top:1rem;">Paired ΔFeatures</h3>
+      <pre style="background:var(--bg);padding:0.75rem;border-radius:8px;font-size:0.85rem;">
+Δfeature = feature(substrate + LiCl)
+         − feature(substrate without LiCl)</pre>
+      <p style="font-size:0.8rem;color:var(--text-dim);">The most important ML features: how the system <em style="color:var(--accent);">responds</em> to chelation.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ===== RISK REGISTER ===== -->
+<div class="card">
+  <h2>Risk Register</h2>
+  <table>
+    <tr><th>Risk</th><th>Likelihood</th><th>Impact</th><th>Mitigation</th></tr>
+    <tr>
+      <td>SMARTS poisoned by Li–O bond perception</td>
+      <td><span class="tag green">Low</span></td>
+      <td><span class="tag red">High</span></td>
+      <td style="font-size:0.85rem;">Build Mol from canonical SMILES, not XYZ</td>
+    </tr>
+    <tr>
+      <td>Li–Cl dissociation as false forming bond</td>
+      <td><span class="tag yellow">Medium</span></td>
+      <td><span class="tag red">High</span></td>
+      <td style="font-size:0.85rem;">Force SMARTS fallback; hard element filter on additive atoms</td>
+    </tr>
+    <tr>
+      <td>CREST dissociates LiCl during conformer search</td>
+      <td><span class="tag yellow">Medium</span></td>
+      <td><span class="tag yellow">Medium</span></td>
+      <td style="font-size:0.85rem;">NCI mode + wall potential + weak Li–O restraint</td>
+    </tr>
+    <tr>
+      <td>xTB scan unstable with LiCl drift</td>
+      <td><span class="tag yellow">Medium</span></td>
+      <td><span class="tag yellow">Medium</span></td>
+      <td style="font-size:0.85rem;">Monitor Li–O trace; mark degraded on dissociation</td>
+    </tr>
+    <tr>
+      <td>TS optimizer chases LiCl motion instead of reaction</td>
+      <td><span class="tag yellow">Medium</span></td>
+      <td><span class="tag yellow">Medium</span></td>
+      <td style="font-size:0.85rem;">Validate imaginary mode projection; exclude additive-dominated modes</td>
+    </tr>
+    <tr>
+      <td>LiCl coordinates to wrong substrate site</td>
+      <td><span class="tag yellow">Medium</span></td>
+      <td><span class="tag green">Low</span></td>
+      <td style="font-size:0.85rem;">CREST ensemble finds global minimum; validate coordination site post-S1</td>
+    </tr>
+    <tr>
+      <td>Checkpoint identity confusion (LA-on vs LA-off)</td>
+      <td><span class="tag green">Low</span></td>
+      <td><span class="tag red">High</span></td>
+      <td style="font-size:0.85rem;">Hash includes canonical SMILES + full LA config, not geometry SMILES</td>
+    </tr>
+    <tr>
+      <td>ML features not useful (no improvement over no-LA baseline)</td>
+      <td><span class="tag green">Low</span></td>
+      <td><span class="tag yellow">Medium</span></td>
+      <td style="font-size:0.85rem;">Validation Gate C: LORO/nested CV must improve; must vanish under shuffle control</td>
+    </tr>
+    <tr>
+      <td>Real LA correlation treated as linear</td>
+      <td><span class="tag red">Certain</span></td>
+      <td><span class="tag green">Low</span></td>
+      <td style="font-size:0.85rem;">Descriptors are ML features with interaction terms, not ΔG‡ correctors</td>
+    </tr>
+  </table>
+</div>
+
+<!-- ===== MODIFIED FILES ===== -->
+<div class="card">
+  <h2>Modified Files</h2>
+  <table>
+    <tr><th>File</th><th>Change</th><th>Est. Lines</th><th>Status</th></tr>
+    <tr><td><code>config/defaults.yaml</code></td><td>Add <code>lewis_acid:</code> section (mode, surrogate, quality gate thresholds, s1_sampling)</td><td>+40</td><td><span class="tag blue">Planned</span></td></tr>
+    <tr><td><code>rph_core/lewis_acid/__init__.py</code></td><td>Create module stub</td><td>+1</td><td><span class="tag blue">Planned</span></td></tr>
+    <tr><td><code>rph_core/lewis_acid/acidity.py</code></td><td>Part A — descriptor registry (acetone affinity computation + JSON I/O)</td><td>~200</td><td><span class="tag blue">Planned</span></td></tr>
+    <tr><td><code>rph_core/orchestrator.py</code></td><td>LewisAcidAdditive dataclass, _prepare_lewis_acid_system(), PipelineResult ext., checkpoint hash, pass additive to S2/S3</td><td>~100</td><td><span class="tag blue">Planned</span></td></tr>
+    <tr><td><code>rph_core/steps/conformer_search/engine.py</code></td><td>CREST NCI mode + wall potential when LA enabled</td><td>~20</td><td><span class="tag blue">Planned</span></td></tr>
+    <tr><td><code>rph_core/steps/step2_retro/retro_scanner.py</code></td><td>accept lewis_acid_additive param; Li–O/Li–Cl trace; quality gate</td><td>~50</td><td><span class="tag blue">Planned</span></td></tr>
+    <tr><td><code>rph_core/steps/step2_retro/smarts_matcher.py</code></td><td>Build Mol from canonical SMILES, not XYZ; accept additive_indices</td><td>~15</td><td><span class="tag blue">Planned</span></td></tr>
+    <tr><td><code>rph_core/steps/step3_opt/ts_optimizer.py</code></td><td>Pass additive info to validator</td><td>~5</td><td><span class="tag blue">Planned</span></td></tr>
+    <tr><td><code>rph_core/steps/step3_opt/validator.py</code></td><td>Imaginary mode projection check; skip additive-dominated modes</td><td>~40</td><td><span class="tag blue">Planned</span></td></tr>
+    <tr><td><code>rph_core/utils/forming_bonds_resolver.py</code></td><td>LA mode: force SMARTS fallback + hard element filter</td><td>+25</td><td><span class="tag blue">Planned</span></td></tr>
+  </table>
+</div>
+
+<!-- ===== VALIDATION GATES ===== -->
+<div class="card">
+  <h2>Validation Gates</h2>
+  <table>
+    <tr><th>Gate</th><th>What It Validates</th><th>Criteria</th></tr>
+    <tr>
+      <td><span class="tag purple">A · Geometry Sanity</span></td>
+      <td>LiCl actually coordinates</td>
+      <td>Stable Li–O contact formed; LiCl not drifted away (Li–Cl ≤ 3.5 Å, Li–substrate ≤ 4.0 Å); Cl not at reaction center (≥ 3.2 Å)</td>
+    </tr>
+    <tr>
+      <td><span class="tag purple">B · Reaction Identity</span></td>
+      <td>Organic reaction unchanged</td>
+      <td>SMARTS-derived forming bonds match no-LA run; Li/Cl never in forming-bond list; TS imaginary mode is organic reaction mode</td>
+    </tr>
+    <tr>
+      <td><span class="tag purple">C · ML Usefulness</span></td>
+      <td>Features add value</td>
+      <td>LiCl features non-constant across dataset; improve LORO/nested CV over no-LA baseline; improvement vanishes under shuffled-target control</td>
+    </tr>
+    <tr>
+      <td><span class="tag purple">D · Physical Benchmark</span></td>
+      <td>Directionally correct</td>
+      <td>On 2–3 representative reactions: compare no-LA vs LiCl vs one real LA at intermediate/product level. Do NOT require exact energy match. Require same direction of coordination/preorganization effect.</td>
+    </tr>
+  </table>
+</div>
+
+<!-- ===== TIMELINE ===== -->
+<div class="card">
+  <h2>Implementation Timeline (Phase 1)</h2>
+  <div class="grid-2">
+    <div>
+      <h3>Week 1: Pipeline Integration</h3>
+      <div class="timeline">
+        <div class="timeline-item">
+          <div class="tl-day">Day 1</div>
+          <div class="tl-task">Config + <code>LewisAcidAdditive</code> dataclass + PipelineResult</div>
+        </div>
+        <div class="timeline-item">
+          <div class="tl-day">Day 2</div>
+          <div class="tl-task">Orchestrator geometry preparation + checkpoint hashing</div>
+        </div>
+        <div class="timeline-item">
+          <div class="tl-day">Day 3</div>
+          <div class="tl-task">S1 CREST NCI mode + post-S1 validation</div>
+        </div>
+        <div class="timeline-item">
+          <div class="tl-day">Day 4</div>
+          <div class="tl-task">S2 forming bonds resolution + quality gate</div>
+        </div>
+        <div class="timeline-item">
+          <div class="tl-day">Day 5</div>
+          <div class="tl-task">S3 mode projection check + quality gate</div>
+        </div>
+      </div>
+    </div>
+    <div>
+      <h3>Week 2: Features + Validation</h3>
+      <div class="timeline">
+        <div class="timeline-item">
+          <div class="tl-day">Day 6</div>
+          <div class="tl-task">S4 LiCl features (coordination + activation + Δfeatures) in RPH_Postprocess</div>
+        </div>
+        <div class="timeline-item">
+          <div class="tl-day">Day 7</div>
+          <div class="tl-task">Part A descriptor registry (acetone affinity)</div>
+        </div>
+        <div class="timeline-item">
+          <div class="tl-day">Day 8</div>
+          <div class="tl-task">Validation Gates A–D</div>
+        </div>
+        <div class="timeline-item">
+          <div class="tl-day">Day 9</div>
+          <div class="tl-task">Integration test + edge cases (precursor with/without LiCl, batch mode, resume)</div>
+        </div>
+        <div class="timeline-item">
+          <div class="tl-day">Day 10</div>
+          <div class="tl-task">Documentation + cleanup + AGENTS.md update</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== FOOTER ===== -->
+<div style="text-align:center;padding:2rem 0;color:var(--text-dim);font-size:0.85rem;border-top:1px solid var(--border);margin-top:2rem;">
+  <p>ReactionProfileHunter · V3.1 Lewis Acid Module · Design v2 (Final) · 2026-06-11</p>
+  <p style="margin-top:0.3rem;">
+    <a href="LEWIS_ACID_MODULE_DESIGN.md" style="color:var(--accent);">Full Design Document</a>
+    &nbsp;·&nbsp;
+    <a href="AGENTS.md" style="color:var(--accent);">AGENTS.md</a>
+    &nbsp;·&nbsp;
+    <a href="README.md" style="color:var(--accent);">README</a>
+  </p>
+</div>
+
+</div>
+</body>
+</html>

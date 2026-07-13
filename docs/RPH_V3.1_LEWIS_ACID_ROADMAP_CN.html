@@ -1,0 +1,961 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RPH V3.1 — 路易斯酸模块集成路线图</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --bg2: #1a2332;
+    --card: #1e293b;
+    --border: #334155;
+    --text: #e2e8f0;
+    --text-dim: #94a3b8;
+    --accent: #38bdf8;
+    --accent2: #a78bfa;
+    --green: #22c55e;
+    --yellow: #eab308;
+    --red: #ef4444;
+    --orange: #f97316;
+    --pink: #ec4899;
+    --s0: #6366f1;
+    --s1: #8b5cf6;
+    --s2: #a78bfa;
+    --s3: #c084fc;
+    --la-a: #06b6d4;
+    --la-b: #10b981;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    padding: 1.5rem;
+  }
+  .container { max-width: 1120px; margin: 0 auto; }
+
+  /* Header */
+  .header {
+    text-align: center;
+    padding: 2.5rem 0 1.5rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 2rem;
+  }
+  .header h1 {
+    font-size: 2.2rem;
+    font-weight: 700;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 0.4rem;
+  }
+  .header .subtitle { color: var(--text-dim); font-size: 1rem; }
+  .badge-row {
+    margin-top: 0.8rem;
+    display: flex; justify-content: center; gap: 0.5rem; flex-wrap: wrap;
+  }
+  .badge {
+    display: inline-block; padding: 0.2rem 0.6rem; border-radius: 9999px;
+    font-size: 0.75rem; font-weight: 600;
+  }
+  .badge.v3-0 { background: var(--s1); color: #fff; }
+  .badge.v3-1 { background: var(--la-a); color: #0f172a; }
+  .badge.done { background: var(--green); color: #0f172a; }
+  .badge.plan { background: var(--yellow); color: #0f172a; }
+
+  /* Card */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+  }
+  .card h2 {
+    font-size: 1.3rem;
+    font-weight: 600;
+    margin-bottom: 0.8rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 0.5rem;
+  }
+  .card h2 .icon { font-size: 1.2rem; }
+  .card h3 {
+    font-size: 1.05rem;
+    font-weight: 600;
+    margin: 1rem 0 0.4rem;
+    color: var(--accent);
+  }
+  .card h4 {
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin: 0.6rem 0 0.3rem;
+    color: var(--accent2);
+  }
+
+  /* Grid */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; }
+  @media (max-width: 768px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 0.5rem 0; }
+  th, td { padding: 0.5rem 0.6rem; text-align: left; border-bottom: 1px solid var(--border); }
+  th {
+    color: var(--accent); font-weight: 600; font-size: 0.78rem;
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  tr:hover { background: rgba(56, 189, 248, 0.03); }
+
+  /* Tags */
+  .tag {
+    display: inline-block; padding: 0.12rem 0.45rem; border-radius: 4px;
+    font-size: 0.72rem; font-weight: 600;
+  }
+  .tag.green { background: rgba(34,197,94,0.15); color: var(--green); }
+  .tag.yellow { background: rgba(234,179,8,0.15); color: var(--yellow); }
+  .tag.red { background: rgba(239,68,68,0.15); color: var(--red); }
+  .tag.blue { background: rgba(56,189,248,0.15); color: var(--accent); }
+  .tag.purple { background: rgba(167,139,250,0.15); color: var(--accent2); }
+  .tag.pink { background: rgba(236,72,153,0.15); color: var(--pink); }
+
+  /* Pipeline Flow */
+  .pipeline-flow {
+    display: flex; align-items: center; justify-content: center;
+    gap: 0.4rem; padding: 1.2rem 0; flex-wrap: wrap;
+  }
+  .pstep { display: flex; flex-direction: column; align-items: center; min-width: 72px; }
+  .pstep .box {
+    width: 72px; height: 72px; border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 1.1rem; color: #fff;
+    transition: transform 0.2s;
+  }
+  .pstep .box:hover { transform: scale(1.05); }
+  .pstep .box.s0 { background: var(--s0); }
+  .pstep .box.s1 { background: var(--s1); }
+  .pstep .box.s2 { background: var(--s2); }
+  .pstep .box.s3 { background: var(--s3); }
+  .pstep .box.la { background: var(--la-a); }
+  .pstep .box.s4 { background: #475569; width: 58px; height: 58px; font-size: 0.9rem; }
+  .pstep .lbl { font-size: 0.72rem; color: var(--text-dim); margin-top: 0.25rem; text-align: center; }
+  .parrow { color: var(--text-dim); font-size: 1.3rem; font-weight: 300; }
+
+  /* Tree */
+  .tree { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.82rem; line-height: 1.6; }
+  .tree .comment { color: var(--text-dim); font-style: italic; }
+  .tree .highlight { color: var(--accent); font-weight: 600; }
+  .tree .la-highlight { color: var(--la-a); font-weight: 600; }
+
+  /* Info boxes */
+  .info {
+    background: rgba(56,189,248,0.06); border-left: 3px solid var(--accent);
+    padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 0.5rem 0; font-size: 0.88rem;
+  }
+  .warn {
+    background: rgba(234,179,8,0.06); border-left: 3px solid var(--yellow);
+    padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 0.5rem 0; font-size: 0.88rem;
+  }
+  .danger {
+    background: rgba(239,68,68,0.06); border-left: 3px solid var(--red);
+    padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 0.5rem 0; font-size: 0.88rem;
+  }
+
+  /* Timeline */
+  .tl { position: relative; padding-left: 1.8rem; }
+  .tl::before {
+    content: ''; position: absolute; left: 7px; top: 0; bottom: 0;
+    width: 2px; background: var(--border);
+  }
+  .tli { position: relative; margin-bottom: 0.8rem; padding-left: 0.8rem; }
+  .tli::before {
+    content: ''; position: absolute; left: -1.5rem; top: 0.45rem;
+    width: 10px; height: 10px; border-radius: 50%; background: var(--accent);
+    border: 2px solid var(--bg);
+  }
+  .tli .day { font-size: 0.72rem; color: var(--text-dim); font-weight: 600; }
+  .tli .task { font-size: 0.88rem; }
+
+  /* Stats */
+  .stats { display: flex; gap: 0.8rem; flex-wrap: wrap; margin: 0.8rem 0; }
+  .stat {
+    flex: 1; min-width: 100px; text-align: center;
+    padding: 0.8rem; background: rgba(56,189,248,0.04);
+    border-radius: 8px; border: 1px solid var(--border);
+  }
+  .stat .num { font-size: 1.6rem; font-weight: 700; color: var(--accent); }
+  .stat .dsc { font-size: 0.72rem; color: var(--text-dim); margin-top: 0.15rem; }
+
+  /* Flow diagram */
+  .flow-box {
+    display: flex; flex-direction: column; align-items: center;
+    padding: 0.6rem; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg); font-size: 0.82rem;
+  }
+  .flow-box .fn { color: var(--accent); font-family: monospace; font-size: 0.78rem; }
+  .flow-box .desc { color: var(--text-dim); font-size: 0.72rem; margin-top: 0.15rem; }
+
+  /* Code */
+  code {
+    background: rgba(56,189,248,0.08); padding: 0.1rem 0.3rem;
+    border-radius: 3px; font-size: 0.85em; font-family: 'SF Mono', monospace;
+  }
+  pre {
+    background: var(--bg); padding: 0.8rem; border-radius: 8px;
+    font-size: 0.8rem; overflow-x: auto; line-height: 1.5;
+    border: 1px solid var(--border);
+  }
+  pre .k { color: var(--accent2); }
+  pre .s { color: var(--green); }
+  pre .c { color: var(--text-dim); font-style: italic; }
+  pre .v { color: var(--accent); }
+  pre .kc { color: var(--pink); }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 0; margin-bottom: 0; border-bottom: 1px solid var(--border); }
+  .tab {
+    padding: 0.5rem 1rem; font-size: 0.85rem; cursor: pointer;
+    border: 1px solid transparent; border-bottom: none;
+    border-radius: 6px 6px 0 0; color: var(--text-dim);
+    background: transparent; transition: all 0.2s;
+  }
+  .tab.active {
+    background: var(--card); border-color: var(--border);
+    color: var(--accent); font-weight: 600;
+  }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<div class="header">
+  <h1>RPH V3.1 · 路易斯酸模块集成路线图</h1>
+  <div class="subtitle">ReactionProfileHunter · 中性锂盐螯合替代物 · 描述符注册表 · 项目跟进文档</div>
+  <div class="badge-row">
+    <span class="badge v3-0">V3.0.0 基线</span>
+    <span class="badge v3-1">V3.1.0 目标</span>
+    <span class="badge done">设计完成</span>
+    <span class="badge plan">待实现</span>
+  </div>
+</div>
+
+<div class="stats">
+  <div class="stat"><div class="num">~54k</div><div class="dsc">Python 代码行数</div></div>
+  <div class="stat"><div class="num">212</div><div class="dsc">Python 文件</div></div>
+  <div class="stat"><div class="num">723</div><div class="dsc">总文件数</div></div>
+  <div class="stat"><div class="num">15</div><div class="dsc">AGENTS.md 文档</div></div>
+  <div class="stat"><div class="num">~500</div><div class="dsc">V3.1 新增行数</div></div>
+</div>
+
+<!-- ============================================================ -->
+<div class="card">
+  <h2><span class="icon">📁</span> V3.0.0 完整项目文件树</h2>
+
+<div class="grid-2">
+<div>
+<pre class="tree">
+ReactionProfileHunter/
+├── <span class="highlight">rph_core/</span>            <span class="comment"># 核心源码 — 仅绝对导入</span>
+│   ├── <span class="highlight">orchestrator.py</span>  <span class="comment"># 主流水线 + CLI (3641行)</span>
+│   │   ├── ReactionProfileHunter   # 编排器类
+│   │   ├── run_pipeline()          # S0-S3 串行调度
+│   │   ├── _run_s0()               # 机理分类器
+│   │   ├── _resolve_forming_bonds_for_s2()
+│   │   ├── _resolve_s1_artifacts() # 目录兼容
+│   │   └── main()                  # CLI argparse
+│   ├── <span class="highlight">__main__.py</span>       <span class="comment"># python -m rph_core</span>
+│   ├── <span class="highlight">version.py</span>        <span class="comment"># V3.0.0</span>
+│   ├── <span class="highlight">scheduling/</span>       <span class="comment"># 批处理调度</span>
+│   │   ├── v3_scheduler.py
+│   │   ├── models.py
+│   │   ├── artifact_refs.py
+│   │   └── small_molecule_precompute.py
+│   ├── <span class="highlight">steps/</span>             <span class="comment"># S0-S3 实现</span>
+│   │   ├── <span class="highlight">mechanism_classifier/</span>  <span class="comment"># S0 (可选)</span>
+│   │   │   ├── classifier.py       # MechanismClassifier
+│   │   │   ├── graph_builder.py    # GraphBuilder
+│   │   │   ├── models.py           # MechanismGraph
+│   │   │   └── clean_adapter.py    # CleanRecord
+│   │   ├── <span class="highlight">anchor/</span>              <span class="comment"># S1 锚定</span>
+│   │   │   ├── handler.py          # AnchorPhase (913行)
+│   │   │   └── engine_factory.py
+│   │   ├── <span class="highlight">conformer_search/</span>     <span class="comment"># S1 构象引擎</span>
+│   │   │   ├── engine.py           # ConformerEngine (2484行)
+│   │   │   ├── protocols.py
+│   │   │   └── pipeline/stages/
+│   │   ├── <span class="highlight">step2_retro/</span>          <span class="comment"># S2 逆向扫描</span>
+│   │   │   ├── retro_scanner.py    # RetroScanner
+│   │   │   ├── smarts_matcher.py   # SMARTS 模板
+│   │   │   └── bond_stretcher.py
+│   │   ├── <span class="highlight">step3_opt/</span>            <span class="comment"># S3 TS优化</span>
+│   │   │   ├── ts_optimizer.py     # TSOptimizer (1226行)
+│   │   │   ├── berny_driver.py
+│   │   │   ├── qst2_rescue.py
+│   │   │   ├── irc_driver.py
+│   │   │   ├── validator.py
+│   │   │   ├── intermediate_driver.py
+│   │   │   ├── post_qc_enrichment.py
+│   │   │   └── intramolecular_fragmenter.py
+│   │   ├── <span class="highlight">runners.py</span>           <span class="comment"># run_step2/3 封装</span>
+│   │   └── <span class="highlight">contracts.py</span>         <span class="comment"># StepArtifacts</span>
+│   └── <span class="highlight">utils/</span>             <span class="comment"># 41个基础设施文件</span>
+│       ├── qc_interface.py         # ALL QC 调用 (2036行)
+│       ├── qc_task_runner.py       # OPT/SP 耦合循环
+│       ├── qc_runner.py            # 重试逻辑
+│       ├── orca_interface.py       # ORCA (1124行)
+│       ├── xtb_runner.py           # xTB (588行)
+│       ├── checkpoint_manager.py   # 检查点 (603行)
+│       ├── geometry_tools.py       # 几何处理 (837行)
+│       ├── fchk_reader.py          # .fchk 解析
+│       ├── small_molecule_cache.py # 小分子缓存
+│       ├── molecule_utils.py       # SMILES 工具
+│       ├── forming_bonds_resolver.py
+│       ├── config_loader.py        # YAML → dict
+│       ├── path_compat.py          # 路径兼容
+│       ├── naming_compat.py        # 命名兼容
+│       ├── data_types.py           # QCResult / ScanResult
+│       ├── log_manager.py          # LoggerMixin
+│       └── thermo/                 # 热化学工具
+</pre>
+</div>
+<div>
+<pre class="tree">
+├── <span class="highlight">bin/</span>                <span class="comment"># CLI 入口</span>
+│   ├── rph_run           # 主入口 (sys.path + main)
+│   └── rph               # 短别名
+├── <span class="highlight">config/</span>             <span class="comment"># 唯一配置源</span>
+│   ├── defaults.yaml     # 全部配置键 (777行)
+│   └── templates/        # Gaussian .gjf/.com
+├── <span class="highlight">tests/</span>              <span class="comment"># pytest 套件 (82文件)</span>
+│   ├── conftest.py       # sys.path 注入
+│   ├── tmp_v2_2_test/    # S1 夹具 (勿删)
+│   ├── fixtures/         # 静态数据
+│   └── AGENTS.md         # 测试指南
+├── <span class="highlight">scripts/</span>            <span class="comment"># 工具脚本</span>
+│   ├── ci/check_imports.py  # 导入检查
+│   ├── run_g16_worker.sh    # Gaussian 封装
+│   ├── rebuild_all.sh       # ML 数据重建
+│   └── ...
+├── <span class="highlight">rph_benchmark/</span>      <span class="comment"># 基准测试套件</span>
+│   ├── confsearch/       # 构象协议基准
+│   └── dft_theory/       # DFT 方法基准
+├── <span class="highlight">docs/</span>               <span class="comment"># 设计文档</span>
+│   ├── AGENTS.md
+│   ├── archive/          # v2.x 历史 (冻结)
+│   └── ...
+├── <span class="highlight">AGENTS.md</span>           <span class="comment"># 智能体编码指南 (250行)</span>
+├── <span class="highlight">README.md</span>           <span class="comment"># 英文 (802行)</span>
+├── <span class="highlight">README.zh-CN.md</span>     <span class="comment"># 中文 (811行)</span>
+├── <span class="highlight">.gitignore</span>
+└── <span class="highlight">external_data/</span>     <span class="comment"># 备份数据 (gitignored)</span>
+    └── rph_output_backup/
+</pre>
+</div>
+</div>
+</div>
+
+<!-- ============================================================ -->
+<div class="card">
+  <h2><span class="icon">🔧</span> V3.0.0 各模块功能详解</h2>
+
+  <h3>1. 编排器 — orchestrator.py (3641行)</h3>
+  <div class="info">
+    <code>ReactionProfileHunter</code> 类是整个流水线的总指挥，采用"编排器只调度不干活"的设计模式。
+  </div>
+  <table>
+    <tr><th>方法</th><th>行号</th><th>功能</th><th>数据流</th></tr>
+    <tr>
+      <td><code>run_pipeline()</code></td><td>1843</td>
+      <td>S0→S1→S2→S3 串行调度，含检查点恢复</td>
+      <td>接收 product_smiles + work_dir，返回 PipelineResult</td>
+    </tr>
+    <tr>
+      <td><code>_run_s0()</code></td><td>1590</td>
+      <td>机理分类 (可选)，输出 forming_bonds 给 S2</td>
+      <td>cleaner_data → MechanismGraph → mechanism_summary.json</td>
+    </tr>
+    <tr>
+      <td><code>_resolve_forming_bonds_for_s2()</code></td><td>668</td>
+      <td>5级成键解析链：cleaner→atom_map→S0→SMARTS→deferred</td>
+      <td>产物几何验证→传递给 S2 scan 和 S3 优化</td>
+    </tr>
+    <tr>
+      <td><code>_resolve_s1_artifacts()</code></td><td>1748</td>
+      <td>v2.1/v3.0/v6.1 目录布局兼容</td>
+      <td>回填旧版目录结构到新版格式</td>
+    </tr>
+    <tr>
+      <td><code>main()</code></td><td>2048</td>
+      <td>CLI 参数解析: --smiles, --output, --config, --reaction-type, --skip-steps</td>
+      <td>argparse → config merge → run_pipeline()</td>
+    </tr>
+  </table>
+
+  <h3>2. S0 — 机理分类器 (可选)</h3>
+  <div class="info">
+    构建有向无环图 (DAG) 表示反应机理，识别环加成模式。跳过时 S2 回退 SMARTS 自动检测。
+  </div>
+  <table>
+    <tr><th>文件</th><th>类/方法</th><th>功能</th></tr>
+    <tr><td><code>classifier.py</code></td><td><code>MechanismClassifier.classify_single()</code></td><td>接收 CleanRecord，输出 MechanismGraph</td></tr>
+    <tr><td><code>clean_adapter.py</code></td><td><code>CleanRecord</code></td><td>Cleaner CSV 解析: reaction_id, precursor_smiles, product_smiles, core_bond_changes</td></tr>
+    <tr><td><code>graph_builder.py</code></td><td><code>GraphBuilder.build()</code></td><td>parse core_bond_changes → 识别 forming/breaking bonds</td></tr>
+    <tr><td><code>models.py</code></td><td><code>MechanismGraph</code></td><td>nodes, edges, cyclo_mode (C4+3/C5+2/C4+2/C3+2), topology, pathways</td></tr>
+  </table>
+
+  <h3>3. S1 — 锚定/构象搜索</h3>
+  <div class="info">
+    UCE v3.1 双阶段构象引擎：GFN0→GFN2→DFT OPT/SP。分子自治架构，每个分子独立目录。
+  </div>
+  <table>
+    <tr><th>组件</th><th>功能</th><th>关键代码</th></tr>
+    <tr>
+      <td><code>AnchorPhase.run()</code></td>
+      <td>接收 {name: SMILES} dict，为每个分子执行锚定</td>
+      <td>handler.py:165 → 并行/顺序调度各个分子</td>
+    </tr>
+    <tr>
+      <td><code>ConformerEngine.run()</code></td>
+      <td>CREST 构象搜索 → xTB GFN0 粗筛 → GFN2 精筛 → DFT OPT/SP</td>
+      <td>engine.py: 双阶段 UCE v3.1</td>
+    </tr>
+    <tr>
+      <td><code>SmallMoleculeCache</code></td>
+      <td>小分子 (≤10 重原子) 跳过 CREST，直接从缓存复用或简单优化</td>
+      <td>small_molecule_cache.py: key = {formula}_{canonical_smiles}</td>
+    </tr>
+    <tr>
+      <td>Protocol 系统</td>
+      <td>ext/full/lite/zero 协议，控制构象搜索的采样深度</td>
+      <td>protocols.py + config step1.conformer_search</td>
+    </tr>
+  </table>
+  <p><strong>输出目录结构：</strong></p>
+  <pre>S1_ConfGeneration/{molecule_name}/
+  ├── crest/          # CREST 构象输出
+  ├── xtb/            # xTB 阶段 (stage1_gfn0/ + stage2_gfn2/)
+  ├── cluster/        # ISOSTAT 聚类
+  ├── prescan/        # full 协议快速 SP 预筛选
+  ├── fastsp/         # full/lite 协议快速 SP 筛选
+  └── finalDFT/       # DFT OPT+SP (conformer_thermo.csv, *.fchk, *.log)</pre>
+
+  <h3>4. S2 — 逆向扫描</h3>
+  <div class="info">
+    SMARTS 成键检测 + xTB 约束扫描 + Gau_XTB TS 预优化。V3.0.0 仅支持 retro_scan 策略。
+  </div>
+  <table>
+    <tr><th>步骤</th><th>方法</th><th>输出</th></tr>
+    <tr><td>SMARTS 匹配</td><td><code>smarts_matcher.py:find_reactive_bonds()</code></td><td>forming_bonds (0-based atom index pairs)</td></tr>
+    <tr><td>xTB 约束扫描</td><td><code>xtb_runner.py:run_scan()</code></td><td>扫描势能面，生成 ts_guess.xyz</td></tr>
+    <tr><td>中间体生成</td><td><code>bond_stretcher.py</code></td><td>键长拉伸 + 弛豫优化 → intermediate.xyz</td></tr>
+    <tr><td>Gau_XTB 预优化</td><td>Gau_XTB 接口</td><td>TS 初猜精炼 (可选)</td></tr>
+  </table>
+  <p><strong>已注册 SMARTS 模板：</strong></p>
+  <table>
+    <tr><th>类型</th><th>SMARTS 模式</th><th>拓扑函数</th></tr>
+    <tr><td>[5+2]</td><td><code>[O]-[C]-[C]-[C]-[C]-[C]-[C]</code></td><td>topology_path_321</td></tr>
+    <tr><td>[4+3]</td><td><code>[O]1~[C]~[C]~[C]~[C]~[C]~[C]1</code></td><td>topology_ring_43</td></tr>
+    <tr><td>[4+2]</td><td><code>[C]1~[C]~[C]~[C]~[C]~[C]1</code></td><td>topology_ring_42</td></tr>
+    <tr><td>[3+2]</td><td><code>[#6,#7,#8]1~[#6,#7,#8]~[#6,#7,#8]~[#6,#7,#8]~[#6,#7,#8]1</code></td><td>topology_ring_32</td></tr>
+  </table>
+
+  <h3>5. S3 — TS 优化与验证</h3>
+  <div class="info">
+    Berny (主策略) → QST2 救援 (失败时) → 可选 IRC。通过收敛检查 + 虚频一致性验证。
+  </div>
+  <table>
+    <tr><th>组件</th><th>功能</th></tr>
+    <tr><td><code>berny_driver.py</code></td><td>Berny TS 优化 (Gaussian: opt=TS, calcfc)</td></tr>
+    <tr><td><code>qst2_rescue.py</code></td><td>Berny 失败时 QST2 救援 (product + intermediate 作为端点)</td></tr>
+    <tr><td><code>irc_driver.py</code></td><td>IRC 计算 (可选)，验证 TS 连接正确的反应物/产物</td></tr>
+    <tr><td><code>validator.py</code></td><td>收敛检查 + 虚频计数验证 (应是1个)</td></tr>
+    <tr><td><code>intermediate_driver.py</code></td><td>中间体 DFT 优化</td></tr>
+    <tr><td><code>oscillation_detector.py</code></td><td>检测几何震荡 → 触发救援级别升级</td></tr>
+  </table>
+  <p><strong>输出目录：</strong></p>
+  <pre>S3_TransitionAnalysis/
+  ├── S3_intermediate_opt/  # 中间体 DFT 优化
+  ├── ts_opt/berny/          # 主策略 Berny
+  ├── ts_opt/qst2_rescue/    # QST2 救援
+  ├── L2_SP/                 # wB97X-D3BJ 单点能
+  └── irc/                   # 可选 IRC</pre>
+</div>
+
+<!-- ============================================================ -->
+<div class="card">
+  <h2><span class="icon">🔄</span> V3.0.0 工作流与数据流</h2>
+
+  <h3>完整流水线数据流</h3>
+  <div class="pipeline-flow">
+    <div class="pstep"><div class="box s0">S0</div><div class="lbl">机理分类</div></div>
+    <div class="parrow">→</div>
+    <div class="pstep"><div class="box s1">S1</div><div class="lbl">构象搜索</div></div>
+    <div class="parrow">→</div>
+    <div class="pstep"><div class="box s2">S2</div><div class="lbl">逆向扫描</div></div>
+    <div class="parrow">→</div>
+    <div class="pstep"><div class="box s3">S3</div><div class="lbl">TS 优化</div></div>
+    <div class="parrow">┄→</div>
+    <div class="pstep"><div class="box s4">S4</div><div class="lbl">特征提取<br>(外部)</div></div>
+  </div>
+
+  <h3>步骤间数据传递</h3>
+  <table>
+    <tr><th>接口</th><th>传递内容</th><th>格式</th></tr>
+    <tr><td>S0 → S1</td><td><code>mechanism_summary.json</code></td><td>forming_bonds, reaction_type</td></tr>
+    <tr><td>S1 → S2</td><td><code>product_min.xyz</code> + <code>e_sp</code></td><td>XYZ 文件 + 能量 (Hartree)</td></tr>
+    <tr><td>S1 → S2 (可选)</td><td>fchk, log, thermo</td><td>QC 输出 + 热力学 CSV</td></tr>
+    <tr><td>S2 → S3</td><td><code>ts_guess.xyz</code> + <code>intermediate.xyz</code></td><td>两个 XYZ 文件</td></tr>
+    <tr><td>S2 → S3</td><td>forming_bonds indices</td><td><code>Tuple[Tuple[int,int],...]</code></td></tr>
+    <tr><td>S3 → S4 (外部)</td><td><code>ts_final.xyz</code> + sp_report</td><td>TS 结构 + SP 矩阵报告</td></tr>
+    <tr><td>S3 → S4</td><td>fchk / log / forming_bonds</td><td>QC 文件 + 成键元数据</td></tr>
+  </table>
+
+  <h3>分子组装流程 (Orchestrator)</h3>
+  <pre>
+<span class="c"># run_pipeline() ~line 2211</span>
+molecules = {"product": product_smiles}
+<span class="k">if</span> precursor_smiles:
+    molecules["precursor"] = precursor_smiles
+
+<span class="c"># 小分子目录查找</span>
+<span class="k">if</span> leaving_group_key:
+    lg = sm_catalog.get(leaving_group_key)
+    molecules["leaving_group"] = lg.smiles
+
+<span class="k">for</span> key <span class="k">in</span> resolved_sm_keys:
+    mol = sm_catalog.get(key)
+    molecules[key] = mol.smiles
+
+<span class="c"># → S1: AnchorPhase.run(molecules)</span>
+<span class="c"># → S2: run_step2(product_xyz=result.product_xyz)</span>
+<span class="c"># → S3: run_step3(ts_guess, intermediate)</span></pre>
+
+  <h3>形成键解析链 (7种来源)</h3>
+  <div class="warn">
+    <code>_resolve_forming_bonds_for_s2()</code> 按优先级依次尝试，直到成功：
+  </div>
+  <ol>
+    <li><strong>S1 atom_map_xyz full notation</strong> → forming_bonds_full_notation</li>
+    <li><strong>S0/S1 atom-map annotations</strong> → SMILES 映射 + XYZ 映射</li>
+    <li><strong>S0 mechanism_graph primary edges</strong> → 通过 XYZ 映射</li>
+    <li><strong>S0 mechanism_summary.json</strong> → 原始 forming_bonds 字段</li>
+    <li><strong>SMARTS auto-detection</strong> → <code>SMARTSMatcher.find_reactive_bonds()</code></li>
+    <li><strong>Deferred low-confidence bonds</strong> → S0 标记低置信度</li>
+    <li><strong>Geometry-difference inference</strong> → 产物 vs TS 图差异分析</li>
+  </ol>
+
+  <h3>检查点恢复流程</h3>
+  <pre>
+1. CheckpointManager(work_dir).load_state()
+2. <span class="k">if</span> state == None <span class="k">and</span> resume_rehydrate:
+     state = rehydrate_state_from_artifacts(product_smiles, config)
+3. <span class="k">if</span> state == None:
+     initialize_state(product_smiles, config)
+4. <span class="k">for</span> step <span class="k">in</span> [s0, s1, s2, s3]:
+     <span class="k">if</span> checkpoint_mgr.is_step_completed(step):
+         load_output_files_from_checkpoint(step)
+         <span class="k">continue</span>
+     run_step(step)
+     checkpoint_mgr.mark_step_completed(step, output_files, metadata)</pre>
+</div>
+
+<!-- ============================================================ -->
+<div class="card">
+  <h2><span class="icon">🧪</span> V3.0.0 测试架构</h2>
+  <table>
+    <tr><th>分类</th><th>文件</th><th>说明</th></tr>
+    <tr><td>导入冒烟测试</td><td><code>test_imports_step4_features.py</code></td><td>快速 CI 门控，无需 QC</td></tr>
+    <tr><td>S2 路由/扫描</td><td><code>test_step2_path_compat.py, test_xtb_scan_input.py</code></td><td>retro_scan 路由，cleaner_data，扫描参数</td></tr>
+    <tr><td>S4 降级行为</td><td><code>test_s4_extractor_degrade_behavior.py</code></td><td>特征提取器降级测试</td></tr>
+    <tr><td>S3 优化</td><td><code>test_s3_checkpoint.py</code></td><td>基于 mock 的 TS 优化测试</td></tr>
+    <tr><td>S1 构象</td><td><code>test_two_stage_conformer.py</code></td><td>双阶段构象搜索</td></tr>
+    <tr><td>QC 接口</td><td><code>test_qc_interface_v52.py</code></td><td>默认跳过 (需真实 QC)</td></tr>
+    <tr><td>毒性路径</td><td><code>test_sandbox_toxic_paths.py</code></td><td>路径中含空格/括号</td></tr>
+    <tr><td>集成测试</td><td><code>test_mock_integration.py</code></td><td>使用 mock QC 的端到端</td></tr>
+  </table>
+  <div class="info">
+    <strong>测试约定：</strong>不使用 <code>@pytest.mark.skipif</code> 装饰器，使用运行时 <code>pytest.skip()</code> 条件跳过。
+    所有 fixture 定义在模块内部 (conftest.py 只做 sys.path 注入)。夹具数据在 <code>tests/tmp_v2_2_test/</code> (勿删除)。
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<div class="card">
+  <h2><span class="icon">🚀</span> V3.1.0 路易斯酸模块架构</h2>
+
+  <div class="pipeline-flow">
+    <div class="pstep"><div class="box s0">S0</div><div class="lbl">机理分类</div></div>
+    <div class="parrow">→</div>
+    <div class="pstep"><div class="box la">LA</div><div class="lbl" style="color:var(--la-a);font-weight:600;">LiCl 准备</div></div>
+    <div class="parrow">→</div>
+    <div class="pstep"><div class="box s1">S1</div><div class="lbl">NCI CREST<br>+ LiCl→DFT</div></div>
+    <div class="parrow">→</div>
+    <div class="pstep"><div class="box s2">S2</div><div class="lbl">扫描 +<br>Li–O 追踪</div></div>
+    <div class="parrow">→</div>
+    <div class="pstep"><div class="box s3">S3</div><div class="lbl">TS 优化 +<br>模式检查</div></div>
+    <div class="parrow">┄→</div>
+    <div class="pstep"><div class="box s4">S4</div><div class="lbl">+LiCl 特征<br>+Δfeatures</div></div>
+  </div>
+
+  <div class="grid-2">
+    <div style="border:1px solid var(--la-a);border-radius:8px;padding:1rem;">
+      <h3 style="color:var(--la-a);margin-top:0;">Part A · 描述符注册表</h3>
+      <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:0.4rem;">独立预计算。不是 ΔG‡ 修正器——作为 ML 特征使用。</p>
+      <table>
+        <tr><th>描述符</th><th>v1 状态</th></tr>
+        <tr><td>acetone_affinity_kcal_mol</td><td><span class="tag green">计划</span></td></tr>
+        <tr><td>thf_affinity_kcal_mol</td><td><span class="tag yellow">可选</span></td></tr>
+        <tr><td>acetonitrile_affinity_kcal_mol</td><td><span class="tag yellow">可选</span></td></tr>
+        <tr><td>lumo_energy_ev</td><td><span class="tag yellow">可选</span></td></tr>
+      </table>
+    </div>
+    <div style="border:1px solid var(--la-b);border-radius:8px;padding:1rem;">
+      <h3 style="color:var(--la-b);margin-top:0;">Part B · LiCl 添加物</h3>
+      <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:0.4rem;">几何层集成。规范 SMILES 永不修改。</p>
+      <table>
+        <tr><th>模块</th><th>改动</th></tr>
+        <tr><td>配置</td><td><span class="tag green">新段</span></td></tr>
+        <tr><td>编排器</td><td><span class="tag blue">LewisAcidAdditive + 几何准备</span></td></tr>
+        <tr><td>S1</td><td><span class="tag blue">CREST NCI + wall potential</span></td></tr>
+        <tr><td>S2</td><td><span class="tag blue">质量门 + Li-O 追踪</span></td></tr>
+        <tr><td>S3</td><td><span class="tag blue">虚频模式投影检查</span></td></tr>
+        <tr><td>检查点</td><td><span class="tag blue">hash = 规范 SMILES + LA 配置</span></td></tr>
+      </table>
+    </div>
+  </div>
+
+  <h3>核心原则</h3>
+  <div class="danger">
+    <strong>规范 SMILES 永不修改。</strong> LiCl 只在几何构建层引入。
+  </div>
+  <table>
+    <tr><th>字段</th><th>值</th></tr>
+    <tr><td><code>canonical_product_smiles</code></td><td>原始有机产物 SMILES — <strong style="color:var(--red);">永不修改</strong></td></tr>
+    <tr><td><code>geometry_product_smiles</code></td><td>原始 SMILES + <code>.[Li]Cl</code> — 仅用于 S1 几何构建</td></tr>
+    <tr><td>checkpoint_identity_hash</td><td><code>hash(规范 SMILES + LA 配置 + theory)</code> — 不含几何 SMILES</td></tr>
+    <tr><td>SMARTS 匹配</td><td>基于 <strong>原始产物 SMILES</strong> 构建分子，不从 XYZ 构建</td></tr>
+    <tr><td>XYZ / DFT 几何</td><td>有机产物 + LiCl 原子</td></tr>
+    <tr><td>additive_atom_indices</td><td>显式追踪 Li/Cl 索引 (0-based, XYZ 顺序)</td></tr>
+  </table>
+</div>
+
+<!-- ============================================================ -->
+<div class="card">
+  <h2><span class="icon">📋</span> V3.0.0 vs V3.1.0 逐模块对比</h2>
+  <table>
+    <tr><th>阶段</th><th>V3.0.0 行为</th><th>V3.1.0 新增</th><th>风险</th></tr>
+    <tr>
+      <td><strong>编排器</strong></td>
+      <td>构建 <code>molecules = {"product": SMILES}</code>，含 precursor/leaving_group/small_mol</td>
+      <td><code>LewisAcidAdditive</code> 追踪 Li/Cl 索引；<code>_prepare_lewis_acid_system()</code> 生成几何 SMILES；检查点 hash 包含 LA 配置</td>
+      <td><span class="tag green">低</span></td>
+    </tr>
+    <tr>
+      <td><strong>S1 构象</strong></td>
+      <td>CREST → xTB GFN0/GFN2 → DFT OPT/SP。小分子从缓存复用或简单优化</td>
+      <td>产物几何含 LiCl；CREST 使用 NCI mode + wall potential 防止 LiCl 解离；S1 后验证 Li–O 接触</td>
+      <td><span class="tag yellow">中</span></td>
+    </tr>
+    <tr>
+      <td><strong>S2 SMARTS</strong></td>
+      <td>从产物 XYZ 构建 RDKit Mol；匹配 C/O 环模式</td>
+      <td>从 <strong>规范产物 SMILES</strong> (非 XYZ) 构建 Mol；添加物原子被忽略；成键基于干净 SMILES 解析</td>
+      <td><span class="tag green">低</span></td>
+    </tr>
+    <tr>
+      <td><strong>S2 扫描</strong></td>
+      <td>xTB 约束扫描，返回 ts_guess + intermediate</td>
+      <td>LiCl 作为旁观原子；每步追踪 Li–O / Li–Cl 距离；质量门验证配位包络</td>
+      <td><span class="tag yellow">中</span></td>
+    </tr>
+    <tr>
+      <td><strong>S3 TS 优化</strong></td>
+      <td>Berny → QST2；验证收敛 + 虚频计数 (应为1)</td>
+      <td>新增虚频模式投影检查；排除 LiCl 柔性模式；要求反应模式投影 ≥ 0.35</td>
+      <td><span class="tag yellow">中</span></td>
+    </tr>
+    <tr>
+      <td><strong>检查点</strong></td>
+      <td>身份 = <code>product_smiles</code>；步骤状态含 output_files + metadata</td>
+      <td>身份 = <code>hash(规范 SMILES + LA 配置 + theory)</code>；LA-on/LA-off 产生不同 hash</td>
+      <td><span class="tag green">低</span></td>
+    </tr>
+    <tr>
+      <td><strong>S4 特征</strong></td>
+      <td>通过 RPH_Postprocess 外部提取几何/能量/NBO 特征</td>
+      <td>新增 LiCl 配位特征 + 活化特征 + <strong>Δfeatures</strong> (与无 LA 基线的差值)</td>
+      <td><span class="tag green">低</span></td>
+    </tr>
+  </table>
+</div>
+
+<!-- ============================================================ -->
+<div class="card">
+  <h2><span class="icon">📐</span> 质量门控 (强制)</h2>
+  <div class="grid-2">
+    <div>
+      <h3>S2 质量门</h3>
+      <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:0.3rem;">LiCl 启用的扫描被接受需同时满足：</p>
+      <table>
+        <tr><th>条件</th><th>阈值</th></tr>
+        <tr><td>成键不含 Li/Cl</td><td><span class="tag green">必须通过</span></td></tr>
+        <tr><td>Li–Cl 距离</td><td>≤ 3.5 Å</td></tr>
+        <tr><td>Li–O 距离 (最近)</td><td>≤ 2.6 Å</td></tr>
+        <tr><td>Cl–反应中心距离</td><td>≥ 3.2 Å</td></tr>
+        <tr><td>配位位点切换</td><td><span class="tag red">禁止</span></td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>S3 质量门</h3>
+      <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:0.3rem;">LiCl 启用的 TS 被接受需同时满足：</p>
+      <table>
+        <tr><th>条件</th><th>阈值</th></tr>
+        <tr><td>排除 LiCl 柔性模式后的化学虚频</td><td>≥ 1</td></tr>
+        <tr><td>主要虚频向成键的投影</td><td>≥ 0.35</td></tr>
+        <tr><td>LiCl 运动贡献</td><td>≤ 0.25</td></tr>
+        <tr><td>IRC (投影 &lt; 0.50 时)</td><td>必需</td></tr>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<div class="card">
+  <h2><span class="icon">📊</span> S4 — LiCl 特征体系 (RPH_Postprocess)</h2>
+  <div class="grid-3">
+    <div>
+      <h3>配位特征</h3>
+      <table>
+        <tr><th>特征</th><th>说明</th></tr>
+        <tr><td><code>d_LiCl</code></td><td>Li–Cl 距离 (Å)</td></tr>
+        <tr><td><code>d_LiO_min</code></td><td>最近底物 O 距离</td></tr>
+        <tr><td><code>d_LiO_second</code></td><td>次近 O 距离</td></tr>
+        <tr><td><code>CN_Li_hetero</code></td><td>Li 配位数 (杂原子)</td></tr>
+        <tr><td><code>CN_Li_total</code></td><td>Li 总配位数</td></tr>
+        <tr><td><code>angle_O_Li_O</code></td><td>O–Li–O 角 (°)</td></tr>
+        <tr><td><code>angle_Cl_Li_O</code></td><td>Cl–Li–O 角 (°)</td></tr>
+        <tr><td><code>chelation_ring_size</code></td><td>螯合环大小</td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>活化特征</h3>
+      <table>
+        <tr><th>特征</th><th>说明</th></tr>
+        <tr><td><code>d_CO_elongation</code></td><td>C=O 伸长 vs 无 LA</td></tr>
+        <tr><td><code>delta_q_carbonyl_O</code></td><td>羰基 O 电荷位移</td></tr>
+        <tr><td><code>delta_q_carbonyl_C</code></td><td>羰基 C 电荷位移</td></tr>
+        <tr><td><code>delta_Wiberg_CO</code></td><td>C=O Wiberg 键级位移</td></tr>
+        <tr><td><code>delta_dipole</code></td><td>总偶极矩位移</td></tr>
+      </table>
+      <h3 style="margin-top:0.8rem;">ΔFeatures (最重要)</h3>
+      <pre>Δfeature = feature(底物+LiCl)
+         − feature(底物无LiCl)</pre>
+      <p style="font-size:0.8rem;color:var(--text-dim);">ML 学习体系如何<em style="color:var(--accent);">响应</em>螯合作用。</p>
+    </div>
+    <div>
+      <h3>质量标记</h3>
+      <table>
+        <tr><th>标记</th><th>来源</th></tr>
+        <tr><td><code>LiCl_dissociation_flag</code></td><td>S2 质量门</td></tr>
+        <tr><td><code>coordination_switch_flag</code></td><td>S2 配位追踪</td></tr>
+        <tr><td><code>Cl_near_reaction_center_flag</code></td><td>S2 Cl–C 距离</td></tr>
+        <tr><td><code>additive_imaginary_mode_flag</code></td><td>S3 模式投影</td></tr>
+        <tr><td><code>ts_validated_flag</code></td><td>S3 质量门</td></tr>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<div class="card">
+  <h2><span class="icon">⚡</span> LewisAcidAdditive 数据模型</h2>
+  <pre>
+<span class="kc">@dataclass</span>
+<span class="k">class</span> <span class="v">LewisAcidAdditive</span>:
+    enabled: bool = <span class="kc">False</span>
+    mode: str = <span class="s">"neutral_lithium_salt_chelation_surrogate"</span>
+    surrogate_name: str = <span class="s">"LiCl"</span>
+    surrogate_smiles: str = <span class="s">"[Li]Cl"</span>
+    charge: int = <span class="v">0</span>
+    multiplicity: int = <span class="v">1</span>
+    additive_atom_indices: Tuple[int, ...] = ()
+    additive_elements: Tuple[str, ...] = (<span class="s">"Li"</span>, <span class="s">"Cl"</span>)
+    li_coordination_site: Optional[str] = <span class="kc">None</span>
+    li_o_distance_initial: Optional[float] = <span class="kc">None</span>
+    li_cl_distance_initial: Optional[float] = <span class="kc">None</span>
+    config_snapshot: Optional[Dict] = <span class="kc">None</span></pre>
+</div>
+
+<!-- ============================================================ -->
+<div class="card">
+  <h2><span class="icon">⚠️</span> 风险登记表</h2>
+  <table>
+    <tr><th>风险</th><th>概率</th><th>影响</th><th>缓解措施</th></tr>
+    <tr>
+      <td>SMARTS 被 Li–O 成键感知误扰</td>
+      <td><span class="tag green">低</span></td>
+      <td><span class="tag red">高</span></td>
+      <td style="font-size:0.85rem;">从规范 SMILES 而非 XYZ 构建分子</td>
+    </tr>
+    <tr>
+      <td>Li–Cl 解离误认为成键</td>
+      <td><span class="tag yellow">中</span></td>
+      <td><span class="tag red">高</span></td>
+      <td style="font-size:0.85rem;">强制 SMARTS fallback；添加物原子硬过滤</td>
+    </tr>
+    <tr>
+      <td>CREST 构象搜索中 LiCl 解离</td>
+      <td><span class="tag yellow">中</span></td>
+      <td><span class="tag yellow">中</span></td>
+      <td style="font-size:0.85rem;">NCI mode + wall potential + 弱 Li–O 约束</td>
+    </tr>
+    <tr>
+      <td>xTB 扫描中 LiCl 漂移</td>
+      <td><span class="tag yellow">中</span></td>
+      <td><span class="tag yellow">中</span></td>
+      <td style="font-size:0.85rem;">监测 Li–O 轨迹；解离时标记降级</td>
+    </tr>
+    <tr>
+      <td>TS 优化器追逐 LiCl 而非反应</td>
+      <td><span class="tag yellow">中</span></td>
+      <td><span class="tag yellow">中</span></td>
+      <td style="font-size:0.85rem;">验证虚频模式投影；排除添加物模式</td>
+    </tr>
+    <tr>
+      <td>LiCl 配位到错误位点</td>
+      <td><span class="tag yellow">中</span></td>
+      <td><span class="tag green">低</span></td>
+      <td style="font-size:0.85rem;">CREST ensemble 找全局最小；S1 后验证</td>
+    </tr>
+    <tr>
+      <td>检查点身份混淆 (LA-on vs LA-off)</td>
+      <td><span class="tag green">低</span></td>
+      <td><span class="tag red">高</span></td>
+      <td style="font-size:0.85rem;">hash 含规范 SMILES + 完整 LA 配置，不含几何 SMILES</td>
+    </tr>
+    <tr>
+      <td>ML 特征无改进</td>
+      <td><span class="tag green">低</span></td>
+      <td><span class="tag yellow">中</span></td>
+      <td style="font-size:0.85rem;">验证门 C: LORO/CV 必须有改进；shuffle 控制下消失</td>
+    </tr>
+    <tr>
+      <td>真实 LA 被视为线性校正</td>
+      <td><span class="tag red">确定</span></td>
+      <td><span class="tag green">低</span></td>
+      <td style="font-size:0.85rem;">描述符作为 ML 特征(含交互项)，非 ΔG‡ 修正器</td>
+    </tr>
+  </table>
+</div>
+
+<!-- ============================================================ -->
+<div class="card">
+  <h2><span class="icon">✅</span> 验证门 A–D</h2>
+  <table>
+    <tr><th>门</th><th>验证内容</th><th>标准</th></tr>
+    <tr>
+      <td><span class="tag purple">A · 几何合理性</span></td>
+      <td>LiCl 实际配位</td>
+      <td>稳定 Li–O 接触；LiCl 未漂移 (Li–Cl ≤ 3.5, Li–底物 ≤ 4.0)；Cl 不接近反应中心 (≥ 3.2)</td>
+    </tr>
+    <tr>
+      <td><span class="tag purple">B · 反应身份</span></td>
+      <td>有机反应不变</td>
+      <td>SMARTS 成键与无 LA 运行一致；Li/Cl 永不在成键列表；TS 虚频为有机反应模式</td>
+    </tr>
+    <tr>
+      <td><span class="tag purple">C · ML 有效性</span></td>
+      <td>特征增加价值</td>
+      <td>LiCl 特征在数据集中不恒定；LORO/CV 优于无 LA 基线；shuffle 控制下改进消失</td>
+    </tr>
+    <tr>
+      <td><span class="tag purple">D · 物理基准</span></td>
+      <td>方向正确</td>
+      <td>2-3 个代表性反应：比较无 LA vs LiCl vs 一个真实 LA (中间体/产物层面)。不要求能量精确匹配。要求配位/预组织效应方向一致。</td>
+    </tr>
+  </table>
+</div>
+
+<!-- ============================================================ -->
+<div class="card">
+  <h2><span class="icon">📝</span> 修改文件清单</h2>
+  <table>
+    <tr><th>文件</th><th>改动内容</th><th>行数</th><th>状态</th></tr>
+    <tr><td><code>config/defaults.yaml</code></td><td>新增 <code>lewis_acid:</code> 配置段 (mode, surrogate, quality_gate, s1_sampling)</td><td>+40</td><td><span class="tag blue">待实现</span></td></tr>
+    <tr><td><code>rph_core/lewis_acid/__init__.py</code></td><td>新建模块</td><td>+1</td><td><span class="tag blue">待实现</span></td></tr>
+    <tr><td><code>rph_core/lewis_acid/acidity.py</code></td><td>Part A — 描述符注册表 (丙酮亲和力计算 + JSON I/O)</td><td>~200</td><td><span class="tag blue">待实现</span></td></tr>
+    <tr><td><code>rph_core/orchestrator.py</code></td><td>LewisAcidAdditive 数据类, _prepare_lewis_acid_system(), PipelineResult 扩展, 检查点 hash, 传递 additive 给 S2/S3</td><td>~100</td><td><span class="tag blue">待实现</span></td></tr>
+    <tr><td><code>rph_core/steps/conformer_search/engine.py</code></td><td>LA 启用时 CREST NCI mode + wall potential</td><td>~20</td><td><span class="tag blue">待实现</span></td></tr>
+    <tr><td><code>rph_core/steps/step2_retro/retro_scanner.py</code></td><td>接收 lewis_acid_additive 参数；Li–O/Li–Cl 追踪；质量门</td><td>~50</td><td><span class="tag blue">待实现</span></td></tr>
+    <tr><td><code>rph_core/steps/step2_retro/smarts_matcher.py</code></td><td>从规范 SMILES 而非 XYZ 构建 Mol；接收 additive_indices</td><td>~15</td><td><span class="tag blue">待实现</span></td></tr>
+    <tr><td><code>rph_core/steps/step3_opt/ts_optimizer.py</code></td><td>传递添加物信息给验证器</td><td>~5</td><td><span class="tag blue">待实现</span></td></tr>
+    <tr><td><code>rph_core/steps/step3_opt/validator.py</code></td><td>虚频模式投影检查；跳过添加物主导的模式</td><td>~40</td><td><span class="tag blue">待实现</span></td></tr>
+    <tr><td><code>rph_core/utils/forming_bonds_resolver.py</code></td><td>LA 模式：强制 SMARTS fallback + 硬元素过滤</td><td>+25</td><td><span class="tag blue">待实现</span></td></tr>
+  </table>
+</div>
+
+<!-- ============================================================ -->
+<div class="card">
+  <h2><span class="icon">📅</span> 实施时间线 (Phase 1)</h2>
+  <div class="grid-2">
+    <div>
+      <h3>第 1 周：流水线集成</h3>
+      <div class="tl">
+        <div class="tli"><div class="day">第 1 天</div><div class="task">配置 + <code>LewisAcidAdditive</code> 数据类 + PipelineResult</div></div>
+        <div class="tli"><div class="day">第 2 天</div><div class="task">编排器几何准备 + 检查点 hash 重写</div></div>
+        <div class="tli"><div class="day">第 3 天</div><div class="task">S1 CREST NCI mode + S1 后验证</div></div>
+        <div class="tli"><div class="day">第 4 天</div><div class="task">S2 成键解析 + 质量门</div></div>
+        <div class="tli"><div class="day">第 5 天</div><div class="task">S3 模式投影检查 + 质量门</div></div>
+      </div>
+    </div>
+    <div>
+      <h3>第 2 周：特征 + 验证</h3>
+      <div class="tl">
+        <div class="tli"><div class="day">第 6 天</div><div class="task">S4 LiCl 特征 (配位 + 活化 + Δfeatures)</div></div>
+        <div class="tli"><div class="day">第 7 天</div><div class="task">Part A 描述符注册表 (丙酮亲和力)</div></div>
+        <div class="tli"><div class="day">第 8 天</div><div class="task">验证门 A–D 实现</div></div>
+        <div class="tli"><div class="day">第 9 天</div><div class="task">集成测试 + 边界情况 (precursor ±LiCl, batch, resume)</div></div>
+        <div class="tli"><div class="day">第 10 天</div><div class="task">文档 + 清理 + AGENTS.md 更新</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<div class="card">
+  <h2><span class="icon">📖</span> 文档索引</h2>
+  <table>
+    <tr><th>文档</th><th>内容</th></tr>
+    <tr><td><a href="AGENTS.md" style="color:var(--accent);">AGENTS.md</a></td><td>智能体编码指南 — 构建/测试命令、代码规范、约定</td></tr>
+    <tr><td><a href="LEWIS_ACID_MODULE_DESIGN.md" style="color:var(--accent);">LEWIS_ACID_MODULE_DESIGN.md</a></td><td>路易斯酸模块完整设计方案 (v2, 692行)</td></tr>
+    <tr><td><a href="README.md" style="color:var(--accent);">README.md</a></td><td>英文版项目说明 (802行)</td></tr>
+    <tr><td><a href="README.zh-CN.md" style="color:var(--accent);">README.zh-CN.md</a></td><td>中文版项目说明 (811行)</td></tr>
+    <tr><td><code>rph_core/AGENTS.md</code></td><td>核心包架构与代码地图</td></tr>
+    <tr><td><code>rph_core/steps/AGENTS.md</code></td><td>步骤架构与输出契约</td></tr>
+    <tr><td><code>rph_core/utils/AGENTS.md</code></td><td>41 个 QC/IO/检查点工具文件参考</td></tr>
+    <tr><td><code>config/AGENTS.md</code></td><td>配置文件结构说明</td></tr>
+    <tr><td><code>tests/AGENTS.md</code></td><td>测试组织与约定</td></tr>
+    <tr><td><code>scripts/AGENTS.md</code></td><td>脚本与 CI 工具说明</td></tr>
+    <tr><td><code>docs/AGENTS.md</code></td><td>设计文档目录与归档约定</td></tr>
+    <tr><td><code>rph_benchmark/AGENTS.md</code></td><td>基准测试套件文档</td></tr>
+  </table>
+</div>
+
+<div style="text-align:center;padding:1.5rem 0;color:var(--text-dim);font-size:0.85rem;border-top:1px solid var(--border);margin-top:1.5rem;">
+  <p>ReactionProfileHunter · V3.1 Lewis Acid Module · 设计 v2 (终版) · 2026-06-11</p>
+  <p style="margin-top:0.3rem;">
+    <a href="LEWIS_ACID_MODULE_DESIGN.md" style="color:var(--accent);">完整设计文档</a>
+    &nbsp;·&nbsp;
+    <a href="AGENTS.md" style="color:var(--accent);">AGENTS.md</a>
+    &nbsp;·&nbsp;
+    <a href="README.zh-CN.md" style="color:var(--accent);">README 中文版</a>
+  </p>
+</div>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,839 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ReactionProfileHunter — Documentation</title>
+<style>
+:root {
+  --fg: #1f2328;
+  --fg-dim: #57606a;
+  --bg: #ffffff;
+  --border: #d0d7de;
+  --accent: #0969da;
+  --code-bg: #f6f8fa;
+  --blockquote: #d0d7de;
+  --table-stripe: #f6f8fa;
+  --badge-bg: #eaeef2;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e6edf3;
+    --fg-dim: #8b949e;
+    --bg: #0d1117;
+    --border: #30363d;
+    --accent: #58a6ff;
+    --code-bg: #161b22;
+    --blockquote: #30363d;
+    --table-stripe: #161b22;
+    --badge-bg: #21262d;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans",
+    Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  background: var(--bg);
+  color: var(--fg);
+  line-height: 1.6;
+  margin: 0;
+  padding: 2rem 1rem;
+  font-size: 16px;
+}
+.container { max-width: 920px; margin: 0 auto; }
+h1, h2, h3, h4, h5, h6 {
+  font-weight: 600;
+  line-height: 1.25;
+  margin-top: 24px;
+  margin-bottom: 16px;
+}
+h1 { font-size: 2em; border-bottom: 1px solid var(--border); padding-bottom: .3em; }
+h2 { font-size: 1.5em; border-bottom: 1px solid var(--border); padding-bottom: .3em; }
+h3 { font-size: 1.25em; }
+h4 { font-size: 1em; }
+p { margin: 0 0 16px; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+  background: var(--code-bg);
+  padding: 0.2em 0.4em;
+  border-radius: 6px;
+  font-size: 85%;
+}
+pre {
+  background: var(--code-bg);
+  padding: 16px;
+  border-radius: 6px;
+  overflow: auto;
+  font-size: 85%;
+  line-height: 1.45;
+}
+pre code { background: transparent; padding: 0; font-size: 100%; }
+blockquote {
+  border-left: 4px solid var(--blockquote);
+  color: var(--fg-dim);
+  padding: 0 1em;
+  margin: 0 0 16px;
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0 0 16px;
+  display: block;
+  overflow: auto;
+}
+th, td {
+  border: 1px solid var(--border);
+  padding: 6px 13px;
+  text-align: left;
+}
+tr:nth-child(2n) { background: var(--table-stripe); }
+th { font-weight: 600; }
+hr { border: 0; border-top: 1px solid var(--border); margin: 24px 0; }
+ul, ol { padding-left: 2em; margin: 0 0 16px; }
+li + li { margin-top: 0.25em; }
+img { max-width: 100%; height: auto; }
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background: var(--badge-bg);
+  font-size: 75%;
+  color: var(--fg-dim);
+  margin: 0 2px;
+}
+.center { text-align: center; }
+.toc { background: var(--code-bg); padding: 16px; border-radius: 6px; margin: 16px 0; }
+.toc ul { margin: 0; }
+</style>
+</head>
+<body>
+<div class="container">
+<h1 id="reactionprofilehunter">ReactionProfileHunter</h1>
+<p><a href="README.md">English</a> | <a href="README.zh-CN.md">中文</a></p>
+<div align="center">
+<p><strong>Product-driven DFT reaction mechanism pipeline (S0-S3)</strong></p>
+<p><a href="https://github.com/yourusername/ReactionProfileHunter"><img src="https://img.shields.io/badge/version-3.0.0-blue.svg" alt="Version"></a> <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.8%2B-blue.svg" alt="Python"></a> <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License"></a> <a href="AGENTS.md"><img src="https://img.shields.io/badge/code%20style-agents%20ready-success.svg" alt="Code Style"></a></p>
+</div>
+<blockquote>
+<p><strong>Project Stats:</strong> ~50k lines, 198 Python files | <strong>Agent Guide:</strong> See <a href="AGENTS.md">AGENTS.md</a> for coding standards</p>
+</blockquote>
+<hr>
+<h2 id="overview">Overview</h2>
+<p>ReactionProfileHunter (RPH) is a product-driven automated DFT reaction mechanism pipeline (S0-S3) for transition state search and geometry optimization. Feature extraction (S4) is handled by the companion <a href="https://github.com/yourusername/RPH<em>Postprocess">RPH</em>Postprocess</a> package.</p>
+<h3 id="core-capabilities">Core capabilities</h3>
+<ul>
+<li>Product-driven strategy: start from products and search reaction pathways backward</li>
+<li>Three-step DFT pipeline: anchor/conformer search -> retro scan -> TS optimization (S4 feature extraction via RPH_Postprocess)</li>
+<li>Dual-level computation: xTB pre-optimization -> B3LYP geometry optimization -> wB97X-D3BJ high-accuracy single point</li>
+<li>Multi-engine support: Gaussian, ORCA, xTB, CREST, Multiwfn</li>
+<li>Feature extraction: reaction barriers, geometric parameters, electronic descriptors (via RPH_Postprocess)</li>
+<li>Checkpoint/resume support</li>
+</ul>
+<h3 id="use-cases">Use cases</h3>
+<ul>
+<li>Mechanistic studies of organic reactions (cycloadditions, rearrangements, substitutions)</li>
+<li>Transition state prediction and validation</li>
+<li>Reaction dataset building and high-throughput screening</li>
+<li>Machine-learning feature extraction for reaction properties (via RPH_Postprocess)</li>
+</ul>
+<hr>
+<h2 id="key-features">Key features</h2>
+<h3 id="v300-highlights-dftml-split-pure-dft-pipeline">v3.0.0 highlights — DFT/ML Split & Pure DFT Pipeline</h3>
+<ul>
+<li><strong>Architecture split</strong>: RPH is now a pure DFT calculation tool (S0-S3). Feature extraction (S4) moved to <a href="https://github.com/yourusername/RPH<em>Postprocess">RPH</em>Postprocess</a>. ML training moved to <code>Training/</code></li>
+<li><strong>Pipeline stops at S3</strong>: DFT pipeline completes after TS optimization; S4 feature extraction runs externally via <code>rph-features extract --rph-run &lt;work_dir&gt;</code></li>
+<li><strong>S0 mechanism classifier</strong>: Optional mechanism classification and diastereomeric ratio (DR) branch planning</li>
+<li><strong>S1 anchor/conformer search</strong>: UCE v3.1 two-stage conformer engine with protocol-aware funnel (ext/default/lite/zero)</li>
+<li><strong>S2 retro scan</strong>: SMARTS-based forming bond detection + xTB constrained scan + Gau_XTB TS pre-optimization</li>
+<li><strong>S3 TS optimization</strong>: Berny + QST2 rescue + IRC validation + SP matrix with dual-level (B3LYP→wB97X-D3BJ)</li>
+<li><strong>Checkpoint/resume</strong>: Hash-validated step persistence with partial rehydration</li>
+</ul>
+<h3 id="legacy-history-pre-v300">Legacy history (pre-v3.0.0)</h3>
+<ul>
+<li>v6.x era: Previous pipeline with integrated S4 feature extraction</li>
+<li>Fixed output format: features<em>raw.csv, features</em>mlr.csv, feature_meta.json</li>
+<li>NBO disabled by default to reduce runtime; can be enabled when needed</li>
+<li>Improved error handling and logging over earlier versions</li>
+</ul>
+<h3 id="technical-highlights">Technical highlights</h3>
+<ul>
+<li>Molecular autonomy: each molecule has its own working directory (S1_ConfGeneration/[Molecule]/)</li>
+<li>OPT-SP coupling loop: optimized geometry and single-point energy tightly coupled</li>
+<li>Path compatibility: auto adapts to legacy directory layouts</li>
+<li>Sandbox isolation: each QC task runs in an isolated sandbox</li>
+</ul>
+<hr>
+<h2 id="project-structure">Project Structure</h2>
+<pre><code>ReactionProfileHunter/
+├── rph_core/              # Core source — absolute imports only
+│   ├── orchestrator.py    # Main pipeline + CLI (ReactionProfileHunter class)
+│   ├── __main__.py        # python -m rph_core entry point
+│   ├── scheduling/        # Batch scheduling &amp; task orchestration
+│   ├── steps/             # S1-S3 implementations
+│   │   ├── anchor/            # S1 anchor phase: conformer routing
+│   │   ├── conformer_search/  # S1 UCE v3.1 two-stage conformer engine
+│   │   ├── mechanism_classifier/  # S0 mechanism classification
+│   │   ├── step2_retro/       # S2 retro scan (SMARTS + xTB scan)
+│   │   └── step3_opt/         # S3 TS optimization &amp; rescue
+│   └── utils/             # 41-file QC/IO/checkpoint infra
+│       ├── qc_interface.py     # ALL QC calls route here
+│       ├── checkpoint_manager.py   # Hash-validated step resume
+│       └── thermo/             # Thermochemistry utilities
+├── bin/                  # CLI wrappers (sys.path + main())
+│   ├── rph_run           # Primary entry point
+│   └── rph               # Short alias
+├── config/               # Runtime configuration (single source of truth)
+│   ├── defaults.yaml     # All config keys
+│   └── templates/        # Gaussian .gjf/.com templates
+├── tests/                # pytest test suite (~82 files)
+│   ├── conftest.py       # Adds repo root to sys.path
+│   ├── tmp_v2_2_test/    # Committed S1 fixtures (DON&#x27;T DELETE)
+│   └── fixtures/         # Static test data
+├── scripts/              # Utility scripts &amp; CI tools
+│   ├── ci/check_imports.py   # Import style gate
+│   ├── run_g16_worker.sh     # Gaussian wrapper
+│   └── *.py / *.sh           # Data build, backfill, analysis
+├── rph_benchmark/        # Stand-alone evaluation suite
+│   ├── confsearch/       # Conformer search protocol benchmarks
+│   └── dft_theory/       # DFT method benchmarks (9 stage scripts)
+├── docs/                 # Design docs &amp; analysis reports
+│   └── archive/          # Historical v2.x documents (frozen)
+├── AGENTS.md             # Agentic coding guide (15-file hierarchy)
+├── README.md             # ← You are here
+└── README.zh-CN.md       # 中文版</code></pre>
+<hr>
+<h2 id="quick-start">Quick start</h2>
+<h3 id="system-requirements">System requirements</h3>
+<table>
+<thead><tr>
+<th>Component</th>
+<th>Requirement</th>
+</tr></thead><tbody>
+<tr>
+<td>Operating system</td>
+<td>Linux (Ubuntu 20.04+ or CentOS 7+ recommended)</td>
+</tr>
+<tr>
+<td>Python</td>
+<td>3.8 or newer</td>
+</tr>
+<tr>
+<td>Memory</td>
+<td>16 GB minimum (64 GB recommended)</td>
+</tr>
+<tr>
+<td>CPU</td>
+<td>Multi-core CPU (16+ cores recommended)</td>
+</tr>
+</tbody></table>
+<h3 id="quantum-chemistry-dependencies">Quantum chemistry dependencies</h3>
+<p>Install at least one stack:</p>
+<p>Option 1: Gaussian</p>
+<ul>
+<li>Gaussian 16 - geometry optimization</li>
+<li>xTB - pre-optimization (optional but recommended)</li>
+<li>CREST - conformer search (optional)</li>
+</ul>
+<p>Option 2: ORCA</p>
+<ul>
+<li>ORCA - geometry optimization and single point</li>
+<li>xTB - pre-optimization (optional but recommended)</li>
+<li>CREST - conformer search (optional)</li>
+</ul>
+<p>Option 3: Mixed (recommended)</p>
+<ul>
+<li>Gaussian 16 - geometry optimization</li>
+<li>ORCA - high-accuracy single point</li>
+<li>xTB + CREST - pre-optimization and conformer search</li>
+</ul>
+<h3 id="installation">Installation</h3>
+<ol>
+<li>Clone the repo</li>
+</ol>
+<pre><code class="language-bash">   git clone https://github.com/yourusername/ReactionProfileHunter.git
+   cd ReactionProfileHunter</code></pre>
+<ol>
+<li>Install Python dependencies (if packaging metadata is available)</li>
+</ol>
+<pre><code class="language-bash">   pip install -e .</code></pre>
+<ol>
+<li>Configure QC executables</li>
+</ol>
+<p>Edit <code>config/defaults.yaml</code> and fill in installed paths:</p>
+<pre><code class="language-yaml">   executables:
+     gaussian:
+       path: &quot;/path/to/g16/g16&quot;
+       root: &quot;/path/to/g16&quot;
+       profile: &quot;/path/to/g16/g16.profile&quot;
+     orca:
+       path: &quot;/path/to/orca/orca&quot;
+       ld_library_path: &quot;/path/to/orca&quot;
+     xtb:
+       path: &quot;/path/to/xtb/bin/xtb&quot;
+     crest:
+       path: &quot;/path/to/crest/crest&quot;</code></pre>
+<ol>
+<li>Verify the environment</li>
+</ol>
+<pre><code class="language-bash">   python -m pytest -q</code></pre>
+<h3 id="basic-usage">Basic usage</h3>
+<h4 id="method-1-cli-recommended">Method 1: CLI (recommended)</h4>
+<pre><code class="language-bash"># Run a single reaction from a SMILES string
+bin/rph_run --smiles &quot;C=C(C)C(=O)O&quot; --output ./Output/rx_manual
+
+# Specify reaction type/profile
+bin/rph_run --smiles &quot;C=C(C)C(=O)O&quot; --reaction-type &quot;[4+3]_default&quot; --output ./Output/rx_4p3</code></pre>
+<p>Supported reaction types:</p>
+<ul>
+<li><code>[5+2]_default</code> - 5+2 cycloaddition (retro_scan, default)</li>
+<li><code>[4+3]_default</code> - 4+3 cycloaddition (retro_scan)</li>
+<li><code>[4+2]_default</code> - Diels-Alder (retro_scan)</li>
+<li><code>[3+2]_default</code> - 1,3-dipolar cycloaddition (retro_scan)</li>
+</ul>
+<p><code>rx_id</code> comes from the config (<code>run.single.rx_id</code>) or from the dataset id column.</p>
+<h4 id="method-2-config-driven">Method 2: Config-driven</h4>
+<p>1) Set run mode in <code>config/defaults.yaml</code>:</p>
+<pre><code class="language-yaml">run:
+  source: single
+  single:
+    product_smiles: &quot;C=C(C)C(=O)O&quot;
+    rx_id: &quot;rx_001&quot;</code></pre>
+<p>2) Run:</p>
+<pre><code class="language-bash">bin/rph_run</code></pre>
+<h4 id="method-3-python-api">Method 3: Python API</h4>
+<pre><code class="language-python">from pathlib import Path
+from rph_core.orchestrator import ReactionProfileHunter
+
+hunter = ReactionProfileHunter(config_path=&quot;config/defaults.yaml&quot;)
+
+result = hunter.run_pipeline(
+    product_smiles=&quot;C=C(C)C(=O)O&quot;,
+    work_dir=Path(&quot;./Output/rx_001&quot;)
+)
+
+if result.success:
+    print(f&quot;OK: pipeline completed (S3 outputs in {result.work_dir})&quot;)
+    print(f&quot;Run RPH_Postprocess for feature extraction&quot;)
+else:
+    print(f&quot;Failed: {result.error_message}&quot;)</code></pre>
+<h4 id="entry-points">Entry points</h4>
+<table>
+<thead><tr>
+<th>Method</th>
+<th>Command</th>
+<th>Notes</th>
+</tr></thead><tbody>
+<tr>
+<td>CLI script</td>
+<td><code>bin/rph_run --smiles &quot;...&quot;</code></td>
+<td>Adds repo root to <code>sys.path</code> automatically</td>
+</tr>
+<tr>
+<td>Short alias</td>
+<td><code>bin/rph --smiles &quot;...&quot;</code></td>
+<td>Identical to <code>rph_run</code></td>
+</tr>
+<tr>
+<td>Python module</td>
+<td><code>python -m rph_core --smiles &quot;...&quot;</code></td>
+<td>Same flags, relies on Python path</td>
+</tr>
+<tr>
+<td>Programmatic</td>
+<td><code>ReactionProfileHunter().run_pipeline()</code></td>
+<td>Full control, returns <code>PipelineResult</code></td>
+</tr>
+</tbody></table>
+<hr>
+<h2 id="detailed-documentation">Detailed documentation</h2>
+<h3 id="architecture-overview">Architecture overview</h3>
+<p>ReactionProfileHunter uses a sequential DFT pipeline from SMILES input through TS optimization:</p>
+<pre><code>SMILES → S0 (classify) → S1 (anchor) → S2 (scan) → S3 (TS opt)
+         mechanism_       product_      ts_guess     ts_final
+         summary.json     min.xyz       intermediate  sp_report
+                                         .xyz
+                                       
+                                        ──→ S4 (external) → features_raw.csv
+                                                             features_mlr.csv
+                                                             feature_meta.json</code></pre>
+<ul>
+<li><strong>S0 (optional):</strong> Mechanism classification — builds reaction graph, identifies cycloaddition mode ([4+3], [5+2], etc.), topology, and forming/breaking bonds. When S0 fails, S2 falls back to SMARTS auto-detection.</li>
+<li><strong>S1:</strong> Anchor/conformer search — UCE v3.1 two-stage conformer engine (GFN0→GFN2→DFT) producing the global minimum structure for each molecule.</li>
+<li><strong>S2:</strong> Retro scan — SMARTS-based forming bond detection + xTB constrained scan + Gau_XTB TS pre-optimization.</li>
+<li><strong>S3:</strong> TS optimization — Berny (primary) → QST2 rescue (on failure) → optional IRC. Validated via convergence + imaginary frequency consistency.</li>
+<li><strong>S4 (external):</strong> Feature extraction handled by the companion <a href="https://github.com/yourusername/RPH<em>Postprocess">RPH</em>Postprocess</a> package.</li>
+</ul>
+<p><strong>Inter-step handoffs</strong> (orchestrator wires these):</p>
+<ul>
+<li>S0→S1: <code>mechanism_summary.json</code> (forming<em>bonds, reaction</em>type)</li>
+<li>S1→S2: <code>product_min.xyz</code> (Path), <code>e_sp</code> (float), fchk/log/thermo</li>
+<li>S2→S3: <code>ts_guess.xyz</code>, <code>intermediate.xyz</code>, forming_bonds indices</li>
+<li>S3→S4 (external): <code>ts_final.xyz</code>, sp<em>report, fchk/log artifacts, forming</em>bonds metadata</li>
+</ul>
+<h4 id="step-breakdown">Step breakdown</h4>
+<table>
+<thead><tr>
+<th>Step</th>
+<th>Purpose</th>
+<th>Core modules</th>
+<th>Key outputs</th>
+</tr></thead><tbody>
+<tr>
+<td>S1</td>
+<td>Build 3D structure from SMILES; conformer search; DFT optimization</td>
+<td><code>steps/anchor/</code>, <code>steps/conformer_search/</code></td>
+<td><code>product_min.xyz</code>, <code>precursor_min.xyz</code></td>
+</tr>
+<tr>
+<td>S2</td>
+<td>Retro scan from products; TS guess; reactant complex</td>
+<td><code>steps/step2_retro/</code> (retro_scan)</td>
+<td><code>ts_guess.xyz</code>, <code>reactant_complex.xyz</code></td>
+</tr>
+<tr>
+<td>S3</td>
+<td>TS optimization and frequency analysis; reactant optimization; rescue strategies</td>
+<td><code>steps/step3_opt/</code></td>
+<td><code>ts_final.xyz</code>, <code>reactant_opt/</code></td>
+</tr>
+<tr>
+<td>S4</td>
+<td>(External) Energy extraction; geometric features; NBO/FMO analysis</td>
+<td>RPH<em>Postprocess/rph</em>features/</td>
+<td><code>features_raw.csv</code>, <code>feature_meta.json</code></td>
+</tr>
+</tbody></table>
+<h3 id="inputs-and-outputs">Inputs and outputs</h3>
+<h4 id="required-inputs">Required inputs</h4>
+<ul>
+<li>Product SMILES string (e.g., "C=C(C)C(=O)O")</li>
+<li>Reaction ID (optional; used for output directory naming)</li>
+</ul>
+<h4 id="strict-output-contract">Strict output contract</h4>
+<p><strong>S1 outputs (required)</strong></p>
+<ul>
+<li><code>S1_ConfGeneration/product/product_min.xyz</code></li>
+<li><code>S1_ConfGeneration/precursor/precursor_min.xyz</code> (optional)</li>
+</ul>
+<p><strong>S2 outputs (required; both)</strong></p>
+<ul>
+<li><code>S2_Retro/ts_guess.xyz</code> - TS guess structure</li>
+<li><code>S2_Retro/intermediate.xyz</code> - reaction intermediate (legacy alias: <code>reactant_complex.xyz</code>)</li>
+</ul>
+<p><strong>S3 outputs (required)</strong></p>
+<ul>
+<li><code>S3_TransitionAnalysis/ts_final.xyz</code> - optimized TS structure</li>
+<li><code>S3_TransitionAnalysis/reactant_sp.xyz</code> - optimized reactant geometry</li>
+<li><code>S3_TransitionAnalysis/S3_intermediate_opt/</code> - OPT+Freq run directory (legacy: <code>S3_Intermediate/</code>)</li>
+<li><code>S3_TransitionAnalysis/L2_SP/</code> - high-level single point on TS</li>
+</ul>
+<p><strong>S4 outputs (external — produced by RPH_Postprocess)</strong></p>
+<ul>
+<li><code>S4_Data/features_raw.csv</code> - raw features</li>
+<li><code>S4_Data/features_mlr.csv</code> - ML-ready features</li>
+<li><code>S4_Data/feature_meta.json</code> - feature metadata (version, provenance)</li>
+</ul>
+<p><strong>S4 optional outputs (NBO)</strong></p>
+<ul>
+<li><code>S4_Data/qc_nbo.37</code> - NBO file (collected from S3 artifacts by RPH_Postprocess)</li>
+</ul>
+<h4 id="example-output-tree">Example output tree</h4>
+<pre><code>Output/rx_001/
+├── S1_ConfGeneration/
+│   ├── product/
+│   │   ├── product_min.xyz
+│   │   ├── crest/              # CREST conformer outputs
+│   │   ├── xtb/                # xTB stages (GFN0→GFN2)
+│   │   └── finalDFT/           # DFT OPT+SP results
+│   └── precursor/
+│       └── precursor_min.xyz
+├── S2_Retro/
+│   ├── ts_guess.xyz
+│   └── intermediate.xyz        # (reactant_complex.xyz for legacy compat)
+├── S3_TransitionAnalysis/
+│   ├── ts_final.xyz
+│   ├── ts_opt/berny/           # Primary Berny attempt
+│   ├── ts_opt/qst2_rescue/     # QST2 rescue (if Berny failed)
+│   ├── S3_intermediate_opt/    # Intermediate DFT optimization
+│   ├── L2_SP/                  # wB97X-D3BJ single point
+│   └── irc/                    # Optional IRC
+├── S4_Data/                    # ← Produced by RPH_Postprocess
+│   ├── features_raw.csv
+│   ├── features_mlr.csv
+│   ├── feature_meta.json
+│   └── qc_nbo.37               # Optional
+└── rph.log</code></pre>
+<p>The <code>S4_Data/</code> directory is produced by running RPH_Postprocess on this output tree:</p>
+<pre><code class="language-bash">rph-features extract --rph-run ./Output/rx_001 --output ./Output/rx_001/S4_Data</code></pre>
+<h3 id="feature-extraction-external">Feature extraction (external)</h3>
+<p>Feature extraction (S4) is no longer part of the core RPH pipeline. It is handled by the companion <a href="https://github.com/yourusername/RPH<em>Postprocess">RPH</em>Postprocess</a> package.</p>
+<p>Run it after RPH completes:</p>
+<pre><code class="language-bash">rph-features extract --rph-run ./Output/rx_001 --output ./Output/rx_001/S4_Data</code></pre>
+<p>RPH_Postprocess consumes the S3 artifacts from RPH and produces:</p>
+<ul>
+<li><code>features_raw.csv</code> - all extracted features</li>
+<li><code>features_mlr.csv</code> - ML-ready feature matrix</li>
+<li><code>feature_meta.json</code> - provenance and config metadata</li>
+</ul>
+<p>The separation keeps RPH focused on DFT computation while RPH_Postprocess handles all post-hoc analysis, including geometric descriptors, NBO/FMO analysis, CDFT metrics, and ML dataset building.</p>
+<h3 id="configuration-guide">Configuration guide</h3>
+<h4 id="1-qc-executables-executables">1) QC executables (<code>executables</code>)</h4>
+<pre><code class="language-yaml">executables:
+  gaussian:
+    path: &quot;/root/g16/g16&quot;
+    use_wrapper: true
+    wrapper_path: &quot;./scripts/run_g16_worker.sh&quot;</code></pre>
+<h4 id="2-resources-resources">2) Resources (<code>resources</code>)</h4>
+<pre><code class="language-yaml">resources:
+  mem: &quot;64GB&quot;
+  nproc: 16
+  orca_maxcore_safety: 0.8</code></pre>
+<h4 id="3-theory-levels-theory">3) Theory levels (<code>theory</code>)</h4>
+<pre><code class="language-yaml">  preoptimization:
+    enabled: true
+    gfn_level: 2
+    overlap_threshold: 1.0
+  optimization:
+    method: B3LYP
+    basis: def2-SVP
+    dispersion: GD3BJ
+    engine: gaussian
+  single_point:
+    method: wB97X-D3BJ
+    basis: def2-TZVPP
+    engine: orca</code></pre>
+<h4 id="4-reaction-profiles-reaction_profiles---new">4) Reaction profiles (<code>reaction_profiles</code>) - NEW</h4>
+<pre><code class="language-yaml">reaction_profiles:
+  &quot;[4+3]_default&quot;:
+    forming_bond_count: 2
+    s2_strategy: retro_scan         # Use Step2 retro scan
+    scan:
+      scan_start_distance: 1.8      # Initial bond distance (Å)
+      scan_end_distance: 3.2       # Final bond distance (Å)
+      scan_steps: 20                # Number of scan steps
+      scan_mode: concerted          # or &quot;sequential&quot;
+      scan_force_constant: 0.5      # Constraint force constant
+
+  &quot;[4+2]_default&quot;:
+    forming_bond_count: 2
+    s2_strategy: retro_scan
+    scan:
+      scan_start_distance: 2.0
+      scan_end_distance: 3.5
+      scan_steps: 15
+
+  &quot;[5+2]_default&quot;:
+    forming_bond_count: 2
+    s2_strategy: retro_scan         # Legacy backward scan
+
+  &quot;_universal&quot;:
+    forming_bond_count: 2
+    s2_strategy: retro_scan
+    scan:
+      scan_start_distance: 2.2
+      scan_end_distance: 3.5</code></pre>
+<h4 id="5-optimization-control-optimization_control">5) Optimization control (<code>optimization_control</code>)</h4>
+<pre><code class="language-yaml">optimization_control:
+  max_cycles: 100
+  convergence:
+    level: normal
+  hessian:
+    initial: calcfc
+    recalc_every: 10</code></pre>
+<h4 id="config-file-locations">Config file locations</h4>
+<ul>
+<li>Main config: <code>config/defaults.yaml</code></li>
+<li>Templates: <code>config/templates/</code></li>
+</ul>
+<hr>
+<h2 id="benchmark-suite">Benchmark suite</h2>
+<p>RPH includes a stand-alone benchmark suite at <code>rph_benchmark/</code> for protocol and method evaluation:</p>
+<h3 id="conformer-search-benchmarks-rph_benchmarkconfsearch">Conformer search benchmarks (<code>rph_benchmark/confsearch/</code>)</h3>
+<p>Compare CREST/xTB protocol variants (two-stage vs single-stage, energy windows) across multiple molecules:</p>
+<pre><code class="language-bash">bash rph_benchmark/confsearch/run.sh --all
+python -m rph_benchmark.confsearch.evaluate</code></pre>
+<h3 id="dft-theory-benchmarks-rph_benchmarkdft_theory">DFT theory benchmarks (<code>rph_benchmark/dft_theory/</code>)</h3>
+<p>Multi-stage pipeline: migrate confsearch seeds → run baseline → benchmark geometry + SP → compute corrections → report:</p>
+<pre><code class="language-bash">bash rph_benchmark/dft_theory/run.sh --stage all</code></pre>
+<p>Stages include: migrate, baseline, geo<em>benchmark, sp</em>benchmark, shermo<em>correction, p2b</em>complement, refresh<em>geo</em>sp, etc.</p>
+<blockquote>
+<p><strong>Important</strong>: Benchmark results are stored in <code>rph_benchmark/logs/</code>. Do not commit large result files to git. See <a href="rph_benchmark/AGENTS.md"><code>rph_benchmark/AGENTS.md</code></a> for detailed benchmark documentation.</p>
+</blockquote>
+<hr>
+<h2 id="advanced-usage">Advanced usage</h2>
+<h3 id="batch-mode">Batch mode</h3>
+<p>Create a TSV file <code>reactions.tsv</code>:</p>
+<pre><code class="language-tsv">rx_id	product_smiles	precursor_smiles
+rx_001	C=C(C)C(=O)O	C=C(C)C(=O)OC
+rx_002	CC(=O)OC	CC(=O)Cl</code></pre>
+<p>Set <code>config/defaults.yaml</code>:</p>
+<pre><code class="language-yaml">run:
+  source: batch
+  batch:
+    input_file: &quot;reactions.tsv&quot;
+    smiles_column: &quot;product_smiles&quot;</code></pre>
+<p>Run:</p>
+<pre><code class="language-bash">bin/rph_run</code></pre>
+<h3 id="dataset-mode">Dataset mode</h3>
+<pre><code class="language-yaml">run:
+  source: dataset
+  dataset:
+    format: &quot;csv&quot;
+    path: &quot;data/reaxys_cleaned.csv&quot;
+    product_smiles_col: &quot;product_smiles_main&quot;
+    id_col: &quot;rx_id&quot;
+    delimiter: &quot;,&quot;</code></pre>
+<h3 id="resume-and-rehydrate">Resume and rehydrate</h3>
+<p>RPH resumes from checkpoints by default. Re-run the same command to continue:</p>
+<pre><code class="language-bash">bin/rph_run --smiles &quot;C=C(C)C(=O)O&quot; --output ./Output/rx_001</code></pre>
+<p>To control resume behavior, edit config:</p>
+<pre><code class="language-yaml">run:
+  resume: true
+  resume_rehydrate: true
+  resume_rehydrate_policy: best_effort</code></pre>
+<h3 id="custom-parameters">Custom parameters</h3>
+<p>Create a custom config file and pass it via <code>--config</code>:</p>
+<pre><code class="language-bash">bin/rph_run --config config/custom.yaml</code></pre>
+<p>Example overrides:</p>
+<pre><code class="language-yaml">theory:
+  optimization:
+    method: M06-2X
+resources:
+  nproc: 32</code></pre>
+<h3 id="enable-nbo-analysis">Enable NBO analysis</h3>
+<p>Config option:</p>
+<pre><code class="language-yaml">step3:
+  reactant_opt:
+    enable_nbo: true</code></pre>
+<p>NBO file collection rules (used by RPH_Postprocess):</p>
+<ul>
+<li>Search in <code>S3_TS</code> subdirectories:</li>
+<li><code>nbo_analysis/</code></li>
+<li><code>nbo/</code></li>
+<li><code>reactant_opt/standard/</code></li>
+<li><code>reactant_opt/rescue/</code></li>
+<li>Recognized extensions: <code>*.37</code>, <code>*.nbo</code>, <code>*.nbo7</code></li>
+</ul>
+<hr>
+<h2 id="tests">Tests</h2>
+<h3 id="run-tests">Run Tests</h3>
+<pre><code class="language-bash"># All tests
+pytest -v tests/
+
+# Single test file
+pytest tests/test_step1_protocol_contract.py -v
+
+# DFT pipeline tests (S0-S3)
+pytest tests/test_s0_*.py tests/test_s1_*.py tests/test_s2_*.py tests/test_s3_*.py -v
+
+# With coverage
+pytest --cov=rph_core --cov-report=html</code></pre>
+<p>S4 feature extraction tests are now in <a href="https://github.com/yourusername/RPH<em>Postprocess">RPH</em>Postprocess/tests/</a>.</p>
+<h3 id="import-style-check-ci-gate">Import Style Check (CI Gate)</h3>
+<pre><code class="language-bash"># Block multi-dot relative imports (exit 1 on violation)
+python scripts/ci/check_imports.py rph_core</code></pre>
+<h3 id="notes">Notes</h3>
+<ul>
+<li><code>tests/conftest.py</code> adds the repo root to <code>sys.path</code>, so tests can run without editable install.</li>
+<li>Integration tests use mocked QC calculations and do not require real Gaussian/ORCA binaries.</li>
+<li>See <a href="tests/AGENTS.md">tests/AGENTS.md</a> for detailed test organization.</li>
+</ul>
+<hr>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<h3 id="1-gaussian-executable-not-found">1. Gaussian executable not found</h3>
+<p>Error:</p>
+<pre><code>FileNotFoundError: Gaussian executable not found: /root/g16/g16</code></pre>
+<p>Fix:</p>
+<ul>
+<li>Verify <code>executables.gaussian.path</code> in <code>config/defaults.yaml</code></li>
+<li>Ensure Gaussian is installed and environment variables are configured</li>
+<li>Try running <code>g16 &lt; test.gjf</code> to validate availability</li>
+</ul>
+<h3 id="2-out-of-memory-errors">2. Out-of-memory errors</h3>
+<p>Error:</p>
+<pre><code>Error termination via Lnk1e in /root/g16/g16</code></pre>
+<p>Fix:</p>
+<ul>
+<li>Lower <code>resources.mem</code> and <code>resources.nproc</code></li>
+<li>Use a smaller basis set (e.g., def2-SVP -> 6-31G*)</li>
+<li>Enable ORCA <code>maxcore</code> limits</li>
+</ul>
+<h3 id="3-conformer-search-fails">3. Conformer search fails</h3>
+<p>Error:</p>
+<pre><code>ConformerSearchError: No conformers found below energy threshold</code></pre>
+<p>Fix:</p>
+<ul>
+<li>Increase CREST sampling time</li>
+<li>Loosen the energy window</li>
+<li>Verify SMILES input</li>
+</ul>
+<h3 id="4-ts-optimization-fails">4. TS optimization fails</h3>
+<p>Error:</p>
+<pre><code>TSOptimizationError: TS optimization failed after 5 attempts</code></pre>
+<p>Fix:</p>
+<ul>
+<li>Inspect <code>ts_guess.xyz</code> (imaginary frequencies, geometry)</li>
+<li>Enable rescue strategies (default)</li>
+<li>Adjust TS guess geometry</li>
+</ul>
+<h3 id="5-missing-nbo-data">5. Missing NBO data</h3>
+<p>Error:</p>
+<pre><code>Warning: NBO file not found in S3 subdirectories</code></pre>
+<p>Fix:</p>
+<ul>
+<li>Ensure <code>step3.reactant_opt.enable_nbo: true</code></li>
+<li>Check for <code>*.37</code> or <code>*.nbo</code> under <code>S3_TS/reactant_opt/standard/</code></li>
+<li>Confirm NBO succeeded in Gaussian/ORCA logs</li>
+</ul>
+<h3 id="logs">Logs</h3>
+<p>Logs are stored in <code>Output/[rx_id]/rph.log</code>.</p>
+<pre><code class="language-bash">tail -f Output/rx_001/rph.log</code></pre>
+<h3 id="debug-mode">Debug mode</h3>
+<pre><code class="language-bash">bin/rph_run --log-level DEBUG</code></pre>
+<h3 id="getting-help">Getting help</h3>
+<ol>
+<li>Check GitHub Issues: https://github.com/yourusername/ReactionProfileHunter/issues</li>
+<li>Provide logs and config files</li>
+<li>Provide a minimal reproducible example</li>
+</ol>
+<hr>
+<h2 id="further-reading">Further reading</h2>
+<h3 id="documentation-index">Documentation Index</h3>
+<table>
+<thead><tr>
+<th>Document</th>
+<th>Contents</th>
+</tr></thead><tbody>
+<tr>
+<td><a href="AGENTS.md"><code>AGENTS.md</code></a></td>
+<td><strong>Agentic coding guide</strong> — build/test commands, code style, conventions</td>
+</tr>
+<tr>
+<td><a href="rph_core/AGENTS.md"><code>rph_core/AGENTS.md</code></a></td>
+<td>Core package architecture & code map</td>
+</tr>
+<tr>
+<td><a href="rph_core/steps/AGENTS.md"><code>rph_core/steps/AGENTS.md</code></a></td>
+<td>Step architecture & output contracts</td>
+</tr>
+<tr>
+<td><a href="rph_core/utils/AGENTS.md"><code>rph_core/utils/AGENTS.md</code></a></td>
+<td>41-file QC/IO/checkpoint infra reference</td>
+</tr>
+<tr>
+<td><a href="config/AGENTS.md"><code>config/AGENTS.md</code></a></td>
+<td>Config structure notes</td>
+</tr>
+<tr>
+<td><a href="tests/AGENTS.md"><code>tests/AGENTS.md</code></a></td>
+<td>Test organization and conventions</td>
+</tr>
+<tr>
+<td><a href="scripts/AGENTS.md"><code>scripts/AGENTS.md</code></a></td>
+<td>Scripts & CI tools notes</td>
+</tr>
+<tr>
+<td><a href="docs/AGENTS.md"><code>docs/AGENTS.md</code></a></td>
+<td>Design docs catalog & archive conventions</td>
+</tr>
+<tr>
+<td><a href="rph_benchmark/AGENTS.md"><code>rph_benchmark/AGENTS.md</code></a></td>
+<td>Benchmark suite documentation</td>
+</tr>
+<tr>
+<td><a href="docs/DUAL<em>LEVEL</em>STRATEGY_SUMMARY.md"><code>docs/DUAL_LEVEL_STRATEGY_SUMMARY.md</code></a></td>
+<td>Dual-level computation strategy</td>
+</tr>
+<tr>
+<td><a href="docs/QUICK<em>START</em>DUAL_LEVEL.md"><code>docs/QUICK_START_DUAL_LEVEL.md</code></a></td>
+<td>Quick start for dual-level strategy</td>
+</tr>
+<tr>
+<td><a href="docs/BUGFIX<em>STEP3</em>QCRESULT.md"><code>docs/BUGFIX_STEP3_QCRESULT.md</code></a></td>
+<td>S3 QCResult refactor notes</td>
+</tr>
+<tr>
+<td><a href="docs/S4<em>FEATURES</em>SUMMARY.md"><code>docs/S4_FEATURES_SUMMARY.md</code></a></td>
+<td>S4 feature extraction summary</td>
+</tr>
+<tr>
+<td><a href="docs/TESTING_GUIDE.md"><code>docs/TESTING_GUIDE.md</code></a></td>
+<td>Testing guide and environment setup</td>
+</tr>
+</tbody></table>
+<h3 id="citation">Citation</h3>
+<p>If you use ReactionProfileHunter in research, please cite:</p>
+<pre><code class="language-bibtex">@software{reactionprofilehunter2025,
+  title = {ReactionProfileHunter: Automated Reaction Mechanism Exploration},
+  author = {Your Name},
+  year = {2025},
+  url = {https://github.com/yourusername/ReactionProfileHunter},
+  version = {3.0.0}
+}</code></pre>
+<h3 id="resources">Resources</h3>
+<ul>
+<li>Theory background: Houk group methodology, Grimme GFN-xTB papers, wB97X-D3 benchmark reports</li>
+<li>Tool docs:</li>
+<li>https://gaussian.com/man/</li>
+<li>https://sites.google.com/site/orcainputlibrary/</li>
+<li>https://xtb-docs.readthedocs.io/</li>
+</ul>
+<hr>
+<h2 id="contributing">Contributing</h2>
+<ol>
+<li>Fork the repo</li>
+<li>Create a feature branch: <code>git checkout -b feature/amazing-feature</code></li>
+<li>Commit changes: <code>git commit -m &quot;Add amazing feature&quot;</code></li>
+<li>Push: <code>git push origin feature/amazing-feature</code></li>
+<li>Open a pull request</li>
+</ol>
+<h3 id="code-standards">Code Standards</h3>
+<ul>
+<li>Use <code>pathlib.Path</code> for all paths (no string paths)</li>
+<li>Use <code>logging.getLogger(__name__)</code> or <code>LoggerMixin</code> (no <code>print()</code> in library code)</li>
+<li>Keep output directories idempotent: reuse existing outputs to avoid reruns</li>
+<li>All QC calls must go through <code>utils/qc_interface.py</code></li>
+<li><strong>Absolute imports only</strong> — no multi-dot relative imports (e.g., <code>from rph_core.utils...</code> not <code>from ...utils</code>)</li>
+<li>See <a href="AGENTS.md">AGENTS.md</a> for complete coding guidelines</li>
+</ul>
+<h3 id="tests">Tests</h3>
+<ul>
+<li>New features must include unit tests</li>
+<li>All tests must pass: <code>python -m pytest -q</code></li>
+<li>Keep coverage above 80%</li>
+</ul>
+<h3 id="documentation">Documentation</h3>
+<ul>
+<li>Update relevant <code>AGENTS.md</code> files</li>
+<li>Add usage examples for new features</li>
+<li>Update version in <code>rph_core/version.py</code> and README badges</li>
+</ul>
+<hr>
+<h2 id="license">License</h2>
+<p>This project is released under the MIT License. See <code>LICENSE</code>.</p>
+<hr>
+<h2 id="contact">Contact</h2>
+<ul>
+<li>Author: QCcalc Team</li>
+<li>Email: your.email@example.com</li>
+<li>Project: https://github.com/yourusername/ReactionProfileHunter</li>
+<li>Issues: https://github.com/yourusername/ReactionProfileHunter/issues</li>
+</ul>
+<hr>
+<h2 id="acknowledgements">Acknowledgements</h2>
+<ul>
+<li>Prof. Houk: dual-level computation guidance</li>
+<li>Grimme group: xTB and CREST</li>
+<li>Gaussian and ORCA teams: QC tooling</li>
+<li>Community contributors</li>
+</ul>
+<hr>
+<div align="center">
+<p><strong>If this project is useful, please star it.</strong></p>
+</div>
+</div>
+</body>
+</html>

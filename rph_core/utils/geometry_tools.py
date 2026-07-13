@@ -557,6 +557,7 @@ class LogParser:
             - symbols: 元素符号列表
             - error_message: 如果失败，返回错误信息
         """
+        log_file = Path(log_file)
         if not log_file.exists():
             return None, None, f"文件不存在: {log_file}"
 
