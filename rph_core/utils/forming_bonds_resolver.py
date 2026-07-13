@@ -126,10 +126,44 @@ def _graph_to_bond_set(graph: Dict[int, List[int]]) -> set[Tuple[int, int]]:
     return bonds
 
 
+def _filter_additive_atoms(
+    forming_bonds: Optional[Tuple[Tuple[int, int], ...]],
+    additive_indices: Tuple[int, ...],
+) -> Tuple[Tuple[int, int], ...]:
+    """Remove forming bonds that involve additive atoms (e.g. Li, Cl).
+
+    Args:
+        forming_bonds: Tuple of (i, j) bond pairs or None
+        additive_indices: Atom indices of additive atoms to exclude
+
+    Returns:
+        Filtered tuple of forming bonds
+    """
+    if not forming_bonds or not additive_indices:
+        return forming_bonds or ()
+
+    additive_set = set(additive_indices)
+    filtered = tuple(
+        sorted(
+            (min(i, j), max(i, j)) for i, j in forming_bonds
+            if i not in additive_set and j not in additive_set
+        )
+    )
+
+    if filtered != forming_bonds and not filtered:
+        logger.warning(
+            f"W_FORMING_BONDS_ALL_FILTERED: All {len(forming_bonds)} forming bonds "
+            f"involved additive atoms {additive_indices}"
+        )
+
+    return filtered
+
+
 def infer_forming_bonds_from_geometries(
     product_xyz: Path,
     ts_xyz: Path,
-    config: Optional[Dict[str, Any]] = None
+    config: Optional[Dict[str, Any]] = None,
+    la_additive: Optional[Any] = None,
 ) -> FormingBondsResult:
     """Infer forming bonds from optimized product and TS geometries.
 
@@ -220,6 +254,18 @@ def infer_forming_bonds_from_geometries(
         },
     }
 
+    # Apply additive atom filter if la_additive is provided
+    if la_additive is not None:
+        additive_indices = tuple(getattr(la_additive, 'additive_atom_indices', ()))
+        if additive_indices and forming_bonds:
+            filtered_bonds = _filter_additive_atoms(forming_bonds, additive_indices)
+            if filtered_bonds != forming_bonds:
+                warnings = warnings + ["W_FORMING_BONDS_ADDITIVE_FILTERED"]
+            forming_bonds = filtered_bonds
+            if meta:
+                meta = dict(meta)
+                meta["forming_bonds"] = [list(b) for b in forming_bonds] if forming_bonds else None
+
     return FormingBondsResult(forming_bonds, meta, warnings)
 
 
@@ -241,7 +287,8 @@ def resolve_forming_bonds(
     s3_dir: Optional[Path],
     s4_dir: Optional[Path],
     config: Optional[Dict[str, Any]] = None,
-    write_meta: bool = True
+    write_meta: bool = True,
+    la_additive: Optional[Any] = None,
 ) -> FormingBondsResult:
     """Resolve forming bonds from mechanism_meta.json or infer from geometries.
 
@@ -268,12 +315,23 @@ def resolve_forming_bonds(
         if meta:
             forming_bonds = parse_forming_bonds(meta)
             if forming_bonds:
-                return FormingBondsResult(forming_bonds, meta, [])
+                result = FormingBondsResult(forming_bonds, meta, [])
+                if la_additive is not None:
+                    additive_indices = tuple(getattr(la_additive, 'additive_atom_indices', ()))
+                    if additive_indices:
+                        filtered = _filter_additive_atoms(forming_bonds, additive_indices)
+                        if filtered != forming_bonds:
+                            result = FormingBondsResult(
+                                filtered,
+                                meta,
+                                result.warnings + ["W_FORMING_BONDS_ADDITIVE_FILTERED"],
+                            )
+                return result
 
     if product_xyz is None or ts_xyz is None:
         return FormingBondsResult(None, None, ["W_FORMING_BONDS_MISSING_INPUTS"])
 
-    result = infer_forming_bonds_from_geometries(product_xyz, ts_xyz, config=config)
+    result = infer_forming_bonds_from_geometries(product_xyz, ts_xyz, config=config, la_additive=la_additive)
     if write_meta and result.meta:
         target_dir = Path(s3_dir) if s3_dir else Path(s4_dir) if s4_dir else None
         if target_dir is not None:

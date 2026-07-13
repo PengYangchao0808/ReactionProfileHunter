@@ -87,7 +87,7 @@ class TaskRecord:
     spec: TaskSpec
     state: TaskState = TaskState.PENDING
     progress_pct: int = 0     # 0-100
-    detail: str = ""          # 当前详细状态 (如 "Berny iter 12/20")
+    detail: str = ""          # Current stage detail
     elapsed_sec: float = 0.0
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
@@ -170,19 +170,10 @@ V4_TASK_REGISTRY: dict[str, TaskSpec] = {
     "ts_opt": TaskSpec(
         task_id="ts_opt",
         name="TS Optimization",
-        description="Transition state optimization (Berny/QST2)",
+        description="Transition-state optimization",
         phase="ts",
         depends_on=["retro_scan"],
         weight=20,
-        cacheable=True,
-    ),
-    "irc_verify": TaskSpec(
-        task_id="irc_verify",
-        name="IRC Verification",
-        description="IRC path verification",
-        phase="ts",
-        depends_on=["ts_opt"],
-        weight=12,
         cacheable=True,
     ),
     "reactant_opt": TaskSpec(
@@ -254,26 +245,6 @@ V4_TASK_REGISTRY: dict[str, TaskSpec] = {
         optional=True,
     ),
 
-    # === Post Phase ===
-    "dr_aggregate": TaskSpec(
-        task_id="dr_aggregate",
-        name="DR Aggregation",
-        description="Diastereomer ratio aggregation",
-        phase="post",
-        depends_on=["geom_features", "elec_features", "thermo_features"],
-        weight=1,
-        cacheable=False,
-    ),
-    "condition_thermo": TaskSpec(
-        task_id="condition_thermo",
-        name="Condition Thermo",
-        description="Condition-specific thermochemistry calculations",
-        phase="post",
-        depends_on=["dr_aggregate"],
-        weight=1,
-        cacheable=False,
-        optional=True,
-    ),
 }
 
 

@@ -43,7 +43,7 @@ run_gaussian_optimization(route, atoms, charge, mult, output_dir, config) -> dic
 
 # Interface classes
 GaussianInterface   # write_input_file(), optimize(), constrained_optimize()
-XTBInterface       # optimize(), scan() (NEW) → delegates to XTBRunner
+XTBInterface       # optimize(), scan() (NEW), enso_thermo() (NEW) → delegates to XTBRunner
 CRESTInterface     # run_conformer_search(), run_batch_optimization()
 QCInterfaceFactory  # create_interface(engine_type, **kwargs)
 
@@ -80,6 +80,26 @@ xtb.scan(
     charge: int = 0,
     spin: int = 1
 ) -> ScanResult
+```
+
+## XTB ENSO THERMO API (NEW)
+```python
+# XTBInterface.enso_thermo() signature
+xtb.enso_thermo(
+    xyz_file: Path,
+    output_dir: Path,
+    *,
+    charge: int = 0,
+    spin: int = 1,
+    temperature_k: float = 298.15,
+    sthr: float = 50.0,
+    imagthr: float = -100.0,
+    solvent: Optional[str] = None,
+    timeout: Optional[int] = None,
+) -> XTBThermoResult
+# CENSO-style xTB SPH+mRRHO thermochemistry. Wraps run_xtb_enso() from
+# rph_core.steps.conformer_search.xtb_thermo. Delegates to xtb --bhess --enso.
+# Returns G(T), ZPVE, H(T) on success, or success=False with error on failure.
 ```
 
 ## PROJECT-SPECIFIC RULES

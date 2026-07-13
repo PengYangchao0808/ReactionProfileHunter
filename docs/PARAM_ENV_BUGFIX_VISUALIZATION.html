@@ -1,0 +1,1397 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RPH 参数与环境发现 BUG 全景可视化</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-card: #161b22;
+    --bg-card-hover: #1c2128;
+    --border: #30363d;
+    --border-strong: #484f58;
+    --text: #e6edf3;
+    --text-muted: #7d8590;
+    --text-dim: #6e7681;
+    --accent: #58a6ff;
+    --sev-critical: #ff6b6b;
+    --sev-critical-bg: rgba(255, 107, 107, 0.12);
+    --sev-high: #ff8c42;
+    --sev-high-bg: rgba(255, 140, 66, 0.12);
+    --sev-medium: #f0c674;
+    --sev-medium-bg: rgba(240, 198, 116, 0.12);
+    --sev-low: #7ee787;
+    --sev-low-bg: rgba(126, 231, 135, 0.10);
+    --sev-safe: #56d364;
+    --sev-safe-bg: rgba(86, 211, 100, 0.10);
+    --p0: #ff6b6b;
+    --p1: #ffa657;
+    --p2: #d2a8ff;
+    --code-bg: #0d1117;
+    --code-border: #30363d;
+    --shadow: 0 8px 24px rgba(0,0,0,0.4);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    font-size: 15px;
+    -webkit-font-smoothing: antialiased;
+  }
+  code, pre, .mono {
+    font-family: "SF Mono", "JetBrains Mono", "Fira Code", Consolas, monospace;
+  }
+  
+  /* ===== Layout ===== */
+  .container { max-width: 1400px; margin: 0 auto; padding: 0 24px; }
+  
+  /* ===== Header ===== */
+  header.hero {
+    background: linear-gradient(135deg, #1a1f2e 0%, #0d1117 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 48px 0 36px;
+    position: relative;
+    overflow: hidden;
+  }
+  header.hero::before {
+    content: '';
+    position: absolute;
+    top: -50%; right: -20%;
+    width: 600px; height: 600px;
+    background: radial-gradient(circle, rgba(88, 166, 255, 0.08) 0%, transparent 70%);
+    pointer-events: none;
+  }
+  .hero-content { position: relative; }
+  .hero h1 {
+    font-size: 32px; font-weight: 700; margin-bottom: 8px;
+    background: linear-gradient(135deg, #58a6ff 0%, #d2a8ff 100%);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .hero .subtitle { color: var(--text-muted); font-size: 16px; margin-bottom: 24px; }
+  .hero-meta { display: flex; flex-wrap: wrap; gap: 16px; font-size: 13px; color: var(--text-dim); }
+  .hero-meta span { display: inline-flex; align-items: center; gap: 6px; }
+  .hero-meta .dot { width: 4px; height: 4px; border-radius: 50%; background: var(--text-dim); }
+  
+  /* ===== Stat Cards ===== */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+    margin: 32px 0;
+  }
+  .stat-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    text-align: center;
+    transition: all 0.2s;
+  }
+  .stat-card:hover { background: var(--bg-card-hover); border-color: var(--border-strong); }
+  .stat-card .num { font-size: 36px; font-weight: 700; line-height: 1.1; }
+  .stat-card .label { font-size: 12px; color: var(--text-muted); margin-top: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat-card.critical .num { color: var(--sev-critical); }
+  .stat-card.high .num { color: var(--sev-high); }
+  .stat-card.medium .num { color: var(--sev-medium); }
+  .stat-card.safe .num { color: var(--sev-safe); }
+  .stat-card.accent .num { color: var(--accent); }
+  
+  /* ===== Nav ===== */
+  nav.toc {
+    position: sticky; top: 0; z-index: 100;
+    background: rgba(13, 17, 23, 0.85);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 0;
+  }
+  nav.toc .container { display: flex; flex-wrap: wrap; gap: 4px; }
+  nav.toc a {
+    color: var(--text-muted);
+    text-decoration: none;
+    font-size: 13px;
+    padding: 6px 12px;
+    border-radius: 6px;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  nav.toc a:hover { background: var(--bg-card); color: var(--text); }
+  
+  /* ===== Section ===== */
+  section { padding: 48px 0; border-bottom: 1px solid var(--border); }
+  section:last-child { border-bottom: none; }
+  .section-header { margin-bottom: 28px; }
+  .section-header h2 {
+    font-size: 24px; font-weight: 600;
+    display: flex; align-items: center; gap: 12px;
+    margin-bottom: 6px;
+  }
+  .section-header .desc { color: var(--text-muted); font-size: 14px; }
+  
+  /* ===== Badges ===== */
+  .badge {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 11px; font-weight: 600;
+    padding: 3px 8px; border-radius: 4px;
+    text-transform: uppercase; letter-spacing: 0.5px;
+    border: 1px solid transparent;
+  }
+  .badge-p0 { background: var(--sev-critical-bg); color: var(--sev-critical); border-color: rgba(255,107,107,0.3); }
+  .badge-p1 { background: var(--sev-high-bg); color: var(--sev-high); border-color: rgba(255,140,66,0.3); }
+  .badge-p2 { background: rgba(210, 168, 255, 0.12); color: var(--p2); border-color: rgba(210,168,255,0.3); }
+  .badge-critical { background: var(--sev-critical-bg); color: var(--sev-critical); border-color: rgba(255,107,107,0.3); }
+  .badge-high { background: var(--sev-high-bg); color: var(--sev-high); border-color: rgba(255,140,66,0.3); }
+  .badge-medium { background: var(--sev-medium-bg); color: var(--sev-medium); border-color: rgba(240,198,116,0.3); }
+  .badge-low { background: var(--sev-low-bg); color: var(--sev-low); border-color: rgba(126,231,135,0.3); }
+  .badge-safe { background: var(--sev-safe-bg); color: var(--sev-safe); border-color: rgba(86,211,100,0.3); }
+  .badge-plan { background: rgba(88, 166, 255, 0.12); color: var(--accent); border-color: rgba(88,166,255,0.3); }
+  .badge-hidden { background: rgba(255, 196, 0, 0.12); color: #ffc400; border-color: rgba(255,196,0,0.3); }
+  .badge-inaccurate { background: rgba(255, 71, 91, 0.12); color: #ff4757; border-color: rgba(255,71,91,0.3); }
+  .badge-verified { background: var(--sev-safe-bg); color: var(--sev-safe); border-color: rgba(86,211,100,0.3); }
+  
+  /* ===== Issue Card ===== */
+  .issue-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 22px;
+    margin-bottom: 16px;
+    transition: all 0.2s;
+    border-left-width: 4px;
+  }
+  .issue-card:hover { background: var(--bg-card-hover); }
+  .issue-card.sev-critical { border-left-color: var(--sev-critical); }
+  .issue-card.sev-high { border-left-color: var(--sev-high); }
+  .issue-card.sev-medium { border-left-color: var(--sev-medium); }
+  .issue-card.sev-low { border-left-color: var(--sev-low); }
+  .issue-card.sev-safe { border-left-color: var(--sev-safe); }
+  .issue-card.hidden-issue { border-left-style: dashed; }
+  
+  .issue-header { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+  .issue-title { font-size: 16px; font-weight: 600; flex: 1; min-width: 200px; }
+  .issue-badges { display: flex; gap: 6px; flex-wrap: wrap; }
+  
+  .issue-body { color: var(--text-muted); font-size: 14px; }
+  .issue-body p { margin-bottom: 10px; }
+  .issue-body strong { color: var(--text); }
+  
+  .issue-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin: 12px 0; padding: 12px; background: var(--code-bg); border-radius: 6px; border: 1px solid var(--code-border); }
+  .issue-meta-item { font-size: 12px; }
+  .issue-meta-item .key { color: var(--text-dim); display: block; }
+  .issue-meta-item .val { color: var(--text); font-family: "SF Mono", monospace; }
+  
+  /* ===== Code Block ===== */
+  pre.code {
+    background: var(--code-bg);
+    border: 1px solid var(--code-border);
+    border-radius: 6px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    font-size: 12.5px;
+    line-height: 1.55;
+    margin: 10px 0;
+    color: #c9d1d9;
+  }
+  pre.code .ln { color: var(--text-dim); user-select: none; margin-right: 14px; }
+  pre.code .kw { color: #ff7b72; }
+  pre.code .str { color: #a5d6ff; }
+  pre.code .com { color: #6e7681; font-style: italic; }
+  pre.code .fn { color: #d2a8ff; }
+  pre.code .num { color: #79c0ff; }
+  pre.code .hl { background: rgba(255, 196, 0, 0.15); display: inline-block; width: calc(100% + 28px); margin-left: -14px; padding-left: 14px; padding-right: 14px; }
+  
+  /* ===== Table ===== */
+  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { background: var(--bg-card); padding: 12px 14px; text-align: left; font-weight: 600; color: var(--text); border-bottom: 1px solid var(--border-strong); white-space: nowrap; }
+  td { padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--text-muted); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--bg-card); }
+  td.mono { font-family: "SF Mono", monospace; font-size: 12px; color: var(--text); }
+  
+  /* ===== Flow Diagram ===== */
+  .flow-diagram {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px;
+    margin: 16px 0;
+    overflow-x: auto;
+  }
+  .flow-row { display: flex; align-items: stretch; gap: 0; margin-bottom: 12px; min-width: 800px; }
+  .flow-row:last-child { margin-bottom: 0; }
+  .flow-node {
+    flex: 1;
+    padding: 12px 14px;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 12.5px;
+    position: relative;
+    min-width: 0;
+  }
+  .flow-node .node-title { font-weight: 600; color: var(--text); margin-bottom: 4px; font-size: 13px; }
+  .flow-node .node-meta { color: var(--text-dim); font-size: 11px; }
+  .flow-arrow {
+    display: flex; align-items: center; justify-content: center;
+    width: 30px; flex-shrink: 0;
+    color: var(--text-dim); font-size: 18px;
+  }
+  .flow-node.break { border-color: var(--sev-critical); background: var(--sev-critical-bg); }
+  .flow-node.break .node-title { color: var(--sev-critical); }
+  .flow-node.warning { border-color: var(--sev-medium); background: var(--sev-medium-bg); }
+  .flow-node.warning .node-title { color: var(--sev-medium); }
+  .flow-node.ok { border-color: var(--sev-safe); }
+  .flow-node.ok .node-title { color: var(--sev-safe); }
+  
+  /* ===== Callout ===== */
+  .callout {
+    border-radius: 8px;
+    padding: 16px 18px;
+    margin: 16px 0;
+    border-left: 4px solid;
+  }
+  .callout-critical { background: var(--sev-critical-bg); border-color: var(--sev-critical); }
+  .callout-warning { background: var(--sev-medium-bg); border-color: var(--sev-medium); }
+  .callout-info { background: rgba(88, 166, 255, 0.08); border-color: var(--accent); }
+  .callout-title { font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+  .callout-critical .callout-title { color: var(--sev-critical); }
+  .callout-warning .callout-title { color: var(--sev-medium); }
+  .callout-info .callout-title { color: var(--accent); }
+  .callout-body { color: var(--text-muted); font-size: 14px; }
+  
+  /* ===== Filter buttons ===== */
+  .filter-bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+  .filter-btn {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    padding: 6px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12.5px;
+    transition: all 0.15s;
+    font-family: inherit;
+  }
+  .filter-btn:hover { background: var(--bg-card-hover); color: var(--text); }
+  .filter-btn.active { background: var(--accent); color: #0d1117; border-color: var(--accent); }
+  
+  /* ===== Legend ===== */
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--text-muted); margin: 12px 0; }
+  .legend-item { display: inline-flex; align-items: center; gap: 6px; }
+  .legend-swatch { width: 12px; height: 12px; border-radius: 3px; border: 1px solid; }
+  
+  /* ===== Misc ===== */
+  details summary { cursor: pointer; color: var(--accent); font-size: 13px; padding: 6px 0; user-select: none; }
+  details summary:hover { text-decoration: underline; }
+  details[open] summary { margin-bottom: 8px; }
+  .file-ref { font-family: "SF Mono", monospace; font-size: 12px; color: var(--accent); background: rgba(88,166,255,0.08); padding: 1px 6px; border-radius: 3px; }
+  .file-ref::before { content: '📄 '; opacity: 0.7; }
+  .issue-id { font-family: "SF Mono", monospace; font-size: 11px; color: var(--text-dim); background: var(--code-bg); padding: 2px 6px; border-radius: 3px; border: 1px solid var(--border); }
+  
+  footer { padding: 32px 0; text-align: center; color: var(--text-dim); font-size: 13px; border-top: 1px solid var(--border); }
+  footer a { color: var(--accent); text-decoration: none; }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="container hero-content">
+    <h1>RPH 参数映射与环境发现 · BUG 全景可视化</h1>
+    <div class="subtitle">基于 <code>docs/PARAM_ENV_BUGFIX_PLAN.md</code> 的代码级交叉验证 + 隐藏问题发现报告</div>
+    <div class="hero-meta">
+      <span>● ReactionProfileHunter v3.0.1</span>
+      <span class="dot"></span>
+      <span>验证日期: 2026-07-06</span>
+      <span class="dot"></span>
+      <span>共 33 项发现</span>
+      <span class="dot"></span>
+      <span>覆盖 17 个文件</span>
+    </div>
+  </div>
+</header>
+
+<nav class="toc">
+  <div class="container">
+    <a href="#summary">概览</a>
+    <a href="#critical">最高优先级</a>
+    <a href="#p0">计划 P0 验证</a>
+    <a href="#p1">计划 P1 重构</a>
+    <a href="#p2">计划 P2 质量</a>
+    <a href="#hidden">计划遗漏的隐藏问题</a>
+    <a href="#inaccurate">计划不准确处</a>
+    <a href="#flow">数据流断点图</a>
+    <a href="#matrix">严重度矩阵</a>
+    <a href="#recommend">修复顺序建议</a>
+  </div>
+</nav>
+
+<div class="container">
+
+<!-- ============ SUMMARY ============ -->
+<section id="summary">
+  <div class="section-header">
+    <h2>📊 概览</h2>
+    <div class="desc">基于修复计划逐条代码验证 + 主动审计发现的隐藏问题汇总</div>
+  </div>
+  
+  <div class="stats-grid">
+    <div class="stat-card critical">
+      <div class="num">1</div>
+      <div class="label">CRITICAL 级问题</div>
+    </div>
+    <div class="stat-card high">
+      <div class="num">5</div>
+      <div class="label">计划 P0 已验证 BUG</div>
+    </div>
+    <div class="stat-card medium">
+      <div class="num">12</div>
+      <div class="label">MEDIUM 级问题</div>
+    </div>
+    <div class="stat-card accent">
+      <div class="num">16</div>
+      <div class="label">计划遗漏的隐藏问题</div>
+    </div>
+    <div class="stat-card safe">
+      <div class="num">5</div>
+      <div class="label">已确认安全项</div>
+    </div>
+    <div class="stat-card high">
+      <div class="num">2</div>
+      <div class="label">计划不准确处</div>
+    </div>
+  </div>
+
+  <div class="callout callout-critical">
+    <div class="callout-title">🚨 最重大发现（计划未提及）</div>
+    <div class="callout-body">
+      <p><strong>Finding #11（HIGH）</strong>：在 <strong>15+ 处</strong>调用点（横跨 8 个文件），模式 <code>config.get('executables', {}).get(program_key, {})</code> 在 YAML <code>executables:</code> 键存在但为 <code>null</code> 时会抛出 <code>AttributeError: 'NoneType' object has no attribute 'get'</code>。</p>
+      <p>17 个调用点中<strong>仅 2 处</strong>使用了 <code>or {}</code> 保护：<span class="file-ref">xtb_runner.py:104</span> 与 <span class="file-ref">condition_thermo.py:368</span>。其余 15 处在用户配置最小化或字段缺失时即崩溃。</p>
+    </div>
+  </div>
+
+  <div class="callout callout-info">
+    <div class="callout-title">ℹ️ 验证方法</div>
+    <div class="callout-body">
+      <p>对修复计划中的 <strong>5 个 P0 项</strong>逐条核对源代码（行号、代码片段），并启动 2 个并行 explore 代理审计 <code>rph_core/</code> 全代码库寻找计划未覆盖的隐藏问题。所有引用均可通过 <span class="file-ref">文件:行号</span> 复现。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CRITICAL ============ -->
+<section id="critical">
+  <div class="section-header">
+    <h2>🚨 最高优先级发现</h2>
+    <div class="desc">计划未提及但影响最严重的问题</div>
+  </div>
+
+  <div class="issue-card sev-critical hidden-issue">
+    <div class="issue-header">
+      <span class="issue-id">#H-01</span>
+      <div class="issue-title">executables: null 时 15+ 处调用崩溃</div>
+      <div class="issue-badges">
+        <span class="badge badge-critical">CRITICAL</span>
+        <span class="badge badge-hidden">计划遗漏</span>
+        <span class="badge badge-high">影响 15 站点</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>根因</strong>：YAML 中 <code>executables:</code>（键存在但值为 null）会被 <code>yaml.safe_load</code> 解析为 <code>{"executables": None}</code>。代码中常见的 <code>config.get('executables', {}).get(prog, {})</code> 模式在键存在时<strong>不返回默认值</strong> <code>{}</code>，而是返回 <code>None</code>，随后的 <code>None.get(...)</code> 立即抛 <code>AttributeError</code>。</p>
+      
+      <div class="issue-meta">
+        <div class="issue-meta-item"><span class="key">受影响文件</span><span class="val">8 个</span></div>
+        <div class="issue-meta-item"><span class="key">受影响行</span><span class="val">15 处</span></div>
+        <div class="issue-meta-item"><span class="key">安全站点</span><span class="val">仅 2 处</span></div>
+        <div class="issue-meta-item"><span class="key">触发条件</span><span class="val">YAML 中 executables: null</span></div>
+      </div>
+
+      <p><strong>受影响的 15 个调用点</strong>：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>文件</th><th>行号</th><th>代码模式</th><th>保护？</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">resource_utils.py</td><td class="mono">221</td><td class="mono">config.get('executables', {}).get(program_key, {})</td><td><span class="badge badge-critical">无</span></td></tr>
+            <tr><td class="mono">resource_utils.py</td><td class="mono">323</td><td class="mono">config.get('executables', {}).get('discovery', {})</td><td><span class="badge badge-critical">无</span></td></tr>
+            <tr><td class="mono">resource_utils.py</td><td class="mono">349</td><td class="mono">config.get('executables', {}).get('orca', {})</td><td><span class="badge badge-critical">无</span></td></tr>
+            <tr><td class="mono">config_loader.py</td><td class="mono">84</td><td class="mono">config.get('executables', {}).get(program_key, {})</td><td><span class="badge badge-critical">无</span></td></tr>
+            <tr><td class="mono">gau_xtb_interface.py</td><td class="mono">87, 284, 297</td><td class="mono">config.get("executables", {}).get("gaussian"/"xtb", {})</td><td><span class="badge badge-critical">无</span></td></tr>
+            <tr><td class="mono">qc_interface.py</td><td class="mono">1205, 1692</td><td class="mono">self.config.get("executables", {}).get(...)</td><td><span class="badge badge-critical">无</span></td></tr>
+            <tr><td class="mono">orchestrator.py</td><td class="mono">209</td><td class="mono">self.config.get('executables', {}).get('discovery', {})</td><td><span class="badge badge-critical">无</span></td></tr>
+            <tr><td class="mono">conformer_search/engine.py</td><td class="mono">249, 2420</td><td class="mono">executables.get('isostat'/'gaussian', {})</td><td><span class="badge badge-critical">无</span></td></tr>
+            <tr><td class="mono">qst2_rescue.py</td><td class="mono">80, 213</td><td class="mono">self.config.get('executables', {}).get('gaussian', {})</td><td><span class="badge badge-critical">无</span></td></tr>
+            <tr><td class="mono">irc_driver.py</td><td class="mono">188</td><td class="mono">self.config.get('executables', {}).get('gaussian', {})</td><td><span class="badge badge-critical">无</span></td></tr>
+            <tr><td class="mono">xtb_runner.py</td><td class="mono">104</td><td class="mono">self.config.get('executables', {}) <strong>or {}</strong></td><td><span class="badge badge-safe">安全</span></td></tr>
+            <tr><td class="mono">condition_thermo.py</td><td class="mono">368</td><td class="mono">(self.config.get("executables", {}) <strong>or {}</strong>)</td><td><span class="badge badge-safe">安全</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p><strong>复现步骤</strong>：</p>
+      <pre class="code"><span class="com"># 创建最小配置 user_config.yaml：</span>
+executables:
+
+theory:
+  optimization:
+    method: B3LYP
+
+<span class="com"># 然后运行：</span>
+bin/rph_run --config user_config.yaml --smiles "..."
+
+<span class="com"># 结果：启动即抛 AttributeError</span></pre>
+
+      <p><strong>建议修复</strong>：所有 15 处统一改为 <code>(config.get('executables', {}) or {}).get(prog, {})</code>，与已安全的 2 处一致。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ P0 ============ -->
+<section id="p0">
+  <div class="section-header">
+    <h2>✅ 计划 P0 项 — 全部已代码验证</h2>
+    <div class="desc">修复计划中的 5 个 P0 BUG，逐条核对源码 — <strong>5/5 全部属实</strong></div>
+  </div>
+
+  <!-- P0-1 -->
+  <div class="issue-card sev-critical">
+    <div class="issue-header">
+      <span class="issue-id">P0-1</span>
+      <div class="issue-title">discovery.known_dirs 配置失效 — 用户改 YAML 无效</div>
+      <div class="issue-badges">
+        <span class="badge badge-p0">P0</span>
+        <span class="badge badge-critical">CRITICAL</span>
+        <span class="badge badge-verified">已验证 ✅</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>计划声明</strong>：<code>resolve_all_executables()</code> 使用模块常量 <code>_KNOWN_DIRS</code>，未读取 YAML 中的 <code>executables.discovery.known_dirs</code>。</p>
+      <p><strong>代码验证</strong>：</p>
+      <pre class="code"><span class="ln">329</span>known = _KNOWN_DIRS.get(prog) <span class="kw">if</span> allow_discovery <span class="kw">else</span> None
+<span class="ln">330</span>results[prog] = resolve_executable_config(
+<span class="ln">331</span>    config, prog,
+<span class="ln">332</span>    env_vars=_ENV_VARS.get(prog),
+<span class="ln">333</span>    known_dirs=known,  <span class="com"># ← 用模块常量，未读 config["executables"]["discovery"]["known_dirs"]</span>
+<span class="ln">334</span>    binary_names=[_BINARY_NAMES.get(prog, prog)],
+<span class="ln">335</span>    fail_on_invalid=fail_on_invalid,
+<span class="ln">336</span>)</pre>
+      <p><strong>影响</strong>：用户在 <code>defaults.yaml</code> 修改 <code>discovery.known_dirs.*</code> 无任何效果，存在"两份真相源"。</p>
+      <p>同样问题存在于 <code>_resolve_mpi()</code>（<span class="file-ref">resource_utils.py:374</span> 使用 <code>_MPI_KNOWN_DIRS</code>）。</p>
+    </div>
+  </div>
+
+  <!-- P0-2 -->
+  <div class="issue-card sev-critical">
+    <div class="issue-header">
+      <span class="issue-id">P0-2</span>
+      <div class="issue-title">自动发现只记录日志，不回写到 config</div>
+      <div class="issue-badges">
+        <span class="badge badge-p0">P0</span>
+        <span class="badge badge-critical">CRITICAL</span>
+        <span class="badge badge-verified">已验证 ✅</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>计划声明</strong>：<code>_resolve_executables()</code> 仅打印 <code>[discovery]</code> 日志，不写回 <code>self.config["executables"][prog]["path"]</code>。后续多处代码仍直读 <code>config.executables.*.path</code>。</p>
+      <p><strong>直读配置的 6 处代码</strong>（绕过统一发现）：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>位置</th><th>读取的内容</th><th>默认 fallback</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">gau_xtb_interface.py:87-88</td><td class="mono">executables.gaussian.path</td><td class="mono">"g16"</td></tr>
+            <tr><td class="mono">gau_xtb_interface.py:297-300</td><td class="mono">executables.xtb.path → 设为 XTB_PATH 环境变量</td><td class="mono">None</td></tr>
+            <tr><td class="mono">conformer_search/engine.py:249-251</td><td class="mono">executables.isostat.path / shermo.path</td><td class="mono">"isostat"/"Shermo"</td></tr>
+            <tr><td class="mono">small_molecule_precompute.py:152</td><td class="mono">executables.shermo.path</td><td class="mono">None</td></tr>
+            <tr><td class="mono">qc_interface.py:1204-1209</td><td class="mono">executables.xtb.path（enso_thermo 路径）</td><td class="mono">"xtb"</td></tr>
+            <tr><td class="mono">qc_interface.py:1692-1706</td><td class="mono">executables.gaussian（GaussianInterface 构造）</td><td class="mono">"g16"</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p><strong>影响</strong>：启动期发现 <code>$PATH</code> 或环境变量中的工具，但后续直读配置的路径仍可能是 <code>/opt/software/...</code> 旧值。日志显示 found 但实际执行失败 —— "发现链"与"执行链"断裂。</p>
+    </div>
+  </div>
+
+  <!-- P0-3 -->
+  <div class="issue-card sev-high">
+    <div class="issue-header">
+      <span class="issue-id">P0-3</span>
+      <div class="issue-title">环境变量语义不统一 — 目录变量被当文件处理</div>
+      <div class="issue-badges">
+        <span class="badge badge-p0">P0</span>
+        <span class="badge badge-high">HIGH</span>
+        <span class="badge badge-verified">已验证 ✅</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>计划声明</strong>：<code>find_executable()</code> 对环境变量只接受 <code>Path(env_value).is_file()</code>，但 <code>ORCA_PATH</code>、<code>MOLCLUS_HOME</code> 等在运行时实际是<strong>目录</strong>。</p>
+      <p><strong>代码验证</strong>（<span class="file-ref">resource_utils.py:134-143</span>）：</p>
+      <pre class="code"><span class="ln">134</span><span class="kw">if</span> env_vars:
+<span class="ln">135</span>    <span class="kw">for</span> env_var <span class="kw">in</span> env_vars:
+<span class="ln">136</span>        env_path = os.environ.get(env_var)
+<span class="ln">137</span>        <span class="kw">if</span> env_path:
+<span class="ln">138</span>            path = Path(env_path)
+<span class="ln">139</span>            <span class="kw">if</span> path.exists() <span class="kw">and</span> path.<span class="fn">is_file</span>() <span class="kw">and</span> os.<span class="fn">access</span>(path, os.X_OK):
+<span class="com">             ↑↑↑ 仅接受文件！</span></pre>
+      <p><strong>矛盾证据</strong>：</p>
+      <ul style="padding-left: 20px; margin: 8px 0;">
+        <li><span class="file-ref">orca_interface.py:860-861</span> 把 <code>ORCA_PATH</code> 设为 ORCA 所在<strong>目录</strong></li>
+        <li><span class="file-ref">isostat_runner.py:78-82</span> 把 <code>MOLCLUS_HOME</code> 当<strong>目录</strong>并拼接 <code>/isostat</code></li>
+        <li><span class="file-ref">scripts/Gau_XTB/xtb.sh</span> 支持 <code>XTB_PATH</code> 为文件或目录</li>
+      </ul>
+      <p><strong>影响</strong>：用户按 ORCA 官方习惯设置 <code>export ORCA_PATH=/opt/orca_dir</code> 时，统一发现层判断无效；但 ISOSTAT 私有解析层有效 —— <strong>同一变量在不同代码路径行为不一致</strong>。</p>
+    </div>
+  </div>
+
+  <!-- P0-4 -->
+  <div class="issue-card sev-high">
+    <div class="issue-header">
+      <span class="issue-id">P0-4</span>
+      <div class="issue-title">Gaussian 执行路径在 4 处不一致</div>
+      <div class="issue-badges">
+        <span class="badge badge-p0">P0</span>
+        <span class="badge badge-high">HIGH</span>
+        <span class="badge badge-verified">已验证 ✅</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>计划声明</strong>：Berny 路径正常但 QST2/IRC/GaussianRunner/Gau_XTB 路径有 wrapper/path 不一致。</p>
+      <p><strong>4 处不一致的代码证据</strong>：</p>
+      
+      <details open>
+        <summary>① GaussianRunner.run() — 硬编码 ["g16", ...]</summary>
+        <pre class="code"><span class="com"># qc_interface.py:929-930</span>
+result = subprocess.run(
+    [<span class="str">"g16"</span>, <span class="str">"input.gjf"</span>],  <span class="com"># ← 完全忽略 config.executables.gaussian.path</span>
+    cwd=str(sandbox_path), env=runtime_env, ...)</pre>
+      </details>
+      
+      <details open>
+        <summary>② QST2RescueDriver — 强制使用 wrapper，忽略 use_wrapper=false</summary>
+        <pre class="code"><span class="com"># qst2_rescue.py:213-217</span>
+exe_config = self.config.get(<span class="str">'executables'</span>, {}).get(<span class="str">'gaussian'</span>, {})
+wrapper_path = exe_config.get(<span class="str">'wrapper_path'</span>, <span class="str">'./scripts/run_g16_worker.sh'</span>)
+<span class="com"># ← 直接取 wrapper_path，从不检查 use_wrapper 开关</span>
+g16_cmd = str(wrapper_path)</pre>
+      </details>
+      
+      <details open>
+        <summary>③ IRCDriver — direct 模式 fallback 到字面量 'g16'</summary>
+        <pre class="code"><span class="com"># irc_driver.py:188-197</span>
+use_wrapper = exe_config.get(<span class="str">'use_wrapper'</span>, <span class="kw">True</span>)
+<span class="kw">if</span> use_wrapper:
+    wrapper_path = exe_config.get(<span class="str">'wrapper_path'</span>, ...)
+    g16_cmd = str(wrapper_path)
+<span class="kw">else</span>:
+    g16_cmd = <span class="str">'g16'</span>  <span class="com"># ← 字面量，不用 executables.gaussian.path</span></pre>
+      </details>
+      
+      <details open>
+        <summary>④ Gau_XTB — 直接读 config，无 fallback</summary>
+        <pre class="code"><span class="com"># gau_xtb_interface.py:87-88</span>
+gaussian_cfg = config.get(<span class="str">"executables"</span>, {}).get(<span class="str">"gaussian"</span>, {})
+self.gaussian_bin = gaussian_cfg.get(<span class="str">"path"</span>, <span class="str">"g16"</span>)  <span class="com"># 无回退链</span></pre>
+      </details>
+      
+      <p><strong>影响</strong>：主 TS Berny 路径可能跑通，但 QST2/IRC/Gau_XTB rescue 路径会因 wrapper 缺失或 <code>g16</code> 不在 PATH 失败。</p>
+    </div>
+  </div>
+
+  <!-- P0-5 -->
+  <div class="issue-card sev-high">
+    <div class="issue-header">
+      <span class="issue-id">P0-5</span>
+      <div class="issue-title">xTB 参数传递不完整 — 多处绕过统一解析</div>
+      <div class="issue-badges">
+        <span class="badge badge-p0">P0</span>
+        <span class="badge badge-high">HIGH</span>
+        <span class="badge badge-verified">已验证 ✅</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>计划声明</strong>：<code>XTBRunner._verify_executable()</code> 不用 <code>resolve_executable_config()</code>；<code>XTBInterface.enso_thermo()</code> 直接读 path 跳过 fallback。</p>
+      <p><strong>验证</strong>：</p>
+      <pre class="code"><span class="com"># qc_interface.py:1204-1209 — enso_thermo 直读</span>
+xtb_bin_str = (
+    self.config.get(<span class="str">"executables"</span>, {})
+    .get(<span class="str">"xtb"</span>, {})
+    .get(<span class="str">"path"</span>, <span class="str">"xtb"</span>)  <span class="com"># ← 裸 config.get，无 env/PATH/known_dirs 回退</span>
+)</pre>
+      <p>对比 <code>CRESTInterface.__init__()</code>（<span class="file-ref">qc_interface.py:1438</span>）<strong>正确地</strong>调用了 <code>resolve_executable_config</code>：</p>
+      <pre class="code"><span class="ln">1438</span>exe_config = <span class="fn">resolve_executable_config</span>(
+<span class="ln">1439</span>    self.config, <span class="str">'crest'</span>,
+<span class="ln">1440</span>    env_vars=[<span class="str">'CREST_PATH'</span>, <span class="str">'CREST_BIN'</span>]
+<span class="ln">1441</span>)</pre>
+      <p><strong>另外</strong>：<code>XTBRunner.FALLBACK_PATHS</code>（<span class="file-ref">xtb_runner.py:52</span>）是<strong>第二份</strong>硬编码 fallback 列表，与 <code>_KNOWN_DIRS['xtb']</code> 不同步。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ P1 ============ -->
+<section id="p1">
+  <div class="section-header">
+    <h2>🔧 计划 P1 项 — 重构与去冗余</h2>
+    <div class="desc">计划中的 3 个 P1 重构项，已验证现状</div>
+  </div>
+
+  <div class="issue-card sev-medium">
+    <div class="issue-header">
+      <span class="issue-id">P1-A</span>
+      <div class="issue-title">删除/合并重复的 executable lookup 逻辑</div>
+      <div class="issue-badges">
+        <span class="badge badge-p1">P1</span>
+        <span class="badge badge-medium">MEDIUM</span>
+        <span class="badge badge-verified">已验证 ✅</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>现状审计</strong>（per-runner 是否委托到统一解析）：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Runner</th><th>函数</th><th>调用 resolve_executable_config？</th><th>额外自有 fallback？</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">XTBRunner</td><td class="mono">_verify_executable (xtb_runner.py:87)</td><td><span class="badge badge-critical">否</span></td><td>自有 4 步链 + FALLBACK_PATHS 类常量</td></tr>
+            <tr><td class="mono">ORCAInterface</td><td class="mono">_find_orca_binary (orca_interface.py:725)</td><td><span class="badge badge-safe">是 (L751)</span></td><td>额外在 L756 加了 shutil.which('orca') 回退</td></tr>
+            <tr><td class="mono">ISOSTAT</td><td class="mono">_resolve_isostat_path (isostat_runner.py:101)</td><td><span class="badge badge-critical">否</span></td><td>5 步链 + WSL 路径处理 + 硬编码列表</td></tr>
+            <tr><td class="mono">Gau_XTB</td><td class="mono">__init__ (gau_xtb_interface.py:87)</td><td><span class="badge badge-critical">否</span></td><td>裸 config.get，无任何回退</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="issue-card sev-medium">
+    <div class="issue-header">
+      <span class="issue-id">P1-B</span>
+      <div class="issue-title">静态 Gaussian 模板与文档脱节</div>
+      <div class="issue-badges">
+        <span class="badge badge-p1">P1</span>
+        <span class="badge badge-medium">MEDIUM</span>
+        <span class="badge badge-verified">已验证 ✅</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>验证</strong>：全代码库 grep <code>templates/</code>、<code>.gjf</code>、<code>jinja2</code>、<code>string.Template</code>、<code>render_template</code> —— <strong>零命中</strong>读取模板的代码。所有 .gjf 内容由代码内联生成。</p>
+      <p><strong>3 处内联生成路径</strong>：</p>
+      <ul style="padding-left: 20px; margin: 8px 0;">
+        <li><code>GaussianInterface.write_input_file()</code> — <span class="file-ref">qc_interface.py:1749-1766</span></li>
+        <li><code>InputFactory.create()</code> — <span class="file-ref">qc_interface.py:550-563</span></li>
+        <li><code>QST2RescueDriver._write_qst2_input()</code> — <span class="file-ref">qst2_rescue.py:118</span></li>
+      </ul>
+      <p><strong>文档矛盾</strong>：<code>config/AGENTS.md</code> 声明"Templates are read at runtime; do not hardcode template strings in Python source"，但<strong>实际代码恰恰是 hardcode 的</strong>。</p>
+      <p><strong>格式不一致</strong>：</p>
+      <ul style="padding-left: 20px; margin: 8px 0;">
+        <li><code>gaussian_ts.gjf</code> 用 Jinja 风格 <code>{{charge}}</code></li>
+        <li><code>gaussian_ts_berny.com</code> 用 Python format 风格 <code>{nprocshared}</code></li>
+        <li><code>gaussian_qst2.gjf</code>、<code>gaussian_irc.gjf</code> 完全静态无占位符</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="issue-card sev-low">
+    <div class="issue-header">
+      <span class="issue-id">P1-C</span>
+      <div class="issue-title">配置副本清理 — 7 份 fork 文件</div>
+      <div class="issue-badges">
+        <span class="badge badge-p1">P1</span>
+        <span class="badge badge-low">LOW</span>
+        <span class="badge badge-verified">已验证 ✅</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>config/ 目录现有文件</strong>：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>文件</th><th>类型</th><th>问题</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">defaults.yaml</td><td>主配置</td><td>保留</td></tr>
+            <tr><td class="mono">defaults.yaml.bak</td><td>备份</td><td>应删除（版本控制替代）</td></tr>
+            <tr><td class="mono">defaults_alcl3_test.yaml</td><td>实验 fork</td><td>违反"唯一真相源"声明</td></tr>
+            <tr><td class="mono">defaults_la_test.yaml</td><td>实验 fork</td><td>同上</td></tr>
+            <tr><td class="mono">defaults_la_test_dataset.yaml</td><td>实验 fork</td><td>同上</td></tr>
+            <tr><td class="mono">defaults_la_test_fast.yaml</td><td>实验 fork</td><td>同上</td></tr>
+            <tr><td class="mono">defaults_zncl2_as_mgcl2_remaining.yaml</td><td>实验 fork</td><td>同上</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ HIDDEN ============ -->
+<section id="hidden">
+  <div class="section-header">
+    <h2>🔍 计划遗漏的隐藏问题</h2>
+    <div class="desc">主动审计发现的 16 项计划未覆盖的问题</div>
+  </div>
+
+  <div class="filter-bar">
+    <button class="filter-btn active" onclick="filterIssues('all', this)">全部 (16)</button>
+    <button class="filter-btn" onclick="filterIssues('critical', this)">CRITICAL/HIGH (3)</button>
+    <button class="filter-btn" onclick="filterIssues('medium', this)">MEDIUM (8)</button>
+    <button class="filter-btn" onclick="filterIssues('low', this)">LOW/Safe (5)</button>
+  </div>
+
+  <!-- H-01 已在 critical section 展示，这里简短引用 -->
+  <div class="issue-card sev-critical hidden-issue" data-sev="critical">
+    <div class="issue-header">
+      <span class="issue-id">#H-01</span>
+      <div class="issue-title">executables: null 时 15+ 处调用崩溃</div>
+      <div class="issue-badges">
+        <span class="badge badge-critical">CRITICAL</span>
+        <span class="badge badge-hidden">计划遗漏</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p>详见 <a href="#critical" style="color: var(--accent);">最高优先级发现</a> 章节。15 个未保护的 <code>.get('executables', {}).get(...)</code> 调用点。</p>
+    </div>
+  </div>
+
+  <div class="issue-card sev-high hidden-issue" data-sev="critical">
+    <div class="issue-header">
+      <span class="issue-id">#H-02</span>
+      <div class="issue-title">_inherit_if_null 对 nproc=0 不触发继承</div>
+      <div class="issue-badges">
+        <span class="badge badge-high">HIGH</span>
+        <span class="badge badge-hidden">计划遗漏</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>位置</strong>：<span class="file-ref">resource_utils.py:656-663</span></p>
+      <pre class="code"><span class="kw">def</span> <span class="fn">_inherit_if_null</span>(config, key_path, default):
+    ...
+    <span class="kw">if</span> d.get(parts[-1]) <span class="kw">is None</span>:  <span class="com"># ← 0 is None → False</span>
+        d[parts[-1]] = default</pre>
+      <p><strong>影响</strong>：用户配置 <code>theory.optimization.nproc: 0</code>（笔误或想表示"自动"）时，继承被跳过，nproc 保持 0，下游除法运算可能抛 <code>ZeroDivisionError</code>。</p>
+      <p><strong>建议</strong>：检查条件改为 <code>if d.get(parts[-1]) in (None, 0, ""):</code>。</p>
+    </div>
+  </div>
+
+  <div class="issue-card sev-high hidden-issue" data-sev="critical">
+    <div class="issue-header">
+      <span class="issue-id">#H-03</span>
+      <div class="issue-title">_resolve_mpi 写回在 orca 子键缺失时丢失</div>
+      <div class="issue-badges">
+        <span class="badge badge-high">HIGH</span>
+        <span class="badge badge-hidden">计划遗漏</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>位置</strong>：<span class="file-ref">resource_utils.py:349, 360-361</span></p>
+      <pre class="code">orca_cfg = config.get(<span class="str">'executables'</span>, {}).get(<span class="str">'orca'</span>, {})  <span class="com"># ← 临时 {} 不写回</span>
+...
+orca_cfg[<span class="str">'mpi_bin_dir'</span>] = str(Path(val))  <span class="com"># ← 写到临时 dict</span>
+orca_cfg[<span class="str">'mpi_lib_dir'</span>] = str(Path(val).parent / <span class="str">'lib'</span>)</pre>
+      <p><strong>陷阱</strong>：当 <code>executables.orca</code> 在 YAML 中不存在时，<code>.get('orca', {})</code> 返回<strong>新建的临时 dict</strong>，对它的修改不会持久化到 config。<code>_build_orca_runtime_env</code>（<span class="file-ref">orca_interface.py:774</span>）后续读取 config 找不到 MPI 路径 → 回退到硬编码候选。</p>
+      <p><strong>建议</strong>：在 <code>_resolve_mpi</code> 开头加 <code>config.setdefault('executables', {}).setdefault('orca', {})</code>。</p>
+    </div>
+  </div>
+
+  <div class="issue-card sev-medium hidden-issue" data-sev="medium">
+    <div class="issue-header">
+      <span class="issue-id">#H-04</span>
+      <div class="issue-title">setup_ld_library_path 全局环境变量污染</div>
+      <div class="issue-badges">
+        <span class="badge badge-medium">MEDIUM</span>
+        <span class="badge badge-hidden">计划遗漏</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>位置</strong>：<span class="file-ref">resource_utils.py:207</span></p>
+      <pre class="code">os.environ[<span class="str">'LD_LIBRARY_PATH'</span>] = new_path  <span class="com"># ← 全局副作用</span></pre>
+      <p><strong>影响</strong>：每次调用 <code>resolve_executable_config</code>（针对含 <code>ld_library_path</code> 的程序）都会原地修改全局 <code>os.environ</code>。多次调用会累积路径，无清理机制。<strong>多进程模式下安全</strong>（每个 worker 各自 init），但<strong>函数不可重入、不可逆</strong>。</p>
+      <p><strong>建议</strong>：返回 dict 而非原地修改；由调用方决定是否设到 <code>os.environ</code>。</p>
+    </div>
+  </div>
+
+  <div class="issue-card sev-medium hidden-issue" data-sev="medium">
+    <div class="issue-header">
+      <span class="issue-id">#H-05</span>
+      <div class="issue-title">GAUSS_SCRDIR 被 sandbox 强制覆盖到 /tmp</div>
+      <div class="issue-badges">
+        <span class="badge badge-medium">MEDIUM</span>
+        <span class="badge badge-hidden">计划遗漏</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>位置</strong>：<span class="file-ref">qc_interface.py:845-847, 920-921</span></p>
+      <pre class="code"><span class="com"># L847：从 config 读取 scratch_dir</span>
+<span class="kw">if</span> scratch:
+    env[<span class="str">'GAUSS_SCRDIR'</span>] = str(scratch)
+
+<span class="com"># L921：sandbox 强制覆盖</span>
+runtime_env[<span class="str">"GAUSS_SCRDIR"</span>] = str(sandbox_path / <span class="str">"scratch"</span>)  <span class="com"># 永远赢</span></pre>
+      <p><strong>影响</strong>：即使用户配置 <code>scratch_dir: "/ssd_fast/scratch"</code>，sandbox 模式下仍会写到 <code>/tmp/RPH_G16_*/scratch</code>。若 <code>/tmp</code> 空间不足或速度慢，会导致性能下降或磁盘满。</p>
+    </div>
+  </div>
+
+  <div class="issue-card sev-medium hidden-issue" data-sev="medium">
+    <div class="issue-header">
+      <span class="issue-id">#H-06</span>
+      <div class="issue-title">intra_reaction_parallel 预算校验仅警告不阻断</div>
+      <div class="issue-badges">
+        <span class="badge badge-medium">MEDIUM</span>
+        <span class="badge badge-hidden">计划遗漏</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>位置</strong>：<span class="file-ref">resource_utils.py:624-653</span></p>
+      <pre class="code"><span class="kw">if</span> ts_cores + inter_cores > total_cores:
+    logger.<span class="fn">warning</span>(...)  <span class="com"># ← 仅日志，不抛异常</span></pre>
+      <p><strong>影响</strong>：超分配 CPU/内存时不会被阻断，可能导致 OOM 或调度冲突。</p>
+    </div>
+  </div>
+
+  <div class="issue-card sev-medium hidden-issue" data-sev="medium">
+    <div class="issue-header">
+      <span class="issue-id">#H-07</span>
+      <div class="issue-title">reaction_profiles 静默覆盖 step2.scan 值</div>
+      <div class="issue-badges">
+        <span class="badge badge-medium">MEDIUM</span>
+        <span class="badge badge-hidden">计划遗漏</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>位置</strong>：<span class="file-ref">runners.py:226</span></p>
+      <pre class="code">s2_scan_cfg = dict(step2_cfg.get(<span class="str">"scan"</span>, {}) <span class="kw">or</span> {})
+<span class="kw">if</span> isinstance(profile_cfg, dict):
+    s2_scan_cfg.<span class="fn">update</span>(dict(profile_cfg.get(<span class="str">"scan"</span>, {}) <span class="kw">or</span> {}))  <span class="com"># profile 优先</span></pre>
+      <p><strong>影响</strong>：用户在 <code>step2.scan.scan_start_distance</code> 自定义值，但匹配的 reaction_profile 也有该键时，<strong>profile 静默胜出</strong>。无警告日志。</p>
+    </div>
+  </div>
+
+  <div class="issue-card sev-medium hidden-issue" data-sev="medium">
+    <div class="issue-header">
+      <span class="issue-id">#H-08</span>
+      <div class="issue-title">normalize_qc_config 原地修改 config 字典</div>
+      <div class="issue-badges">
+        <span class="badge badge-medium">MEDIUM</span>
+        <span class="badge badge-hidden">计划遗漏</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>位置</strong>：<span class="file-ref">optimization_config.py:403, 417, 460</span></p>
+      <pre class="code">optimization[<span class="str">'route'</span>] = new_route  <span class="com"># ← 原地修改</span>
+gaussian_keywords[key] = normalized  <span class="com"># ← 原地修改</span>
+<span class="kw">return</span> config, fixes  <span class="com"># ← 返回同一对象</span></pre>
+      <p><strong>影响</strong>：若调用方持有预规范化 config 的引用，会看到 mutation。<strong>实际安全</strong>（orchestrator.py:155 直接重赋值），但语义上违反"返回值不可变性"预期。</p>
+    </div>
+  </div>
+
+  <div class="issue-card sev-medium hidden-issue" data-sev="medium">
+    <div class="issue-header">
+      <span class="issue-id">#H-09</span>
+      <div class="issue-title">_auto_detect_mem_gb 安全系数 0.75 硬编码</div>
+      <div class="issue-badges">
+        <span class="badge badge-medium">MEDIUM</span>
+        <span class="badge badge-hidden">计划遗漏</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>位置</strong>：<span class="file-ref">resource_utils.py:468, 476</span></p>
+      <pre class="code"><span class="kw">return</span> max(8, int(psutil.virtual_memory().total / (1024**3) * <span class="num">0.75</span>))  <span class="com"># 硬编码</span></pre>
+      <p><strong>影响</strong>：用户无法调整安全系数。容器化场景（cgroup 限制）下 <code>psutil</code> 可能返回宿主机内存，导致 0.75 仍然过大。</p>
+    </div>
+  </div>
+
+  <div class="issue-card sev-medium hidden-issue" data-sev="medium">
+    <div class="issue-header">
+      <span class="issue-id">#H-10</span>
+      <div class="issue-title">MPI lib 路径自动推导假设固定布局</div>
+      <div class="issue-badges">
+        <span class="badge badge-medium">MEDIUM</span>
+        <span class="badge badge-hidden">计划遗漏</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>位置</strong>：<span class="file-ref">resource_utils.py:361, 369, 379</span></p>
+      <p>从 <code>mpi_bin_dir</code> 推导 <code>mpi_lib_dir</code> 时硬编码 <code>Path(val).parent / 'lib'</code>。Conda 安装、Debian 包安装的 MPI 布局可能不同。</p>
+    </div>
+  </div>
+
+  <div class="issue-card sev-medium hidden-issue" data-sev="medium">
+    <div class="issue-header">
+      <span class="issue-id">#H-11</span>
+      <div class="issue-title">empty string "" vs None 在 _inherit_if_null 中行为不一致</div>
+      <div class="issue-badges">
+        <span class="badge badge-medium">MEDIUM</span>
+        <span class="badge badge-hidden">计划遗漏</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>位置</strong>：<span class="file-ref">resource_utils.py:662</span></p>
+      <p>YAML <code>mem: ""</code>（空串）让 <code>_inherit_if_null</code> 跳过继承（<code>"" is None</code> → False），但下游 <code>mem_to_mb("")</code> 因 <code>not ""</code> 为 True 会用 4000MB 默认值。语义不一致 —— 用户配置空串会被静默替换。</p>
+    </div>
+  </div>
+
+  <div class="issue-card sev-medium hidden-issue" data-sev="medium">
+    <div class="issue-header">
+      <span class="issue-id">#H-12</span>
+      <div class="issue-title">Multiwfn 版本字符串每次调用都 spawn 子进程</div>
+      <div class="issue-badges">
+        <span class="badge badge-medium">MEDIUM</span>
+        <span class="badge badge-hidden">计划遗漏</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>位置</strong>：<span class="file-ref">multiwfn_runner.py:116, 124-140</span></p>
+      <p><code>_get_multiwfn_version()</code> 每次生成 cache key 都 spawn <code>multiwfn -version</code> 子进程（10s 超时）。无 memoization —— 同一进程内多次分析同一文件会重复调用。性能问题，非性质问题。</p>
+    </div>
+  </div>
+
+  <div class="issue-card sev-medium hidden-issue" data-sev="medium">
+    <div class="issue-header">
+      <span class="issue-id">#H-13</span>
+      <div class="issue-title">xtb_runner shutil.which(config_path) 在相对路径下行为脆弱</div>
+      <div class="issue-badges">
+        <span class="badge badge-medium">MEDIUM</span>
+        <span class="badge badge-hidden">计划遗漏</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>位置</strong>：<span class="file-ref">xtb_runner.py:108</span></p>
+      <p><code>shutil.which(config_path)</code> 在 <code>config_path</code> 为相对路径（如 <code>"xtb"</code>）时按 PATH 搜索，可能返回<strong>不同版本</strong>的二进制。<code>defaults.yaml</code> 当前用绝对路径，但用户自定义时存在隐患。</p>
+    </div>
+  </div>
+
+  <div class="issue-card sev-low hidden-issue" data-sev="low">
+    <div class="issue-header">
+      <span class="issue-id">#H-14</span>
+      <div class="issue-title">os.environ 突变 — 已确认在多进程下安全</div>
+      <div class="issue-badges">
+        <span class="badge badge-safe">SAFE</span>
+        <span class="badge badge-hidden">计划遗漏</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><code>setup_ld_library_path</code> 的全局突变在 <code>ProcessPoolExecutor</code> 下每个 worker 独立 init，无跨进程竞争。<strong>已确认安全</strong>。</p>
+    </div>
+  </div>
+
+  <div class="issue-card sev-low hidden-issue" data-sev="low">
+    <div class="issue-header">
+      <span class="issue-id">#H-15</span>
+      <div class="issue-title">config 突变在 fork 之后 — 已确认安全</div>
+      <div class="issue-badges">
+        <span class="badge badge-safe">SAFE</span>
+        <span class="badge badge-hidden">计划遗漏</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><code>resolve_resources</code> 和 <code>normalize_qc_config</code> 在 <code>ReactionProfileHunter.__init__</code> 内调用，batch 模式下每个 worker 进程独立构造 → 突变隔离。<strong>已确认安全</strong>。</p>
+    </div>
+  </div>
+
+  <div class="issue-card sev-low hidden-issue" data-sev="low">
+    <div class="issue-header">
+      <span class="issue-id">#H-16</span>
+      <div class="issue-title">WSL 路径处理已覆盖所有变体</div>
+      <div class="issue-badges">
+        <span class="badge badge-safe">SAFE</span>
+        <span class="badge badge-hidden">计划遗漏</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><code>_as_wsl_unix_path</code>（<span class="file-ref">isostat_runner.py:48-61</span>）正确处理 <code>//wsl.localhost/</code>、<code>//wsl$/</code>、<code>\\wsl.localhost\</code>、<code>\\wsl$\</code> 所有变体。<strong>已确认安全</strong>。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ INACCURATE ============ -->
+<section id="inaccurate">
+  <div class="section-header">
+    <h2>⚠️ 计划不准确之处</h2>
+    <div class="desc">修复计划中描述与实际代码不完全吻合的 2 处</div>
+  </div>
+
+  <div class="issue-card sev-medium">
+    <div class="issue-header">
+      <span class="issue-id">#I-01</span>
+      <div class="issue-title">ORCAInterface._find_orca_binary 实际已调用 resolve_executable_config</div>
+      <div class="issue-badges">
+        <span class="badge badge-inaccurate">计划不准确</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>计划声明（P1-A）</strong>：<code>_find_orca_binary()</code> 中有"二次 <code>shutil.which("orca")</code> fallback"需要删除。</p>
+      <p><strong>实际代码</strong>（<span class="file-ref">orca_interface.py:725-762</span>）：</p>
+      <pre class="code"><span class="ln">751</span>exe_config = <span class="fn">resolve_executable_config</span>(config, <span class="str">'orca'</span>, env_vars=[<span class="str">'ORCA_PATH'</span>, <span class="str">'ORCA_BIN'</span>])
+<span class="ln">752</span><span class="kw">if</span> exe_config.get(<span class="str">'found'</span>):
+<span class="ln">753</span>    <span class="kw">return</span> exe_config[<span class="str">'path'</span>]
+<span class="ln">754</span>
+<span class="ln">756</span>orca_cmd = shutil.<span class="fn">which</span>(<span class="str">'orca'</span>)  <span class="com"># 这是第 3 步独立 fallback</span>
+<span class="ln">757</span><span class="kw">if</span> orca_cmd:
+<span class="ln">758</span>    <span class="kw">return</span> Path(orca_cmd)</pre>
+      <p><strong>结论</strong>：ORCA 实际<strong>已使用</strong>统一解析函数，只是在其之后又加了一道 <code>shutil.which</code>。计划"完全没委托"的描述不准确 —— 应改为"已部分委托但仍有冗余 fallback"。</p>
+    </div>
+  </div>
+
+  <div class="issue-card sev-low">
+    <div class="issue-header">
+      <span class="issue-id">#I-02</span>
+      <div class="issue-title">_inherit_if_null 描述含小细节错误</div>
+      <div class="issue-badges">
+        <span class="badge badge-inaccurate">计划不准确</span>
+      </div>
+    </div>
+    <div class="issue-body">
+      <p><strong>计划相关描述</strong>暗示 <code>_inherit_if_null</code> 在键缺失时不触发。</p>
+      <p><strong>实际</strong>：<code>d.get(parts[-1])</code> 在键缺失时返回 <code>None</code>，<code>None is None</code> 为 True，<strong>会</strong>触发继承。所以"键缺失"和"值为 None"行为一致；只有值为 <code>0</code>、<code>False</code>、<code>""</code> 等非 None falsy 值时不触发。</p>
+      <p><strong>影响</strong>：行为总体合理，但 0 值的特殊处理仍需关注（见 <a href="#hidden">#H-02</a>）。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FLOW DIAGRAM ============ -->
+<section id="flow">
+  <div class="section-header">
+    <h2>🔗 数据流断点可视化</h2>
+    <div class="desc">参数从 YAML 到 QC 工具的传递路径，标注所有断裂点</div>
+  </div>
+
+  <h3 style="margin-bottom: 12px; color: var(--sev-critical);">断裂点 1：发现链与执行链的脱节</h3>
+  <div class="flow-diagram">
+    <div class="flow-row">
+      <div class="flow-node ok">
+        <div class="node-title">defaults.yaml</div>
+        <div class="node-meta">executables.xtb.path: "/opt/..."</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node ok">
+        <div class="node-title">resolve_all_executables()</div>
+        <div class="node-meta">resource_utils.py:316</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node ok">
+        <div class="node-title">find_executable() 4 步回退</div>
+        <div class="node-meta">config → env → PATH → known_dirs</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node ok">
+        <div class="node-title">results[prog] = {found, source, path}</div>
+        <div class="node-meta">resource_utils.py:273</div>
+      </div>
+    </div>
+    <div class="flow-row">
+      <div class="flow-node" style="visibility:hidden;"></div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node break">
+        <div class="node-title">⚠️ 断裂！只 logger.info 报告</div>
+        <div class="node-meta">orchestrator.py:238-243<br>不写回 self.config</div>
+      </div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node break">
+        <div class="node-title">⚠️ 6 处代码直读 config</div>
+        <div class="node-meta">gau_xtb / engine.py / enso_thermo / ...<br>读到的还是 YAML 原值</div>
+      </div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-node break">
+        <div class="node-title">⚠️ 执行时路径错误</div>
+        <div class="node-meta">FileNotFoundError / 错误二进制</div>
+      </div>
+    </div>
+  </div>
+
+  <h3 style="margin: 28px 0 12px; color: var(--sev-high);">断裂点 2：Gaussian 命令派发不一致</h3>
+  <div class="flow-diagram">
+    <div class="flow-row">
+      <div class="flow-node ok">
+        <div class="node-title">GaussianInterface.__init__</div>
+        <div class="node-meta">qc_interface.py:1692<br>✓ 尊重 use_wrapper + resolve_executable_config</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node ok">
+        <div class="node-title">write_input_file()</div>
+        <div class="node-meta">qc_interface.py:1717<br>✓ 内联生成 .gjf</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node ok">
+        <div class="node-title">Berny TS 优化</div>
+        <div class="node-meta">berny_driver.py<br>✓ 通过 GaussianInterface</div>
+      </div>
+    </div>
+    <div class="flow-row" style="margin-top: 16px;">
+      <div class="flow-node warning">
+        <div class="node-title">⚠️ GaussianRunner.run()</div>
+        <div class="node-meta">qc_interface.py:930<br>硬编码 ["g16", "input.gjf"]</div>
+      </div>
+      <div class="flow-arrow">↔</div>
+      <div class="flow-node warning">
+        <div class="node-title">⚠️ QST2RescueDriver</div>
+        <div class="node-meta">qst2_rescue.py:217<br>强制 wrapper，忽略 use_wrapper=false</div>
+      </div>
+      <div class="flow-arrow">↔</div>
+      <div class="flow-node warning">
+        <div class="node-title">⚠️ IRCDriver</div>
+        <div class="node-meta">irc_driver.py:197<br>direct 模式 fallback 到字面量 'g16'</div>
+      </div>
+      <div class="flow-arrow">↔</div>
+      <div class="flow-node warning">
+        <div class="node-title">⚠️ Gau_XTB</div>
+        <div class="node-meta">gau_xtb_interface.py:88<br>裸 config.get，无回退</div>
+      </div>
+    </div>
+  </div>
+
+  <h3 style="margin: 28px 0 12px; color: var(--sev-medium);">断裂点 3：环境变量语义分裂</h3>
+  <div class="flow-diagram">
+    <div class="flow-row">
+      <div class="flow-node warning">
+        <div class="node-title">$ORCA_PATH</div>
+        <div class="node-meta">用户设为<strong>目录</strong><br>常见习惯</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node break">
+        <div class="node-title">find_executable()</div>
+        <div class="node-meta">resource_utils.py:139<br>仅 is_file() → 判断无效</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node warning">
+        <div class="node-title">_find_orca_binary()</div>
+        <div class="node-meta">orca_interface.py:725<br>通过 resolve_executable_config → 同样判断无效</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node ok">
+        <div class="node-title">_build_orca_runtime_env</div>
+        <div class="node-meta">orca_interface.py:860<br>但这里把 ORCA_PATH 设为目录 — <strong>语义矛盾</strong></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ MATRIX ============ -->
+<section id="matrix">
+  <div class="section-header">
+    <h2>🎯 严重度矩阵</h2>
+    <div class="desc">所有 33 项发现的严重度分布与归类</div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>严重度</th>
+          <th>类别</th>
+          <th>数量</th>
+          <th>典型项</th>
+          <th>建议处理时机</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="badge badge-critical">CRITICAL</span></td>
+          <td>会导致崩溃或参数完全失效</td>
+          <td>3</td>
+          <td>#H-01 executables:null 崩溃、P0-1 known_dirs 失效、P0-2 发现链断裂</td>
+          <td><strong>立即修复</strong></td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-high">HIGH</span></td>
+          <td>特定路径下计算失败</td>
+          <td>5</td>
+          <td>P0-3 env 语义、P0-4 Gaussian 路径、P0-5 xTB 路径、#H-02、#H-03</td>
+          <td><strong>本周修复</strong></td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-medium">MEDIUM</span></td>
+          <td>边界情况或性能问题</td>
+          <td>12</td>
+          <td>P1-A 重复逻辑、P1-B 模板脱节、#H-04~#H-13</td>
+          <td>下个迭代</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-low">LOW</span></td>
+          <td>文档/清理</td>
+          <td>4</td>
+          <td>P1-C 配置副本、P2 schema、P2 持久化、#I-02</td>
+          <td>机会修复</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-safe">SAFE</span></td>
+          <td>已验证安全</td>
+          <td>5</td>
+          <td>#H-14~#H-16、#I-01 部分</td>
+          <td>无需处理</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-inaccurate">INACCURATE</span></td>
+          <td>计划描述不准确</td>
+          <td>2</td>
+          <td>#I-01 ORCA 解析、#I-02 _inherit_if_null</td>
+          <td>更新计划文档</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout callout-info" style="margin-top: 24px;">
+    <div class="callout-title">📊 关键观察</div>
+    <div class="callout-body">
+      <ul style="padding-left: 20px;">
+        <li><strong>计划覆盖率</strong>：5 个 P0 中<strong>全部属实</strong>（5/5），可信度高</li>
+        <li><strong>计划遗漏率</strong>：审计额外发现 <strong>16 项</strong>，其中 1 项 CRITICAL（#H-01）—— 比 P0-1 影响面更广</li>
+        <li><strong>系统性问题</strong>：<code>.get('executables', {}).get(...)</code> 模式在 15 处重复，是<strong>系统性 fragility</strong>，需要批量修复而非单点</li>
+        <li><strong>架构性问题</strong>：发现链与执行链的断裂（P0-2）是<strong>根本性架构缺陷</strong>，单点修复无效，必须先实现"回写机制"</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============ RECOMMEND ============ -->
+<section id="recommend">
+  <div class="section-header">
+    <h2>📋 推荐修复顺序</h2>
+    <div class="desc">综合计划与隐藏问题，给出修订后的实施顺序</div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>顺序</th>
+          <th>任务</th>
+          <th>来源</th>
+          <th>严重度</th>
+          <th>预计工作量</th>
+          <th>依赖</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>1</strong></td>
+          <td>批量加 <code>or {}</code> 保护 — 15 处 <code>.get('executables', {})</code></td>
+          <td><span class="badge badge-hidden">隐藏 #H-01</span></td>
+          <td><span class="badge badge-critical">CRITICAL</span></td>
+          <td>0.5 天</td>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td><strong>2</strong></td>
+          <td>修复 <code>_inherit_if_null</code> 支持 0 和 "" 触发</td>
+          <td><span class="badge badge-hidden">隐藏 #H-02</span></td>
+          <td><span class="badge badge-high">HIGH</span></td>
+          <td>0.5 天</td>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td><strong>3</strong></td>
+          <td><code>_resolve_mpi</code> 写回前确保 orca 子键存在</td>
+          <td><span class="badge badge-hidden">隐藏 #H-03</span></td>
+          <td><span class="badge badge-high">HIGH</span></td>
+          <td>0.5 天</td>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td><strong>4</strong></td>
+          <td>修 <code>resolve_all_executables()</code> 读 YAML known_dirs</td>
+          <td><span class="badge badge-p0">P0-1</span></td>
+          <td><span class="badge badge-critical">CRITICAL</span></td>
+          <td>1 天</td>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td><strong>5</strong></td>
+          <td>实现发现结果回写到 runtime config</td>
+          <td><span class="badge badge-p0">P0-2</span></td>
+          <td><span class="badge badge-critical">CRITICAL</span></td>
+          <td>2 天</td>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td><strong>6</strong></td>
+          <td>统一 env var 目录/文件双语义</td>
+          <td><span class="badge badge-p0">P0-3</span></td>
+          <td><span class="badge badge-high">HIGH</span></td>
+          <td>1.5 天</td>
+          <td>5</td>
+        </tr>
+        <tr>
+          <td><strong>7</strong></td>
+          <td>收敛 XTBRunner + enso_thermo 到统一解析</td>
+          <td><span class="badge badge-p0">P0-5</span></td>
+          <td><span class="badge badge-high">HIGH</span></td>
+          <td>1 天</td>
+          <td>5</td>
+        </tr>
+        <tr>
+          <td><strong>8</strong></td>
+          <td>实现统一 Gaussian 命令 helper</td>
+          <td><span class="badge badge-p0">P0-4</span></td>
+          <td><span class="badge badge-high">HIGH</span></td>
+          <td>2 天</td>
+          <td>5</td>
+        </tr>
+        <tr>
+          <td><strong>9</strong></td>
+          <td>删除 ORCA/ISOSTAT 私有 fallback</td>
+          <td><span class="badge badge-p1">P1-A</span></td>
+          <td><span class="badge badge-medium">MEDIUM</span></td>
+          <td>1 天</td>
+          <td>5,7</td>
+        </tr>
+        <tr>
+          <td><strong>10</strong></td>
+          <td>模板降级为示例文档</td>
+          <td><span class="badge badge-p1">P1-B</span></td>
+          <td><span class="badge badge-medium">MEDIUM</span></td>
+          <td>0.5 天</td>
+          <td>无</td>
+        </tr>
+        <tr>
+          <td><strong>11</strong></td>
+          <td>setup_ld_library_path 改为返回 dict</td>
+          <td><span class="badge badge-hidden">隐藏 #H-04</span></td>
+          <td><span class="badge badge-medium">MEDIUM</span></td>
+          <td>1 天</td>
+          <td>5</td>
+        </tr>
+        <tr>
+          <td><strong>12</strong></td>
+          <td>配置副本清理 + schema 校验</td>
+          <td><span class="badge badge-p1">P1-C</span> <span class="badge badge-p2">P2</span></td>
+          <td><span class="badge badge-low">LOW</span></td>
+          <td>1 天</td>
+          <td>无</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout callout-warning">
+    <div class="callout-title">⚠️ 关键路径依赖</div>
+    <div class="callout-body">
+      <p>第 5 步（实现回写机制）是后续 6/7/8/9/11 的<strong>共同前置依赖</strong>。在没有回写之前，统一解析函数即使被广泛调用，其结果也无法被直读 config 的代码消费。建议优先攻坚第 5 步。</p>
+      <p>第 1-3 步（隐藏问题）与 P0 修复<strong>互相独立</strong>，可并行进行以快速降低风险。</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p>RPH 参数映射与环境发现 · BUG 全景可视化 · 2026-07-06</p>
+    <p style="margin-top: 8px;">基于 <code>docs/PARAM_ENV_BUGFIX_PLAN.md</code> + 主动代码审计 · 数据源：2 个并行 explore 代理 + 直接读取 17 个核心文件</p>
+  </div>
+</footer>
+
+</div>
+
+<script>
+function filterIssues(sev, btn) {
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('#hidden .issue-card').forEach(card => {
+    if (sev === 'all') {
+      card.style.display = '';
+    } else {
+      card.style.display = (card.dataset.sev === sev) ? '' : 'none';
+    }
+  });
+}
+
+// Smooth scroll handled by CSS scroll-behavior
+</script>
+
+</body>
+</html>

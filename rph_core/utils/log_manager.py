@@ -5,27 +5,110 @@ Logging Manager
 统一的日志管理系统 (Rich Enhanced)
 """
 
+from __future__ import annotations
+
+import importlib
 import logging
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Optional, Any, cast
+from typing import TYPE_CHECKING, cast
 
-from rph_core.utils.shared_console import get_console
+if TYPE_CHECKING:
+    from rich.console import Console
+    from rich.logging import RichHandler as RichHandlerType
 
 try:
-    from rich.logging import RichHandler
+    from rich.logging import RichHandler as ImportedRichHandler
+
+    _rich_handler_cls: type[RichHandlerType] | None = ImportedRichHandler
     _has_rich = True
 except ImportError:
     _has_rich = False
-    RichHandler = None  # type: ignore
+    _rich_handler_cls = None
 
 HAS_RICH = _has_rich
+_V4_LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+
+
+def _build_v4_formatter() -> logging.Formatter:
+    return logging.Formatter(_V4_LOG_FORMAT)
+
+
+def _get_console() -> Console:
+    shared_console = importlib.import_module("rph_core.utils.shared_console")
+    console_factory = cast("Callable[[], Console]", getattr(shared_console, "get_console"))
+    return console_factory()
+
+
+def setup_v4_logging(
+    log_file: Path | None,
+    level: int = logging.INFO,
+    rich_console: bool = True,
+) -> None:
+    """Configure root logging for the V4 pipeline without disturbing host handlers."""
+
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    for handler in list(root.handlers):
+        if getattr(handler, "_rph_v4_console", False):
+            root.removeHandler(handler)
+            handler.close()
+
+    if rich_console and HAS_RICH:
+        if _rich_handler_cls is None:
+            raise RuntimeError("Rich logging unavailable while HAS_RICH is True")
+        console_handler: logging.Handler = _rich_handler_cls(
+            console=_get_console(),
+            rich_tracebacks=True,
+            show_time=True,
+            show_path=False,
+            markup=True,
+        )
+    else:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(_build_v4_formatter())
+
+    console_handler.setLevel(level)
+    setattr(console_handler, "_rph_v4_console", True)
+    root.addHandler(console_handler)
+
+    resolved_log_file = Path(log_file).resolve() if log_file is not None else None
+    active_file_handler: logging.Handler | None = None
+
+    for handler in list(root.handlers):
+        owned_log_path = getattr(handler, "_rph_v4_log_path", None)
+        if owned_log_path is None:
+            continue
+        if resolved_log_file is None or owned_log_path != str(resolved_log_file):
+            root.removeHandler(handler)
+            handler.close()
+            continue
+        if active_file_handler is None:
+            handler.setLevel(level)
+            handler.setFormatter(_build_v4_formatter())
+            active_file_handler = handler
+            continue
+        root.removeHandler(handler)
+        handler.close()
+
+    if resolved_log_file is None or active_file_handler is not None:
+        return
+
+    resolved_log_file.parent.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.FileHandler(resolved_log_file, encoding="utf-8")
+    file_handler.setLevel(level)
+    file_handler.setFormatter(_build_v4_formatter())
+    setattr(file_handler, "_rph_v4_log_path", str(resolved_log_file))
+    root.addHandler(file_handler)
+
 
 def setup_logger(
     name: str = "ReactionProfileHunter",
-    log_file: Optional[Path] = None,
+    log_file: Path | None = None,
     level: int = logging.INFO,
-    format_string: Optional[str] = None
+    format_string: str | None = None,
 ) -> logging.Logger:
     """
     设置日志系统
@@ -47,15 +130,14 @@ def setup_logger(
 
     # 控制台输出 (优先使用 Rich)
     if HAS_RICH:
-        if RichHandler is None:
+        if _rich_handler_cls is None:
             raise RuntimeError("RichHandler unavailable while HAS_RICH is True")
-        rich_handler_cls = cast(Any, RichHandler)
-        console_handler = rich_handler_cls(
-            console=get_console(),
+        console_handler: logging.Handler = _rich_handler_cls(
+            console=_get_console(),
             rich_tracebacks=True,
             show_time=True,
             show_path=False,
-            markup=True
+            markup=True,
         )
         # RichHandler 自带格式化，通常不需要 formatter
     else:
@@ -64,7 +146,7 @@ def setup_logger(
         formatter = logging.Formatter(format_string)
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(formatter)
-    
+
     console_handler.setLevel(level)
     logger.addHandler(console_handler)
     logger.propagate = False
@@ -73,7 +155,7 @@ def setup_logger(
     if log_file:
         if format_string is None:
             format_string = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-        
+
         log_file.parent.mkdir(parents=True, exist_ok=True)
         file_handler = logging.FileHandler(log_file)
         file_handler.setLevel(level)

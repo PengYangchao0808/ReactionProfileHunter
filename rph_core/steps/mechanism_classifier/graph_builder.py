@@ -173,6 +173,50 @@ class GraphBuilder:
             record.product_smiles,
         )
 
+    def _build_mapped_to_geometry_product_idx(
+        self,
+        mapped_product_smiles: str,
+        geometry_product_smiles: str,
+    ) -> Dict[int, int]:
+        try:
+            from rdkit import Chem
+        except ImportError:
+            logger.debug("RDKit unavailable; cannot build mapped→geometry product SMILES translation")
+            return {}
+
+        try:
+            mapped_mol = Chem.MolFromSmiles(mapped_product_smiles)
+            geometry_mol = Chem.MolFromSmiles(geometry_product_smiles)
+            if mapped_mol is None or geometry_mol is None:
+                return {}
+
+            query_mol = Chem.RWMol(mapped_mol)
+            for atom in query_mol.GetAtoms():
+                atom.SetAtomMapNum(0)
+            query = query_mol.GetMol()
+
+            matches = geometry_mol.GetSubstructMatches(query, uniquify=True, useChirality=True)
+            if not matches:
+                logger.warning(
+                    "mapped/geometry product SMILES match failed with chirality; retrying without"
+                )
+                matches = geometry_mol.GetSubstructMatches(query, uniquify=True, useChirality=False)
+
+            if len(matches) == 0:
+                logger.error("Cannot align mapped and geometry product SMILES; skipping translation")
+                return {}
+
+            if len(matches) > 1:
+                logger.warning(
+                    f"Multiple substructure matches ({len(matches)}) between mapped and geometry product SMILES"
+                )
+
+            match = matches[0]
+            return {mapped_idx: geometry_idx for mapped_idx, geometry_idx in enumerate(match)}
+        except Exception as exc:
+            logger.debug(f"Failed to build mapped→geometry product SMILES translation: {exc}")
+            return {}
+
     def _build_smiles_mapping(self, record: CleanRecord) -> SmilesAtomMapping:
         mapping = SmilesAtomMapping()
 
@@ -210,6 +254,29 @@ class GraphBuilder:
             except Exception as exc:
                 logger.debug(f"Failed to build product SMILES mapping: {exc}")
 
+        mapping.map_to_mapped_product_smiles = dict(mapping.map_to_product_smiles)
+        mapping.mapped_product_smiles_to_map = dict(mapping.product_smiles_to_map)
+
+        geometry_product_smiles = self._first_nonempty(record.product_smiles)
+        if product_smiles and geometry_product_smiles and geometry_product_smiles != product_smiles:
+            translation = self._build_mapped_to_geometry_product_idx(product_smiles, geometry_product_smiles)
+            if translation:
+                mapping.mapped_to_geometry_product_smiles_idx = translation
+                mapping.geometry_to_mapped_product_smiles_idx = {
+                    geometry_idx: mapped_idx for mapped_idx, geometry_idx in translation.items()
+                }
+
+                new_map_to_product: Dict[int, int] = {}
+                for map_num, mapped_idx in mapping.map_to_mapped_product_smiles.items():
+                    geometry_idx = translation.get(mapped_idx)
+                    if geometry_idx is not None:
+                        new_map_to_product[map_num] = geometry_idx
+
+                mapping.map_to_product_smiles = new_map_to_product
+                mapping.product_smiles_to_map = {
+                    geometry_idx: map_num for map_num, geometry_idx in new_map_to_product.items()
+                }
+
         return mapping
 
     def _build_forming_bond_annotations(
@@ -229,7 +296,7 @@ class GraphBuilder:
         precursor_mol = None
         product_mol = None
         precursor_smiles = self._get_precursor_mapping_smiles(record)
-        product_smiles = self._get_product_mapping_smiles(record)
+        product_smiles = self._first_nonempty(record.product_smiles)
 
         if precursor_smiles:
             try:

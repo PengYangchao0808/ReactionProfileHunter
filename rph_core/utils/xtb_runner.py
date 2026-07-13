@@ -86,54 +86,50 @@ class XTBRunner(LoggerMixin):
 
     def _verify_executable(self) -> str:
         """
-        Verify XTB executable location with multi-level fallback.
+        Verify XTB executable location via unified resolver.
 
-        Search strategy:
-        1. Check config['executables']['xtb']['path']
-        2. Try 'xtb' in system PATH
-        3. Try hardcoded fallback paths
-        4. Raise RuntimeError if all attempts fail
-
-        Returns:
-            Absolute path to xtb executable
-
-        Raises:
-            RuntimeError: If XTB cannot be found anywhere
+        Delegates to ``resource_utils.resolve_executable_config`` so that
+        config → env → PATH → known_dirs fallback is consistent with
+        CRESTInterface, GaussianInterface and the orchestrator discovery
+        report.
         """
-        # 1. Check configured path
-        executables_cfg: Dict[str, Any] = self.config.get('executables', {}) or {}
-        xtb_cfg: Dict[str, Any] = executables_cfg.get('xtb', {}) or {}
-        config_path = xtb_cfg.get('path')
-        if config_path:
-            xtb_path = shutil.which(config_path)
-            if xtb_path:
-                self.logger.info(f"XTB found from config: {xtb_path}")
-                return xtb_path
-            else:
-                self.logger.warning(f"Configured path not found: {config_path}")
+        from rph_core.utils.resource_utils import (
+            resolve_executable_config,
+            _KNOWN_DIRS,
+            _ENV_VARS,
+        )
 
-        # 2. Try system PATH
-        system_path = shutil.which('xtb')
-        if system_path:
-            self.logger.info(f"XTB found in system PATH: {system_path}")
-            return system_path
+        executables_cfg = self.config.get('executables', {}) or {}
+        xtb_cfg = executables_cfg.get('xtb', {}) or {}
+        if not isinstance(xtb_cfg, dict):
+            xtb_cfg = {}
 
-        # 3. Try fallback paths
         configured_fallbacks = xtb_cfg.get('fallback_paths', [])
         if not isinstance(configured_fallbacks, list):
             configured_fallbacks = []
-        fallback_paths = configured_fallbacks + [p for p in self.FALLBACK_PATHS if p not in configured_fallbacks]
-        for fallback in fallback_paths:
-            if Path(fallback).exists() and shutil.which(fallback):
-                self.logger.info(f"XTB found at fallback path: {fallback}")
-                return fallback
 
-        # 4. All attempts failed
+        module_dirs = _KNOWN_DIRS.get('xtb', [])
+        known_dirs = list(configured_fallbacks) + [
+            d for d in module_dirs if d not in configured_fallbacks
+        ]
+
+        exe_config = resolve_executable_config(
+            self.config, 'xtb',
+            env_vars=_ENV_VARS.get('xtb'),
+            known_dirs=known_dirs,
+            binary_names=['xtb'],
+        )
+
+        path = exe_config.get('path')
+        if path:
+            return str(path)
+
         error_msg = (
             "XTB executable not found. Searched locations:\n"
-            f"  - Config path: {config_path}\n"
+            f"  - Config path: {xtb_cfg.get('path')}\n"
+            f"  - Environment vars: {_ENV_VARS.get('xtb')}\n"
             f"  - System PATH\n"
-            f"  - Fallback paths: {fallback_paths}\n"
+            f"  - Known dirs: {known_dirs}\n"
             "Please ensure XTB is installed and accessible."
         )
         self.logger.error(error_msg)

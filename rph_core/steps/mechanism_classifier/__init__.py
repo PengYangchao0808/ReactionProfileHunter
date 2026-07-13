@@ -16,18 +16,9 @@ Usage:
     graphs = classifier.classify_from_csv(Path("cleaned/reaxys_cleaned.csv"))
 """
 
-from rph_core.steps.mechanism_classifier.classifier import MechanismClassifier
-from rph_core.steps.mechanism_classifier.models import (
-    MechanismGraph,
-    GraphNode,
-    GraphEdge,
-    NodeState,
-    CycloMode,
-    TopologyType,
-)
-from rph_core.steps.mechanism_classifier.clean_adapter import CleanAdapter, CleanRecord
-from rph_core.steps.mechanism_classifier.graph_builder import GraphBuilder
-from rph_core.steps.mechanism_classifier.dr_completion import build_dr_branch_plan
+from __future__ import annotations
+
+from importlib import import_module
 
 __all__ = [
     "MechanismClassifier",
@@ -42,3 +33,30 @@ __all__ = [
     "GraphBuilder",
     "build_dr_branch_plan",
 ]
+
+_EXPORTS = {
+    "MechanismClassifier": ("classifier", "MechanismClassifier"),
+    "MechanismGraph": ("models", "MechanismGraph"),
+    "GraphNode": ("models", "GraphNode"),
+    "GraphEdge": ("models", "GraphEdge"),
+    "NodeState": ("models", "NodeState"),
+    "CycloMode": ("models", "CycloMode"),
+    "TopologyType": ("models", "TopologyType"),
+    "CleanAdapter": ("clean_adapter", "CleanAdapter"),
+    "CleanRecord": ("clean_adapter", "CleanRecord"),
+    "GraphBuilder": ("graph_builder", "GraphBuilder"),
+    "build_dr_branch_plan": ("dr_completion", "build_dr_branch_plan"),
+}
+
+
+def __getattr__(name: str):
+    """Load legacy graph machinery only when a caller actually needs it."""
+
+    try:
+        module_name, attribute_name = _EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(name) from exc
+    module = import_module(f"{__name__}.{module_name}")
+    value = getattr(module, attribute_name)
+    globals()[name] = value
+    return value

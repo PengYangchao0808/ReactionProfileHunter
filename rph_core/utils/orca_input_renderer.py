@@ -37,7 +37,8 @@ class OrcaInputRenderer:
         elif task == "ts_freq":
             parts.extend(["OptTS", "Freq"])
 
-        parts.append("tightSCF")
+        if self.spec.family != "composite_3c":
+            parts.append("tightSCF")
 
         if self.spec.pno.preset:
             parts.append(self.spec.pno.preset)
@@ -46,7 +47,17 @@ class OrcaInputRenderer:
             parts.append(self.spec.dispersion.keyword)
 
         if self.spec.route_extras:
-            parts.append(self.spec.route_extras)
+            # ORCA simple-input keywords are case-insensitive and a duplicate
+            # (notably ``TightSCF``) is a fatal input error in ORCA 5.  The
+            # renderer owns canonical keywords, so only append genuinely new
+            # extras supplied by configuration.
+            known_keywords = {keyword.lower() for keyword in parts}
+            extra_keywords = [
+                keyword
+                for keyword in self.spec.route_extras.split()
+                if keyword.lower() not in known_keywords
+            ]
+            parts.extend(extra_keywords)
 
         parts.extend(["noautostart", "miniprint", "nopop"])
         return " ".join(parts)

@@ -165,7 +165,6 @@ class TaskKind(Enum):
     SINGLE_POINT = "single_point"
     FREQUENCY = "frequency"
     TS_OPTIMIZATION = "ts_optimization"
-    IRC = "irc"
     NBO = "nbo"
     SCAN = "scan"
 
@@ -260,7 +259,6 @@ def _theory_key_for_task(task_kind: TaskKind) -> str:
         TaskKind.TS_OPTIMIZATION: 'optimization',
         TaskKind.SINGLE_POINT: 'single_point',
         TaskKind.FREQUENCY: 'optimization',
-        TaskKind.IRC: 'optimization',
         TaskKind.NBO: 'single_point',
     }
     return theory_key_map.get(task_kind, 'optimization')
@@ -377,7 +375,6 @@ def run_gaussian_task(
         TaskKind.SINGLE_POINT: f"SP",
         TaskKind.FREQUENCY: f"Freq",
         TaskKind.TS_OPTIMIZATION: f"Opt=(TS, CalcFC, NoEigenTest)",
-        TaskKind.IRC: f"IRC=(CalcFC)",
         TaskKind.NBO: f"SP Pop=NBO",
     }
     base_route = route_map.get(task_kind, "SP")
@@ -431,8 +428,11 @@ def run_gaussian_task(
             input_file.write_text(gjf_content)
 
             # Execute Gaussian
+            gauss_env = _build_gaussian_runtime_env(config)
+            from rph_core.utils.resource_utils import get_gaussian_command
+            g16_cmd, _ = get_gaussian_command(config)
             runner = GaussianRunner()
-            log_content = runner.run(Path(sandbox_dir), gjf_content)
+            log_content = runner.run(Path(sandbox_dir), gjf_content, env=gauss_env, gaussian_cmd=g16_cmd)
 
             # Harvest results
             results = ResultHarvester.harvest(Path(sandbox_dir), output_dir)
@@ -821,6 +821,68 @@ class LinuxSandbox:
             logger.info(f"Janitor: cleaned {cleaned_count} old sandbox(es)")
 
 
+def _build_gaussian_runtime_env(config: dict) -> Dict[str, str]:
+    """从 config 构建 Gaussian 运行时环境变量字典。
+
+    自动从 gaussian.root 派生全部所需路径（g16root, GAUSS_EXEDIR, PATH,
+    LD_LIBRARY_PATH），无需用户手动 source profile。
+
+    Args:
+        config: 完整配置字典（含 executables.gaussian 段）
+
+    Returns:
+        env: 包含 g16root, GAUSS_SCRDIR, PATH(含g16/bin+bsd), GAUSS_EXEDIR,
+             LD_LIBRARY_PATH(含g16/bin+bsd) 的字典
+    """
+    env = os.environ.copy()
+    gauss_cfg = config.get('executables', {}).get('gaussian', {}) if config else {}
+
+    g16root_val = gauss_cfg.get('root')
+    if g16root_val:
+        env['g16root'] = str(g16root_val)
+
+    scratch = gauss_cfg.get('scratch_dir')
+    if scratch:
+        env['GAUSS_SCRDIR'] = str(scratch)
+
+    if g16root_val:
+        g16root_dir = Path(g16root_val)
+        g16_bsd = g16root_dir / 'bsd'
+
+        if g16root_dir.exists():
+            env['GAUSS_EXEDIR'] = str(g16root_dir)
+
+        lib_dirs = [str(g16root_dir)]
+        if g16_bsd.exists():
+            lib_dirs.append(str(g16_bsd))
+
+        for d in lib_dirs:
+            current_path = env.get('PATH', '')
+            if d not in current_path.split(':'):
+                env['PATH'] = f"{d}:{current_path}"
+
+            current_ld = env.get('LD_LIBRARY_PATH', '')
+            if d not in current_ld.split(':'):
+                env['LD_LIBRARY_PATH'] = (
+                    f"{d}:{current_ld}" if current_ld else d
+                )
+
+    g16_path = gauss_cfg.get('path')
+    if g16_path:
+        g16_bin_dir = str(Path(g16_path).parent)
+        current_path = env.get('PATH', '')
+        if g16_bin_dir not in current_path.split(':'):
+            env['PATH'] = f"{g16_bin_dir}:{current_path}"
+
+    return env
+
+
+def _ensure_scratch_dir(env: Dict[str, str]) -> None:
+    scrdir = env.get("GAUSS_SCRDIR")
+    if scrdir:
+        Path(scrdir).mkdir(parents=True, exist_ok=True)
+
+
 class GaussianRunner:
     """
     Executes Gaussian calculations in a controlled environment.
@@ -831,7 +893,9 @@ class GaussianRunner:
 
     @staticmethod
     def run(sandbox_path: Path, input_content: str,
-            timeout: int = 86400) -> str:
+            timeout: int = 86400,
+            env: Optional[Dict[str, str]] = None,
+            gaussian_cmd: Optional[str] = None) -> str:
         """
         Run Gaussian calculation.
 
@@ -839,6 +903,9 @@ class GaussianRunner:
             sandbox_path: Path to sandbox directory (must exist)
             input_content: Gaussian input file content
             timeout: Timeout in seconds (default: 24 hours)
+            env: Optional additional environment variables to pass to the subprocess
+            gaussian_cmd: Resolved Gaussian command (from get_gaussian_command).
+                          Falls back to ``"g16"`` when None.
 
         Returns:
             Content of Gaussian log file
@@ -853,22 +920,24 @@ class GaussianRunner:
 
         logger.info(f"Input file written: {input_file}")
 
-        # Prepare environment
-        env = os.environ.copy()
+        # 构建运行时环境
+        runtime_env = os.environ.copy()
+        # 外部 env 覆盖（来自 config 的 Gaussian 路径等）
+        if env:
+            runtime_env.update(env)
+        # 强制 GAUSS_SCRDIR（sandbox 隔离）— 外部 env 不应覆盖此项
+        runtime_env["GAUSS_SCRDIR"] = str(sandbox_path / "scratch")
 
-        # Force override GAUSS_SCRDIR to sandbox scratch
-        env["GAUSS_SCRDIR"] = str(sandbox_path / "scratch")
-
-        logger.debug(f"GAUSS_SCRDIR set to: {env['GAUSS_SCRDIR']}")
+        logger.debug(f"GAUSS_SCRDIR set to: {runtime_env['GAUSS_SCRDIR']}")
 
         # Execute Gaussian
         try:
             logger.info(f"Starting Gaussian execution in: {sandbox_path}")
 
             result = subprocess.run(
-                ["g16", "input.gjf"],
+                [gaussian_cmd or "g16", "input.gjf"],
                 cwd=str(sandbox_path),
-                env=env,
+                env=runtime_env,
                 timeout=timeout,
                 capture_output=True,
                 text=True,
@@ -980,7 +1049,7 @@ def run_gaussian_optimization(route, atoms, charge, mult, output_dir, config):
         config (dict): Configuration dict containing 'mem', 'nproc', 'timeout'.
     """
     # 1. Unpack Config (Adapter Layer)
-    mem = config.get('mem', '48GB')
+    mem = config.get('mem', '32GB')
     nproc = config.get('nproc', 16)
     timeout = config.get('timeout', 86400)
     
@@ -991,8 +1060,12 @@ def run_gaussian_optimization(route, atoms, charge, mult, output_dir, config):
         # 3. Sandbox Execution (Safety: Check for 100GB free space)
         with LinuxSandbox(min_free_gb=100.0) as sandbox:
             runner = GaussianRunner()
-            # Pass unpacked args to runner
-            log_content = runner.run(sandbox, gjf_content, timeout=timeout)
+            from rph_core.utils.resource_utils import get_gaussian_command
+            try:
+                g16_cmd, _ = get_gaussian_command(config)
+            except Exception:
+                g16_cmd = None
+            log_content = runner.run(sandbox, gjf_content, timeout=timeout, gaussian_cmd=g16_cmd)
             
             # 4. Result Harvesting
             # FIX: Ensure we use the 'output_dir' argument passed in
@@ -1016,9 +1089,14 @@ def run_gaussian_optimization(route, atoms, charge, mult, output_dir, config):
 from rph_core.utils.data_types import QCResult, ScanResult, PathSearchResult  # noqa: F401
 
 # Additional imports for interface classes
-from rph_core.utils.file_io import read_energy_from_gaussian, read_xyz
+from rph_core.utils.file_io import read_energy_from_gaussian, read_xyz, write_xyz
 from rph_core.utils.resource_utils import resolve_executable_config
 from rph_core.utils.xtb_runner import XTBRunner
+from rph_core.steps.conformer_search.xtb_thermo import (
+    run_xtb_enso,
+    XTBThermoResult,
+    _xyz_to_coord,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1088,6 +1166,89 @@ class XTBInterface:
                 result.converged = False
                 result.success = False
         return result
+
+    def enso_thermo(
+        self,
+        xyz_file: Path,
+        output_dir: Path,
+        *,
+        charge: int = 0,
+        spin: int = 1,
+        temperature_k: float = 298.15,
+        sthr: float = 50.0,
+        imagthr: float = -100.0,
+        solvent: Optional[str] = None,
+        timeout: Optional[int] = None,
+    ) -> "XTBThermoResult":
+        """Run xTB SPH + mRRHO (ENSO) thermochemistry calculation.
+
+        Wraps :func:`run_xtb_enso` to expose MRRHO correction through
+        RPH's standard QC interface.
+
+        Args:
+            xyz_file: Path to the input XYZ file.
+            output_dir: Directory for all output files (created if needed).
+            charge: Molecular charge. Default 0.
+            spin: Spin multiplicity (2 = doublet, 3 = triplet, etc.).
+                xTB ``--uhf`` is set to ``max(spin - 1, 0)``. Default 1.
+            temperature_k: Temperature in Kelvin. Default 298.15.
+            sthr: Rotational/vibrational entropy threshold (cm⁻¹/K). Default 50.0.
+            imagthr: Imaginary frequency threshold for thermo (cm⁻¹). Default -100.0.
+            solvent: ALPB solvent name (e.g. ``"toluene"``). Default None.
+            timeout: Subprocess timeout in seconds. Default None.
+
+        Returns:
+            XTBThermoResult with G(T), ZPVE, H(T) on success,
+            or ``success=False`` with error message on failure.
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            coords, symbols = read_xyz(Path(xyz_file))
+
+            tmp_xyz = output_dir / "enso_input.xyz"
+            write_xyz(tmp_xyz, coords, symbols, title="ENSO input")
+
+            coord_file = output_dir / "enso_input.coord"
+            _xyz_to_coord(tmp_xyz, coord_file)
+
+            from rph_core.utils.resource_utils import resolve_executable_config
+            xtb_resolved = resolve_executable_config(
+                self.config, "xtb", env_vars=["XTB_PATH", "XTB_BIN"]
+            )
+            xtb_bin = Path(xtb_resolved.get("path") or "xtb")
+
+            resolved_solvent = solvent if solvent is not None else self.solvent
+            thermo_cfg = dict(
+                self.config.get("step1", {})
+                .get("censo_lite", {})
+                .get("xtb_thermo", {})
+                or {}
+            )
+
+            result = run_xtb_enso(
+                xtb_bin=xtb_bin,
+                coord_file=coord_file,
+                output_dir=output_dir,
+                nproc=self.nproc,
+                gfn_level=self.gfn_level,
+                temperature_k=temperature_k,
+                sthr=sthr,
+                imagthr=imagthr,
+                charge=charge,
+                unpaired=max(spin - 1, 0),
+                solvent=resolved_solvent,
+                timeout=timeout,
+                bhess_level=thermo_cfg.get("bhess_level", "normal"),
+                omp_stacksize=thermo_cfg.get("omp_stacksize"),
+                omp_max_active_levels=thermo_cfg.get("omp_max_active_levels", 1),
+            )
+            return result
+
+        except Exception as exc:
+            logger.warning("ENSO thermo calculation failed: %s", exc)
+            return XTBThermoResult(g_rrho_correction_hartree=0.0, success=False, error=str(exc))
 
     def scan(
         self,
@@ -1275,19 +1436,33 @@ class CRESTInterface:
     Supports both single-stage (GFN2 only) and two-stage (GFN0→GFN2) conformer search.
     """
 
+    SEARCH_MODE_FLAGS: Dict[str, str] = {
+        "imtd_gc": "--v3",
+        "imtd_smtd": "--v4",
+    }
+
     def __init__(
         self,
         gfn_level: int = 2,
         solvent: Optional[str] = None,
         nproc: int = 1,
         config: Optional[Dict[str, Any]] = None,
-        additional_flags: Optional[str] = None
+        additional_flags: Optional[str] = None,
+        nci: bool = False,
+        wall_potential: Optional[float] = None,
+        search_mode: Optional[str] = None,
+        energy_window_kcal: Optional[float] = None,
     ):
         self.gfn_level = gfn_level
         self.solvent = solvent
         self.nproc = nproc
         self.additional_flags = additional_flags
+        self.nci = nci
+        self.wall_potential = wall_potential
+        self.search_mode = search_mode
+        self.energy_window_kcal = energy_window_kcal
         self.config = config or {}
+        self.crest_timeout_seconds = self.config.get('step1', {}).get('crest', {}).get('crest_timeout_seconds', 21600)
 
         exe_config = resolve_executable_config(
             self.config,
@@ -1305,7 +1480,11 @@ class CRESTInterface:
         xyz_file: Path,
         output_dir: Path,
         gfn_override: Optional[int] = None,
-        additional_flags: Optional[str] = None
+        additional_flags: Optional[str] = None,
+        nci: Optional[bool] = None,
+        wall_potential: Optional[float] = None,
+        search_mode: Optional[str] = None,
+        energy_window_kcal: Optional[float] = None,
     ) -> Path:
         """Run CREST conformer search on a single structure.
 
@@ -1314,6 +1493,12 @@ class CRESTInterface:
             output_dir: Output directory for CREST artifacts
             gfn_override: Override GFN level (0, 1, or 2). If None, uses instance gfn_level
             additional_flags: Additional command-line flags for CREST
+            nci: Enable NCI mode. If None, uses instance nci
+            wall_potential: Wall potential value. If None, uses instance wall_potential
+            search_mode: CREST search mode (e.g. ``"imtd_gc"`` → ``--v3``,
+                ``"imtd_smtd"`` → ``--v4``). If None, uses instance search_mode.
+            energy_window_kcal: CREGEN energy window in kcal/mol (``--ewin``).
+                If None, uses instance energy_window_kcal.
 
         Returns:
             Path to best structure or ensemble file
@@ -1330,19 +1515,72 @@ class CRESTInterface:
         if self.solvent:
             cmd.extend(["-alpb", self.solvent])
 
-        # Handle additional flags
         flags = additional_flags or self.additional_flags
         if flags:
             cmd.extend(flags.split())
 
+        effective_search_mode = search_mode if search_mode is not None else self.search_mode
+        if effective_search_mode:
+            mode_flag = self.SEARCH_MODE_FLAGS.get(effective_search_mode)
+            if mode_flag:
+                cmd.append(mode_flag)
+            else:
+                logger.warning("Unknown CREST search_mode '%s'; ignoring", effective_search_mode)
+
+        effective_ewin = energy_window_kcal if energy_window_kcal is not None else self.energy_window_kcal
+        if effective_ewin is not None:
+            cmd.extend(["--ewin", str(float(effective_ewin))])
+
+        # Handle NCI mode and wall potential
+        use_nci = nci if nci is not None else self.nci
+        use_wall = wall_potential if wall_potential is not None else self.wall_potential
+
+        if use_nci:
+            cmd.append("--nci")
+        if use_wall is not None:
+            cmd.extend(["--wall", str(use_wall)])
+
         shutil.copy(xyz_file, output_dir / "input.xyz")
-        result = subprocess.run(
-            cmd,
-            cwd=output_dir,
-            capture_output=True,
-            text=True
-        )
+
+        # Ensure xTB is in PATH for CREST (CREST spawns xTB subprocesses for GFN2)
+        crest_env = os.environ.copy()
+        xtb_cfg = resolve_executable_config(self.config, 'xtb', env_vars=['XTB_PATH', 'XTB_BIN'])
+        xtb_path = xtb_cfg.get('path')
+        if xtb_path:
+            xtb_bin_dir = str(Path(xtb_path).parent.resolve())
+            current_path = crest_env.get('PATH', '')
+            if xtb_bin_dir not in current_path:
+                crest_env['PATH'] = f"{xtb_bin_dir}:{current_path}"
+
+        # Propagate thread count to CREST's xTB subprocesses
+        crest_env['OMP_NUM_THREADS'] = str(self.nproc)
+        crest_env['MKL_NUM_THREADS'] = str(self.nproc)
+
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=output_dir,
+                capture_output=True,
+                text=True,
+                env=crest_env,
+                timeout=self.crest_timeout_seconds,
+            )
+        except subprocess.TimeoutExpired:
+            ensemble_path = output_dir / "crest_conformers.xyz"
+            if ensemble_path.exists():
+                logger.warning(
+                    f"[LA] CREST timed out after {self.crest_timeout_seconds}s, using partial output"
+                )
+                return ensemble_path
+            raise RuntimeError(f"CREST timed out after {self.crest_timeout_seconds}s with no output")
+
         if result.returncode != 0:
+            ensemble_path = output_dir / "crest_conformers.xyz"
+            if ensemble_path.exists():
+                logger.warning(
+                    f"[LA] CREST exited abnormally (rc={result.returncode}), using partial output"
+                )
+                return ensemble_path
             from rph_core.utils.ui import ErrorFormatter
             compact_msg = ErrorFormatter.compact(
                 RuntimeError("CREST conformer search failed"),
@@ -1497,7 +1735,9 @@ class GaussianInterface:
         self.mem = mem
         self.config = config or {}
 
-        exe_config = self.config.get('executables', {}).get('gaussian', {})
+        exe_config = (self.config.get('executables', {}) or {}).get('gaussian', {})
+        if not isinstance(exe_config, dict):
+            exe_config = {}
         self.use_wrapper = exe_config.get('use_wrapper', True)
         if self.use_wrapper:
             wrapper_path = exe_config.get('wrapper_path', './scripts/run_g16_worker.sh')
@@ -1606,8 +1846,19 @@ class GaussianInterface:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        gjf_file = output_dir / f"{xyz_file.stem}.gjf"
-        log_file = output_dir / f"{xyz_file.stem}.log"
+        use_sandbox = is_path_toxic(output_dir)
+        run_dir = output_dir
+        sandbox_scratch: Optional[Path] = None
+        if use_sandbox:
+            logger.warning("Gaussian output path is toxic, using sandbox: %s", output_dir)
+            run_dir = Path(tempfile.mkdtemp(prefix="RPH_G16_", dir="/tmp"))
+            run_dir.mkdir(parents=True, exist_ok=True)
+            # Create sandbox-local scratch directory for GAUSS_SCRDIR isolation
+            sandbox_scratch = run_dir / "scratch"
+            sandbox_scratch.mkdir(parents=True, exist_ok=True)
+
+        gjf_file = run_dir / f"{xyz_file.stem}.gjf"
+        log_file = run_dir / f"{xyz_file.stem}.log"
 
         # Temporarily apply call-time charge/spin overrides
         saved_charge, saved_multiplicity = self.charge, self.multiplicity
@@ -1618,7 +1869,7 @@ class GaussianInterface:
         try:
             local_old_chk = None
             if old_checkpoint and Path(old_checkpoint).exists():
-                local_old_chk_path = output_dir / "previous.chk"
+                local_old_chk_path = run_dir / "previous.chk"
                 try:
                     shutil.copy2(old_checkpoint, local_old_chk_path)
                     local_old_chk = Path("previous.chk")
@@ -1637,13 +1888,30 @@ class GaussianInterface:
 
             cmd = [self.gaussian_cmd, gjf_file.name, log_file.name] if self.use_wrapper else [self.gaussian_cmd, gjf_file.name]
 
+            gauss_env = _build_gaussian_runtime_env(self.config)
+            if sandbox_scratch is not None:
+                gauss_env["GAUSS_SCRDIR"] = str(sandbox_scratch)
+            else:
+                _ensure_scratch_dir(gauss_env)
             result = subprocess.run(
                 cmd,
-                cwd=output_dir,
+                cwd=run_dir,
+                env={**os.environ.copy(), **gauss_env},
                 capture_output=True,
                 text=True,
                 timeout=timeout
             )
+
+            if use_sandbox:
+                for item in run_dir.iterdir():
+                    target = output_dir / item.name
+                    if item.is_file():
+                        shutil.copy2(item, target)
+                    elif item.is_dir() and not target.exists():
+                        shutil.copytree(item, target)
+                shutil.rmtree(run_dir, ignore_errors=True)
+                log_file = output_dir / log_file.name
+                gjf_file = output_dir / gjf_file.name
 
             if result.returncode != 0 or not log_file.exists():
                 error_snippet = "Unknown error"
@@ -1830,9 +2098,12 @@ class GaussianInterface:
 
         use_sandbox = is_path_toxic(output_dir)
         run_dir = output_dir
+        sandbox_scratch: Optional[Path] = None
         if use_sandbox:
             logger.warning("Constrained Gaussian output path is toxic, using sandbox: %s", output_dir)
             run_dir = Path(tempfile.mkdtemp(prefix="RPH_G16_CONSTR_", dir="/tmp"))
+            sandbox_scratch = run_dir / "scratch"
+            sandbox_scratch.mkdir(parents=True, exist_ok=True)
 
         chk_name = f"{xyz_file.stem}_constrained.chk"
         log_name = f"{xyz_file.stem}_constrained.log"
@@ -1858,9 +2129,15 @@ class GaussianInterface:
 
         try:
             cmd = [self.gaussian_cmd, gjf_file.name, log_file.name] if self.use_wrapper else [self.gaussian_cmd, gjf_file.name]
+            gauss_env = _build_gaussian_runtime_env(self.config)
+            if sandbox_scratch is not None:
+                gauss_env["GAUSS_SCRDIR"] = str(sandbox_scratch)
+            else:
+                _ensure_scratch_dir(gauss_env)
             result = subprocess.run(
                 cmd,
                 cwd=str(run_dir),
+                env={**os.environ.copy(), **gauss_env},
                 capture_output=True,
                 text=True,
                 timeout=timeout

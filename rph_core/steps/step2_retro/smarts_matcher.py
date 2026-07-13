@@ -140,74 +140,119 @@ class SMARTSMatcher(LoggerMixin):
         self,
         product_xyz: Path,
         cleaner_data: Optional[Dict[str, Any]] = None,
+        la_additive: Optional[Any] = None,
+        product_smiles: Optional[str] = None,
     ) -> SMARTSMatchResult:
         try:
             coords, symbols = read_xyz(product_xyz)
         except Exception as e:
             return SMARTSMatchResult(False, "io_error", None, None, (), 0.0, str(e))
 
+        # Determine if LA mode: build Mol from canonical SMILES (no Li/Cl)
+        la_mode = (
+            la_additive is not None
+            and bool(getattr(la_additive, 'enabled', False))
+            and product_smiles is not None
+        )
+
         # 1. 构建分子图 (基于几何距离)
-        mol = self._xyz_to_mol_with_connectivity(coords, symbols)
+        if la_mode:
+            mol = Chem.MolFromSmiles(product_smiles)
+            if mol is None:
+                return SMARTSMatchResult(False, "mol_build_error", None, None, (), 0.0,
+                                         f"Failed to build Mol from canonical SMILES: {product_smiles}")
+            n_heavy = mol.GetNumAtoms()
+            if len(coords) > n_heavy:
+                coords = coords[:n_heavy]
+            mol = self._embed_coords_into_mol(mol, coords)
+        else:
+            mol = self._xyz_to_mol_with_connectivity(coords, symbols)
         if mol is None:
              return SMARTSMatchResult(False, "mol_build_error", None, None, (), 0.0, "无法构建分子连接性")
+
+        final_result: Optional[SMARTSMatchResult] = None
 
         cleaner_result = self._match_from_cleaner_data(cleaner_data, mol, coords)
         if cleaner_result is not None and cleaner_result.matched:
             self.logger.info("✓ 使用 cleaner 数据识别形成键")
-            return cleaner_result
+            final_result = cleaner_result
+        else:
+            reaction_type = self._normalize_reaction_type(cleaner_data)
+            template = self._select_template(reaction_type)
+            if template is None:
+                final_result = SMARTSMatchResult(
+                    matched=False,
+                    pattern_name="template_not_found",
+                    bond_1=None,
+                    bond_2=None,
+                    match_atoms=(),
+                    confidence=0.0,
+                    error_message=f"未找到反应类型模板: {reaction_type}",
+                )
+            else:
+                identify = getattr(self, template.identify_func, None)
+                if not callable(identify):
+                    final_result = SMARTSMatchResult(
+                        matched=False,
+                        pattern_name="template_error",
+                        bond_1=None,
+                        bond_2=None,
+                        match_atoms=(),
+                        confidence=0.0,
+                        error_message=f"模板识别函数不存在: {template.identify_func}",
+                    )
+                else:
+                    self.logger.info("执行模板识别 (Template Registry)...")
+                    topo_candidate = identify(mol, coords)
+                    if not isinstance(topo_candidate, SMARTSMatchResult):
+                        final_result = SMARTSMatchResult(
+                            matched=False,
+                            pattern_name="template_error",
+                            bond_1=None,
+                            bond_2=None,
+                            match_atoms=(),
+                            confidence=0.0,
+                            error_message=f"模板返回类型错误: {template.identify_func}",
+                        )
+                    else:
+                        final_result = topo_candidate
+                        if final_result.matched:
+                            self.logger.info(f"✓ 拓扑识别成功: {final_result.pattern_name}")
 
-        reaction_type = self._normalize_reaction_type(cleaner_data)
-        template = self._select_template(reaction_type)
-        if template is None:
-            return SMARTSMatchResult(
-                matched=False,
-                pattern_name="template_not_found",
-                bond_1=None,
-                bond_2=None,
-                match_atoms=(),
-                confidence=0.0,
-                error_message=f"未找到反应类型模板: {reaction_type}",
-            )
+            if final_result is None or not final_result.matched:
+                final_result = SMARTSMatchResult(
+                    matched=False,
+                    pattern_name="failed",
+                    bond_1=None,
+                    bond_2=None,
+                    match_atoms=(),
+                    confidence=0.0,
+                    error_message=f"未能识别 {reaction_type if template else 'unknown'} 对应拓扑特征",
+                )
 
-        identify = getattr(self, template.identify_func, None)
-        if not callable(identify):
-            return SMARTSMatchResult(
-                matched=False,
-                pattern_name="template_error",
-                bond_1=None,
-                bond_2=None,
-                match_atoms=(),
-                confidence=0.0,
-                error_message=f"模板识别函数不存在: {template.identify_func}",
-            )
+        if la_mode and final_result is not None and final_result.matched:
+            additive_indices: Tuple[int, ...] = tuple(getattr(la_additive, 'additive_atom_indices', ()))
+            if additive_indices:
+                additive_set = set(additive_indices)
+                if (final_result.bond_1 is not None
+                        and (final_result.bond_1.atom_idx_1 in additive_set
+                             or final_result.bond_1.atom_idx_2 in additive_set)):
+                    final_result = SMARTSMatchResult(
+                        False, "additive_atom_in_bond", None, None, (),
+                        final_result.confidence,
+                        "Forming bond 1 contains Lewis acid additive atom",
+                    )
+                elif (final_result.bond_2 is not None
+                      and (final_result.bond_2.atom_idx_1 in additive_set
+                           or final_result.bond_2.atom_idx_2 in additive_set)):
+                    final_result = SMARTSMatchResult(
+                        False, "additive_atom_in_bond", None, None, (),
+                        final_result.confidence,
+                        "Forming bond 2 contains Lewis acid additive atom",
+                    )
 
-        self.logger.info("执行模板识别 (Template Registry)...")
-        topo_candidate = identify(mol, coords)
-        if not isinstance(topo_candidate, SMARTSMatchResult):
-            return SMARTSMatchResult(
-                matched=False,
-                pattern_name="template_error",
-                bond_1=None,
-                bond_2=None,
-                match_atoms=(),
-                confidence=0.0,
-                error_message=f"模板返回类型错误: {template.identify_func}",
-            )
-        topo_result = topo_candidate
-        
-        if topo_result.matched:
-            self.logger.info(f"✓ 拓扑识别成功: {topo_result.pattern_name}")
-            return topo_result
-
-        return SMARTSMatchResult(
-            matched=False, 
-            pattern_name="failed", 
-            bond_1=None, 
-            bond_2=None, 
-            match_atoms=(), 
-            confidence=0.0, 
-            error_message=f"未能识别 {template.reaction_type} 对应拓扑特征"
-        )
+        assert final_result is not None
+        return final_result
 
     def _normalize_reaction_type(self, cleaner_data: Optional[Dict[str, Any]]) -> str:
         if not cleaner_data:
@@ -409,6 +454,14 @@ class SMARTSMatcher(LoggerMixin):
             self.logger.debug(f"RDKit sanitize warning for inferred connectivity: {exc}")
         return result
 
+    def _embed_coords_into_mol(self, mol: Chem.Mol, coords: np.ndarray) -> Chem.Mol:
+        """Embed XYZ coordinates into an RDKit Mol (no bond detection needed)."""
+        conf = Chem.Conformer(mol.GetNumAtoms())
+        for i in range(mol.GetNumAtoms()):
+            conf.SetAtomPosition(i, Point3D(float(coords[i][0]), float(coords[i][1]), float(coords[i][2])))
+        mol.AddConformer(conf)
+        return mol
+
     def _topological_core_identification(self, mol: Chem.Mol, coords: np.ndarray) -> SMARTSMatchResult:
         """
         通过路径分析识别核心
@@ -509,8 +562,17 @@ class SMARTSMatcher(LoggerMixin):
             confidence=0.95
         )
 
-    def _find_path_to_target(self, mol, start_idx, target_idx, exclude_idxs):
-        """简单的 BFS 寻路，寻找从 start 到 target 的路径"""
+    def _find_path_to_target(self, mol, start_idx, target_idx, exclude_idxs,
+                              allowed_symbols: Optional[set] = None):
+        """简单的 BFS 寻路，寻找从 start 到 target 的路径
+
+        Args:
+            allowed_symbols: set of element symbols allowed on the path.
+                Default {C} for carbon-only bridges. Set {C, O} for
+                furan/ether-derived bridges containing oxygen.
+        """
+        if allowed_symbols is None:
+            allowed_symbols = {'C'}
         queue = [[start_idx]]
         visited = set(exclude_idxs)
         visited.add(start_idx)
@@ -527,7 +589,7 @@ class SMARTSMatcher(LoggerMixin):
                 if n_idx == target_idx:
                     return path + [n_idx]
                 
-                if n_idx not in visited and neighbor.GetSymbol() == 'C': # 桥上只应该是碳
+                if n_idx not in visited and neighbor.GetSymbol() in allowed_symbols:
                     visited.add(n_idx)
                     new_path = list(path)
                     new_path.append(n_idx)
@@ -535,7 +597,7 @@ class SMARTSMatcher(LoggerMixin):
         return None
 
     def _topological_ring_identification_43(self, mol: Chem.Mol, coords: np.ndarray) -> SMARTSMatchResult:
-        return self._topological_ring_core_identification(
+        result = self._topological_ring_core_identification(
             mol=mol,
             coords=coords,
             ring_size=7,
@@ -543,6 +605,114 @@ class SMARTSMatcher(LoggerMixin):
             pattern_name="topology_ring_43",
             require_ring_oxygen_count=1,
             require_oxygen_in_core=True,
+        )
+        if result.matched:
+            return result
+
+        # Fallback: bridge-oxygen + BFS path analysis for molecules whose
+        # LA-complexed ring topology doesn't expose a clear 7-membered ring
+        # but still contains the defining bridge-oxygen structural motif.
+        self.logger.info("7-ring not found, falling back to bridge-oxygen path analysis for [4+3]")
+        return self._topological_core_identification_43(mol, coords)
+
+    def _topological_core_identification_43(
+        self, mol: Chem.Mol, coords: np.ndarray,
+    ) -> SMARTSMatchResult:
+        """Bridge-oxygen + BFS path analysis for [4+3] cycloadducts.
+
+        Logic mirrors _topological_core_identification ([5+2]) but identifies
+        the 3-carbon bridge typical of [4+3] (core_atom_count=3).
+        The two forming bonds are (h1, path_start) and (h2, path_end) where
+        the path between bridgehead carbons has 3 internal carbon atoms.
+        """
+        bridge_oxygen_idx = -1
+        bridgeheads: List[int] = []
+
+        for atom in mol.GetAtoms():
+            if atom.GetSymbol() != 'O':
+                continue
+            carbon_neighbors = [n for n in atom.GetNeighbors() if n.GetSymbol() == 'C']
+            if len(carbon_neighbors) == 2:
+                d1 = float(np.linalg.norm(coords[atom.GetIdx()] - coords[carbon_neighbors[0].GetIdx()]))
+                d2 = float(np.linalg.norm(coords[atom.GetIdx()] - coords[carbon_neighbors[1].GetIdx()]))
+                if d1 > 1.30 and d2 > 1.30:
+                    bridge_oxygen_idx = atom.GetIdx()
+                    bridgeheads = [n.GetIdx() for n in carbon_neighbors]
+                    break
+
+        if bridge_oxygen_idx == -1:
+            return SMARTSMatchResult(False, "no_bridge_oxygen", None, None, (), 0.0)
+
+        h1, h2 = bridgeheads
+        self.logger.info(f"[4+3] 锁定桥氧: {bridge_oxygen_idx}, 桥头碳: {h1}, {h2}")
+
+        h1_neighbors = [
+            n.GetIdx() for n in mol.GetAtomWithIdx(h1).GetNeighbors()
+            if n.GetIdx() != bridge_oxygen_idx
+        ]
+        h2_neighbors = [
+            n.GetIdx() for n in mol.GetAtomWithIdx(h2).GetNeighbors()
+            if n.GetIdx() != bridge_oxygen_idx
+        ]
+
+        three_carbon_bridge_start_end = None
+
+        for n1 in h1_neighbors:
+            path = self._find_path_to_target(
+                mol, start_idx=n1, target_idx=h2,
+                exclude_idxs={bridge_oxygen_idx, h1},
+            )
+            if path:
+                atoms_in_bridge = len(path)
+                bridge_atom_count = atoms_in_bridge - 1
+                self.logger.info(
+                    f"[4+3] 发现路径: H1 -> {n1} ... -> H2, 桥原子数: {bridge_atom_count}"
+                )
+                if bridge_atom_count == 3:
+                    n_last = path[-2]
+                    three_carbon_bridge_start_end = (n1, n_last)
+                    break
+
+        # Fallback: if no 3-carbon path found, try BFS that allows O/N atoms
+        # (needed when bridge contains oxygen from furan/ether or nitrogen from aminals)
+        if not three_carbon_bridge_start_end:
+            self.logger.info("[4+3] 3-C path not found, trying with O/N-allowed BFS")
+            for n1 in h1_neighbors:
+                path = self._find_path_to_target(
+                    mol, start_idx=n1, target_idx=h2,
+                    exclude_idxs={bridge_oxygen_idx, h1},
+                    allowed_symbols={'C', 'O', 'N'},
+                )
+                if path:
+                    atoms_in_bridge = len(path)
+                    bridge_atom_count = atoms_in_bridge - 1
+                    symbols_str = '-'.join(mol.GetAtomWithIdx(i).GetSymbol() for i in path)
+                    self.logger.info(
+                        f"[4+3] O/N-allowed路径: H1->{n1}->...->H2, "
+                        f"桥原子数={bridge_atom_count}, path: {symbols_str}"
+                    )
+                    if bridge_atom_count in (2, 3, 4, 5):
+                        n_last = path[-2]
+                        three_carbon_bridge_start_end = (n1, n_last)
+                        break
+
+        if not three_carbon_bridge_start_end:
+            return SMARTSMatchResult(
+                False, "topology_mismatch", None, None, (), 0.0,
+                "未找到 3-碳桥结构 ([4+3] 特征)"
+            )
+
+        c_start, c_end = three_carbon_bridge_start_end
+        bond_1 = self._get_bond_info(mol, h1, c_start, coords)
+        bond_2 = self._get_bond_info(mol, h2, c_end, coords)
+
+        return SMARTSMatchResult(
+            matched=True,
+            pattern_name="topology_bridge_43",
+            bond_1=bond_1,
+            bond_2=bond_2,
+            match_atoms=tuple([bridge_oxygen_idx, h1, h2, c_start, c_end]),
+            confidence=0.90,
         )
 
     def _topological_ring_identification_42(self, mol: Chem.Mol, coords: np.ndarray) -> SMARTSMatchResult:

@@ -1,0 +1,873 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ReactionProfileHunter — 文档</title>
+<style>
+:root {
+  --fg: #1f2328;
+  --fg-dim: #57606a;
+  --bg: #ffffff;
+  --border: #d0d7de;
+  --accent: #0969da;
+  --code-bg: #f6f8fa;
+  --blockquote: #d0d7de;
+  --table-stripe: #f6f8fa;
+  --badge-bg: #eaeef2;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e6edf3;
+    --fg-dim: #8b949e;
+    --bg: #0d1117;
+    --border: #30363d;
+    --accent: #58a6ff;
+    --code-bg: #161b22;
+    --blockquote: #30363d;
+    --table-stripe: #161b22;
+    --badge-bg: #21262d;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans",
+    Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  background: var(--bg);
+  color: var(--fg);
+  line-height: 1.6;
+  margin: 0;
+  padding: 2rem 1rem;
+  font-size: 16px;
+}
+.container { max-width: 920px; margin: 0 auto; }
+h1, h2, h3, h4, h5, h6 {
+  font-weight: 600;
+  line-height: 1.25;
+  margin-top: 24px;
+  margin-bottom: 16px;
+}
+h1 { font-size: 2em; border-bottom: 1px solid var(--border); padding-bottom: .3em; }
+h2 { font-size: 1.5em; border-bottom: 1px solid var(--border); padding-bottom: .3em; }
+h3 { font-size: 1.25em; }
+h4 { font-size: 1em; }
+p { margin: 0 0 16px; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+  background: var(--code-bg);
+  padding: 0.2em 0.4em;
+  border-radius: 6px;
+  font-size: 85%;
+}
+pre {
+  background: var(--code-bg);
+  padding: 16px;
+  border-radius: 6px;
+  overflow: auto;
+  font-size: 85%;
+  line-height: 1.45;
+}
+pre code { background: transparent; padding: 0; font-size: 100%; }
+blockquote {
+  border-left: 4px solid var(--blockquote);
+  color: var(--fg-dim);
+  padding: 0 1em;
+  margin: 0 0 16px;
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0 0 16px;
+  display: block;
+  overflow: auto;
+}
+th, td {
+  border: 1px solid var(--border);
+  padding: 6px 13px;
+  text-align: left;
+}
+tr:nth-child(2n) { background: var(--table-stripe); }
+th { font-weight: 600; }
+hr { border: 0; border-top: 1px solid var(--border); margin: 24px 0; }
+ul, ol { padding-left: 2em; margin: 0 0 16px; }
+li + li { margin-top: 0.25em; }
+img { max-width: 100%; height: auto; }
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background: var(--badge-bg);
+  font-size: 75%;
+  color: var(--fg-dim);
+  margin: 0 2px;
+}
+.center { text-align: center; }
+.toc { background: var(--code-bg); padding: 16px; border-radius: 6px; margin: 16px 0; }
+.toc ul { margin: 0; }
+</style>
+</head>
+<body>
+<div class="container">
+<h1 id="reactionprofilehunter">ReactionProfileHunter</h1>
+<p><a href="README.md">English</a> | <a href="README.zh-CN.md">中文</a></p>
+<div align="center">
+<p><strong>产物驱动的反应机理探索与特征提取工具</strong></p>
+<p><a href="https://github.com/yourusername/ReactionProfileHunter"><img src="https://img.shields.io/badge/version-3.0.0-blue.svg" alt="Version"></a> <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.8%2B-blue.svg" alt="Python"></a> <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License"></a> <a href="AGENTS.md"><img src="https://img.shields.io/badge/code%20style-agents%20ready-success.svg" alt="Code Style"></a></p>
+</div>
+<blockquote>
+<p><strong>项目统计：</strong> ~50k 行代码，198 个 Python 文件 | <strong>开发指南：</strong> 参见 <a href="AGENTS.md">AGENTS.md</a> 了解代码规范</p>
+</blockquote>
+<hr>
+<h2 id="-项目简介">📋 项目简介</h2>
+<p>ReactionProfileHunter (RPH) 是一个<strong>产物驱动</strong>的自动化 DFT 反应机理探索流水线（S0-S3），专注于有机反应的过渡态搜索与几何优化。特征提取 (S4) 由配套的 <a href="https://github.com/yourusername/RPH<em>Postprocess">RPH</em>Postprocess</a> 包独立完成。</p>
+<h3 id="核心功能">核心功能</h3>
+<ul>
+<li>🎯 <strong>产物驱动策略</strong>：从产物分子出发，自动逆向搜索反应路径</li>
+<li>🔄 <strong>三步 DFT 流水线</strong>：锚定/构象搜索 → 逆向扫描 → 过渡态优化（S4 特征提取由 RPH_Postprocess 完成）</li>
+<li>⚡ <strong>智能双层级计算</strong>：xTB 预优化 → B3LYP 几何优化 → wB97X-D3BJ 高精度能量</li>
+<li>🔧 <strong>多引擎支持</strong>：Gaussian、ORCA、xTB、CREST、Multiwfn 无缝集成</li>
+<li>📊 <strong>特征工程</strong>：反应能垒、几何参数、电子描述符等自动提取（通过 RPH_Postprocess）</li>
+<li>💾 <strong>断点恢复</strong>：支持计算中断后从检查点继续运行</li>
+</ul>
+<h3 id="使用场景">使用场景</h3>
+<ul>
+<li>有机反应机理研究（环加成、重排、取代等）</li>
+<li>过渡态结构预测与验证</li>
+<li>反应数据库构建与高通量筛选</li>
+<li>反应性质的机器学习研究（通过 RPH_Postprocess）</li>
+</ul>
+<hr>
+<h2 id="-主要特性">✨ 主要特性</h2>
+<h3 id="v300-核心特性-dftml-分离-纯-dft-流水线">v3.0.0 核心特性 — DFT/ML 分离 & 纯 DFT 流水线</h3>
+<ul>
+<li><strong>架构拆分</strong>：RPH 现为纯 DFT 计算工具（S0-S3）。特征提取 (S4) 移至 <a href="https://github.com/yourusername/RPH<em>Postprocess">RPH</em>Postprocess</a>，ML 训练移至 <code>Training/</code></li>
+<li><strong>流水线止于 S3</strong>：DFT 流水线在 TS 优化后结束；S4 特征提取通过 <code>rph-features extract --rph-run &lt;work_dir&gt;</code> 外部运行</li>
+<li><strong>S0 机理分类器</strong>：可选的机理分类和非对映体比率 (DR) 分支规划</li>
+<li><strong>S1 锚定/构象搜索</strong>：UCE v3.1 双阶段构象引擎，支持协议感知漏斗（ext/default/lite/zero）</li>
+<li><strong>S2 逆向扫描</strong>：基于 SMARTS 的成键检测 + xTB 约束扫描 + Gau_XTB TS 预优化</li>
+<li><strong>S3 TS 优化</strong>：Berny + QST2 救援 + IRC 验证 + 双层级 SP 矩阵（B3LYP→wB97X-D3BJ）</li>
+<li><strong>断点/恢复</strong>：基于哈希校验的步骤级持久化与部分恢复</li>
+</ul>
+<h3 id="前期版本历史v6x-时代">前期版本历史（v6.x 时代）</h3>
+<ul>
+<li>简化的 S4 模块：仅负责特征提取，不执行 QC 计算</li>
+<li>固定输出格式：features<em>raw.csv、features</em>mlr.csv、feature_meta.json</li>
+<li>NBO 默认关闭，可按需启用</li>
+<li>改进了错误处理和日志记录</li>
+</ul>
+<h3 id="技术亮点">技术亮点</h3>
+<ul>
+<li><strong>分子自治架构</strong>：每个分子独立管理其计算目录（<code>S1_ConfGeneration/[Molecule]/</code>）</li>
+<li><strong>OPT-SP 耦合循环</strong>：几何优化与单点能计算智能耦合，提高收敛成功率</li>
+<li><strong>路径兼容性</strong>：自动处理不同版本的目录结构，保证向后兼容</li>
+<li><strong>沙盒隔离执行</strong>：每个量子化学任务在独立沙盒中运行，避免文件冲突</li>
+</ul>
+<hr>
+<h2 id="项目结构">项目结构</h2>
+<pre><code>ReactionProfileHunter/
+├── rph_core/              # 核心源码 — 仅使用绝对导入
+│   ├── orchestrator.py    # 主流水线 + CLI（ReactionProfileHunter 类）
+│   ├── __main__.py        # python -m rph_core 入口
+│   ├── scheduling/        # 批处理调度与任务编排
+│   ├── steps/             # S1-S3 步骤实现
+│   │   ├── anchor/            # S1 锚定阶段：构象路由
+│   │   ├── conformer_search/  # S1 UCE v3.1 双阶段构象引擎
+│   │   ├── mechanism_classifier/  # S0 机理分类
+│   │   ├── step2_retro/       # S2 逆向扫描（SMARTS + xTB scan）
+│   │   └── step3_opt/         # S3 TS 优化与救援
+│   └── utils/             # 41 个 QC/IO/检查点工具文件
+│       ├── qc_interface.py     # 所有 QC 调用均经由此处
+│       ├── checkpoint_manager.py   # 基于哈希校验的步骤恢复
+│       └── thermo/             # 热化学工具
+├── bin/                  # CLI 封装（sys.path + main()）
+│   ├── rph_run           # 主入口
+│   └── rph               # 短别名
+├── config/               # 运行时配置（唯一数据源）
+│   ├── defaults.yaml     # 所有配置键
+│   └── templates/        # Gaussian .gjf/.com 模板
+├── tests/                # pytest 测试套件（约 82 个文件）
+│   ├── conftest.py       # 将仓库根目录加入 sys.path
+│   ├── tmp_v2_2_test/    # 已提交的 S1 测试夹具（请勿删除）
+│   └── fixtures/         # 静态测试数据
+├── scripts/              # 工具脚本与 CI 工具
+│   ├── ci/check_imports.py   # 导入风格检查门控
+│   ├── run_g16_worker.sh     # Gaussian 封装
+│   └── *.py / *.sh           # 数据构建、回填、分析
+├── rph_benchmark/        # 独立评估套件
+│   ├── confsearch/       # 构象搜索协议基准测试
+│   └── dft_theory/       # DFT 方法基准测试（9 个阶段脚本）
+├── docs/                 # 设计文档与分析报告
+│   └── archive/          # 历史 v2.x 文档（已冻结）
+├── AGENTS.md             # 智能体编码指南（15 个文件的层级结构）
+├── README.md             # 英文版
+└── README.zh-CN.md       # ← 当前文档</code></pre>
+<hr>
+<h2 id="-快速开始">🚀 快速开始</h2>
+<h3 id="系统要求">系统要求</h3>
+<table>
+<thead><tr>
+<th>组件</th>
+<th>要求</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>操作系统</strong></td>
+<td>Linux (推荐 Ubuntu 20.04+, CentOS 7+)</td>
+</tr>
+<tr>
+<td><strong>Python</strong></td>
+<td>3.8 或更高版本</td>
+</tr>
+<tr>
+<td><strong>内存</strong></td>
+<td>至少 16 GB（推荐 64 GB）</td>
+</tr>
+<tr>
+<td><strong>CPU</strong></td>
+<td>多核处理器（推荐 16 核以上）</td>
+</tr>
+</tbody></table>
+<h3 id="依赖的量子化学软件">依赖的量子化学软件</h3>
+<p>至少需要安装以下<strong>一组</strong>软件：</p>
+<p><strong>选项 1：Gaussian 方案</strong></p>
+<ul>
+<li><a href="https://gaussian.com/">Gaussian 16</a> - 几何优化</li>
+<li><a href="https://github.com/grimme-lab/xtb">xTB</a> - 预优化（可选但推荐）</li>
+<li><a href="https://github.com/crest-lab/crest">CREST</a> - 构象搜索（可选）</li>
+</ul>
+<p><strong>选项 2：ORCA 方案</strong></p>
+<ul>
+<li><a href="https://orcaforum.kofo.mpg.de/">ORCA</a> - 几何优化与单点能</li>
+<li><a href="https://github.com/grimme-lab/xtb">xTB</a> - 预优化（可选但推荐）</li>
+<li><a href="https://github.com/crest-lab/crest">CREST</a> - 构象搜索（可选）</li>
+</ul>
+<p><strong>选项 3：混合方案（推荐）</strong></p>
+<ul>
+<li>Gaussian 16 - 几何优化</li>
+<li>ORCA - 高精度单点能计算</li>
+<li>xTB + CREST - 预优化与构象搜索</li>
+</ul>
+<h3 id="安装">安装</h3>
+<ol>
+<li><strong>克隆仓库</strong></li>
+</ol>
+<pre><code class="language-bash">   git clone https://github.com/yourusername/ReactionProfileHunter.git
+   cd ReactionProfileHunter</code></pre>
+<ol>
+<li><strong>安装 Python 依赖（若已配置打包文件）</strong></li>
+</ol>
+<pre><code class="language-bash">   pip install -e .</code></pre>
+<ol>
+<li><strong>配置量子化学软件路径</strong></li>
+</ol>
+<p>编辑 <code>config/defaults.yaml</code>，填入已安装软件的路径：</p>
+<pre><code class="language-yaml">   executables:
+     gaussian:
+       path: &quot;/path/to/g16/g16&quot;
+       root: &quot;/path/to/g16&quot;
+       profile: &quot;/path/to/g16/g16.profile&quot;
+     orca:
+       path: &quot;/path/to/orca/orca&quot;
+       ld_library_path: &quot;/path/to/orca&quot;
+     xtb:
+       path: &quot;/path/to/xtb/bin/xtb&quot;
+     crest:
+       path: &quot;/path/to/crest/crest&quot;</code></pre>
+<ol>
+<li><strong>验证安装</strong></li>
+</ol>
+<pre><code class="language-bash">   python -m pytest -q</code></pre>
+<h3 id="基础使用">基础使用</h3>
+<h4 id="方式-1命令行直接运行推荐新手">方式 1：命令行直接运行（推荐新手）</h4>
+<pre><code class="language-bash"># 使用 SMILES 字符串运行单个反应
+bin/rph_run --smiles &quot;C=C(C)C(=O)O&quot; --output ./Output/rx_manual
+
+# 指定反应类型/配置档
+bin/rph_run --smiles &quot;C=C(C)C(=O)O&quot; --reaction-type &quot;[4+3]_default&quot; --output ./Output/rx_4p3</code></pre>
+<p>支持的反应类型：</p>
+<ul>
+<li><code>[5+2]_default</code> - 5+2 环加成 (retro_scan，默认)</li>
+<li><code>[4+3]_default</code> - 4+3 环加成 (retro_scan)</li>
+<li><code>[4+2]_default</code> - Diels-Alder 反应 (retro_scan)</li>
+<li><code>[3+2]_default</code> - 1,3-偶极环加成 (retro_scan)</li>
+</ul>
+<p><code>rx_id</code> 来自配置（<code>run.single.rx_id</code>）或数据集的 ID 列。</p>
+<h4 id="方式-2配置文件驱动推荐批量运行">方式 2：配置文件驱动（推荐批量运行）</h4>
+<ol>
+<li>编辑 <code>config/defaults.yaml</code> 中的 <code>run</code> 部分：</li>
+</ol>
+<pre><code class="language-yaml">   run:
+     source: single
+     single:
+       product_smiles: &quot;C=C(C)C(=O)O&quot;
+       rx_id: &quot;rx_001&quot;</code></pre>
+<ol>
+<li>运行流水线：</li>
+</ol>
+<pre><code class="language-bash">   bin/rph_run</code></pre>
+<h4 id="方式-3python-api">方式 3：Python API</h4>
+<pre><code class="language-python">from pathlib import Path
+from rph_core.orchestrator import ReactionProfileHunter
+
+# 初始化
+hunter = ReactionProfileHunter(config_path=&quot;config/defaults.yaml&quot;)
+
+# 运行单个反应
+result = hunter.run_pipeline(
+    product_smiles=&quot;C=C(C)C(=O)O&quot;,
+    work_dir=Path(&quot;./Output/rx_001&quot;)
+)
+
+# 检查结果
+if result.success:
+    print(f&quot;✅ 成功！S3 输出位于 {result.work_dir}&quot;)
+    print(f&quot;通过 RPH_Postprocess 执行特征提取&quot;)
+else:
+    print(f&quot;❌ 失败：{result.error_message}&quot;)</code></pre>
+<h4 id="入口方式汇总">入口方式汇总</h4>
+<table>
+<thead><tr>
+<th>方式</th>
+<th>命令</th>
+<th>说明</th>
+</tr></thead><tbody>
+<tr>
+<td>CLI 脚本</td>
+<td><code>bin/rph_run --smiles &quot;...&quot;</code></td>
+<td>自动将仓库根目录加入 <code>sys.path</code></td>
+</tr>
+<tr>
+<td>短别名</td>
+<td><code>bin/rph --smiles &quot;...&quot;</code></td>
+<td>与 <code>rph_run</code> 功能相同</td>
+</tr>
+<tr>
+<td>Python 模块</td>
+<td><code>python -m rph_core --smiles &quot;...&quot;</code></td>
+<td>相同参数，依赖 Python 路径</td>
+</tr>
+<tr>
+<td>程序化调用</td>
+<td><code>ReactionProfileHunter().run_pipeline()</code></td>
+<td>完全控制，返回 <code>PipelineResult</code></td>
+</tr>
+</tbody></table>
+<hr>
+<h2 id="-详细文档">📖 详细文档</h2>
+<h3 id="架构概述">架构概述</h3>
+<p>ReactionProfileHunter 采用<strong>串行三步 DFT 流水线</strong>（S1-S3），特征提取 (S4) 由配套的 <a href="https://github.com/yourusername/RPH<em>Postprocess">RPH</em>Postprocess</a> 包作为外部后处理步骤运行：</p>
+<pre><code>SMILES → S0 (分类) → S1 (锚定) → S2 (扫描) → S3 (TS 优化)
+         mechanism_     product_     ts_guess     ts_final
+         summary.json   min.xyz      intermediate  sp_report
+                                      .xyz
+                                    
+                                     ──→ S4 (外部) → features_raw.csv
+                                                      features_mlr.csv
+                                                      feature_meta.json</code></pre>
+<ul>
+<li><strong>S0（可选）</strong>：机理分类 — 构建反应图，识别环加成模式（[4+3]、[5+2] 等）、拓扑结构和成键/断键关系。S0 失败时，S2 自动回退到 SMARTS 检测。</li>
+<li><strong>S1</strong>：锚定/构象搜索 — UCE v3.1 双阶段构象引擎（GFN0→GFN2→DFT），为每个分子生成全局最低能量结构。</li>
+<li><strong>S2</strong>：逆向扫描 — 基于 SMARTS 的成键检测 + xTB 约束扫描 + Gau_XTB TS 预优化。</li>
+<li><strong>S3</strong>：TS 优化 — Berny（主策略）→ QST2 救援（失败时）→ 可选的 IRC。通过收敛检查和虚频一致性验证。</li>
+<li><strong>S4（外部）</strong>：特征提取由配套的 <a href="https://github.com/yourusername/RPH<em>Postprocess">RPH</em>Postprocess</a> 包完成。</li>
+</ul>
+<p><strong>步骤间数据传递</strong>（由编排器连接）：</p>
+<ul>
+<li>S0→S1: <code>mechanism_summary.json</code>（forming<em>bonds, reaction</em>type）</li>
+<li>S1→S2: <code>product_min.xyz</code>（路径）、<code>e_sp</code>（浮点数）、fchk/log/thermo</li>
+<li>S2→S3: <code>ts_guess.xyz</code>、<code>intermediate.xyz</code>、forming_bonds 索引</li>
+<li>S3→S4（外部）：<code>ts_final.xyz</code>、sp<em>report、fchk/log 文件、forming</em>bonds 元数据</li>
+</ul>
+<h4 id="各步骤详解">各步骤详解</h4>
+<table>
+<thead><tr>
+<th>步骤</th>
+<th>功能</th>
+<th>核心模块</th>
+<th>关键输出</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>S0</strong></td>
+<td>可选机理分类；DR 分支规划</td>
+<td><code>steps/mechanism_classifier/</code></td>
+<td><code>mechanism_summary.json</code></td>
+</tr>
+<tr>
+<td><strong>S1</strong></td>
+<td>从 SMILES 生成 3D 结构<br>构象搜索<br>DFT 优化</td>
+<td><code>steps/anchor/</code><br><code>steps/conformer_search/</code></td>
+<td><code>product_min.xyz</code><br><code>precursor_min.xyz</code></td>
+</tr>
+<tr>
+<td><strong>S2</strong></td>
+<td>逆向扫描<br>生成 TS 初猜<br>生成中间体结构</td>
+<td><code>steps/step2_retro/</code><br>(retro_scan)</td>
+<td><code>ts_guess.xyz</code><br><code>intermediate.xyz</code></td>
+</tr>
+<tr>
+<td><strong>S3</strong></td>
+<td>TS 优化与频率分析<br>反应物优化<br>救援策略</td>
+<td><code>steps/step3_opt/</code></td>
+<td><code>ts_final.xyz</code><br>S3<em>intermediate</em>opt/</td>
+</tr>
+<tr>
+<td><strong>S4</strong></td>
+<td>（外部）能量提取<br>几何特征计算<br>NBO/FMO 分析</td>
+<td>RPH<em>Postprocess/rph</em>features/</td>
+<td><code>features_raw.csv</code><br><code>feature_meta.json</code></td>
+</tr>
+</tbody></table>
+<h3 id="输入输出规范">输入/输出规范</h3>
+<h4 id="必需输入">必需输入</h4>
+<ul>
+<li><strong>产物 SMILES 字符串</strong>：例如 <code>&quot;C=C(C)C(=O)O&quot;</code></li>
+<li><strong>反应 ID</strong>（可选）：用于标识反应，自动生成或手动指定</li>
+</ul>
+<h4 id="严格输出契约">严格输出契约</h4>
+<p>RPH 遵循<strong>严格的步骤输出契约</strong>，每个步骤必须生成指定的文件：</p>
+<p><strong>S1 输出（必需）</strong></p>
+<ul>
+<li><code>S1_ConfGeneration/product/product_min.xyz</code></li>
+<li><code>S1_ConfGeneration/precursor/precursor_min.xyz</code>（可选）</li>
+</ul>
+<p><strong>S2 输出（必需，两者缺一不可）</strong></p>
+<ul>
+<li><code>S2_Retro/ts_guess.xyz</code> - TS 初猜结构</li>
+<li><code>S2_Retro/intermediate.xyz</code> - 反应中间体（旧名：<code>reactant_complex.xyz</code>）</li>
+</ul>
+<p><strong>S3 输出（必需）</strong></p>
+<ul>
+<li><code>S3_TransitionAnalysis/ts_final.xyz</code> - 优化后的 TS 结构</li>
+<li><code>S3_TransitionAnalysis/reactant_sp.xyz</code> - 标准反应物几何</li>
+<li><code>S3_TransitionAnalysis/S3_intermediate_opt/</code> - OPT+Freq 运行目录（旧名：<code>S3_Intermediate/</code>）</li>
+<li><code>S3_TransitionAnalysis/L2_SP/</code> - TS 上的高级单点能</li>
+</ul>
+<p><strong>S4 输出（外部 — 由 RPH_Postprocess 生成）</strong></p>
+<ul>
+<li><code>S4_Data/features_raw.csv</code> - 原始特征（包含所有计算值）</li>
+<li><code>S4_Data/features_mlr.csv</code> - 机器学习特征（标准化）</li>
+<li><code>S4_Data/feature_meta.json</code> - 特征元数据（版本、溯源等）</li>
+</ul>
+<p><strong>S4 可选输出（NBO）</strong></p>
+<ul>
+<li><code>S4_Data/qc_nbo.37</code> - NBO 分析文件（由 RPH_Postprocess 从 S3 收集）</li>
+</ul>
+<h4 id="输出目录示例">输出目录示例</h4>
+<pre><code>Output/rx_001/
+├── S1_ConfGeneration/
+│   ├── product/
+│   │   ├── product_min.xyz
+│   │   ├── crest/              # CREST 构象输出
+│   │   ├── xtb/                # xTB 阶段（GFN0→GFN2）
+│   │   └── finalDFT/           # DFT OPT+SP 结果
+│   └── precursor/
+│       └── precursor_min.xyz
+├── S2_Retro/
+│   ├── ts_guess.xyz
+│   └── intermediate.xyz        # （旧名：reactant_complex.xyz）
+├── S3_TransitionAnalysis/
+│   ├── ts_final.xyz
+│   ├── ts_opt/berny/           # 主策略 Berny 尝试
+│   ├── ts_opt/qst2_rescue/     # QST2 救援（Berny 失败时）
+│   ├── S3_intermediate_opt/    # 中间体 DFT 优化
+│   ├── L2_SP/                  # wB97X-D3BJ 单点能
+│   └── irc/                    # 可选 IRC
+├── S4_Data/                    # ← 由 RPH_Postprocess 生成
+│   ├── features_raw.csv
+│   ├── features_mlr.csv
+│   ├── feature_meta.json
+│   └── qc_nbo.37               # 可选
+└── rph.log</code></pre>
+<p><code>S4_Data/</code> 目录通过在输出树结构上运行 RPH_Postprocess 生成：</p>
+<pre><code class="language-bash">rph-features extract --rph-run ./Output/rx_001 --output ./Output/rx_001/S4_Data</code></pre>
+<h3 id="配置指南">配置指南</h3>
+<h4 id="核心配置项">核心配置项</h4>
+<p><strong>1. 量子化学软件路径</strong> (<code>executables</code>)</p>
+<pre><code class="language-yaml">executables:
+  gaussian:
+    path: &quot;/root/g16/g16&quot;
+    use_wrapper: true
+    wrapper_path: &quot;./scripts/run_g16_worker.sh&quot;</code></pre>
+<p><strong>2. 计算资源</strong> (<code>resources</code>)</p>
+<pre><code class="language-yaml">resources:
+  mem: &quot;64GB&quot;       # 总内存
+  nproc: 16         # 并行核数
+  orca_maxcore_safety: 0.8  # ORCA 内存安全系数</code></pre>
+<p><strong>3. 理论水平</strong> (<code>theory</code>)</p>
+<pre><code class="language-yaml">  # xTB 预优化（推荐开启）
+  preoptimization:
+    enabled: true
+    gfn_level: 2
+    overlap_threshold: 1.0  # A
+
+  # 几何优化
+  optimization:
+    method: B3LYP
+    basis: def2-SVP
+    dispersion: GD3BJ
+    engine: gaussian
+
+  # 高精度单点能
+  single_point:
+    method: wB97X-D3BJ
+    basis: def2-TZVPP
+    engine: orca</code></pre>
+<p><strong>5. 反应配置 profiles</strong> (<code>reaction_profiles</code>) - 新增</p>
+<pre><code class="language-yaml">reaction_profiles:
+  &quot;[4+3]_default&quot;:
+    forming_bond_count: 2
+    s2_strategy: retro_scan         # 使用 Step2 逆向扫描
+    scan:
+      scan_start_distance: 1.8      # 初始键长 (Å)
+      scan_end_distance: 3.2       # 终止键长 (Å)
+      scan_steps: 20                # 扫描步数
+      scan_mode: concerted          # 或 &quot;sequential&quot;
+      scan_force_constant: 0.5      # 约束力常数
+
+  &quot;[4+2]_default&quot;:
+    forming_bond_count: 2
+    s2_strategy: retro_scan
+    scan:
+      scan_start_distance: 2.0
+      scan_end_distance: 3.5
+      scan_steps: 15
+
+  &quot;[5+2]_default&quot;:
+    forming_bond_count: 2
+    s2_strategy: retro_scan         # 传统逆向扫描
+
+  &quot;_universal&quot;:
+    forming_bond_count: 2
+    s2_strategy: retro_scan
+    scan:
+      scan_start_distance: 2.2
+      scan_end_distance: 3.5</code></pre>
+<p><strong>4. 优化控制</strong> (<code>optimization_control</code>)</p>
+<pre><code class="language-yaml">optimization_control:
+  max_cycles: 100
+  convergence:
+    level: normal  # loose, normal, tight, verytight
+  hessian:
+    initial: calcfc
+    recalc_every: 10</code></pre>
+<h4 id="配置文件位置">配置文件位置</h4>
+<ul>
+<li><strong>主配置</strong>：<code>config/defaults.yaml</code> - 所有默认参数</li>
+<li><strong>模板</strong>：<code>config/templates/</code> - Gaussian/ORCA 输入模板</li>
+<li><strong>环境变量</strong>：可通过环境变量覆盖路径配置</li>
+</ul>
+<hr>
+<h2 id="基准测试套件">基准测试套件</h2>
+<p>RPH 包含独立的基准测试套件 <code>rph_benchmark/</code>，用于协议和方法评估：</p>
+<h3 id="构象搜索基准测试rph_benchmarkconfsearch">构象搜索基准测试（<code>rph_benchmark/confsearch/</code>）</h3>
+<p>比较 CREST/xTB 协议变体（双阶段 vs 单阶段、能量窗口）：</p>
+<pre><code class="language-bash">bash rph_benchmark/confsearch/run.sh --all
+python -m rph_benchmark.confsearch.evaluate</code></pre>
+<h3 id="dft-理论水平基准测试rph_benchmarkdft_theory">DFT 理论水平基准测试（<code>rph_benchmark/dft_theory/</code>）</h3>
+<p>多阶段流水线：迁移构象种子 → 运行基线 → 基准几何 + SP → 计算修正 → 生成报告：</p>
+<pre><code class="language-bash">bash rph_benchmark/dft_theory/run.sh --stage all</code></pre>
+<p>阶段包括：migrate、baseline、geo<em>benchmark、sp</em>benchmark、shermo_correction 等。</p>
+<blockquote>
+<p><strong>注意</strong>：基准测试结果存储在 <code>rph_benchmark/logs/</code> 中。请勿将大型结果文件提交到 git。 详见 <a href="rph_benchmark/AGENTS.md"><code>rph_benchmark/AGENTS.md</code></a> 获取完整的基准测试文档。</p>
+</blockquote>
+<h3 id="高级用法">高级用法</h3>
+<h4 id="批量运行">批量运行</h4>
+<p>创建 TSV 文件 <code>reactions.tsv</code>：</p>
+<pre><code class="language-tsv">rx_id	product_smiles	precursor_smiles
+rx_001	C=C(C)C(=O)O	C=C(C)C(=O)OC
+rx_002	CC(=O)OC	CC(=O)Cl</code></pre>
+<p>在 <code>config/defaults.yaml</code> 中配置：</p>
+<pre><code class="language-yaml">run:
+  source: batch
+  batch:
+    input_file: &quot;reactions.tsv&quot;
+    smiles_column: &quot;product_smiles&quot;</code></pre>
+<p>运行：</p>
+<pre><code class="language-bash">bin/rph_run</code></pre>
+<h4 id="数据集模式">数据集模式</h4>
+<pre><code class="language-yaml">run:
+  source: dataset
+  dataset:
+    format: &quot;csv&quot;
+    path: &quot;data/reaxys_cleaned.csv&quot;
+    product_smiles_col: &quot;product_smiles_main&quot;
+    id_col: &quot;rx_id&quot;
+    delimiter: &quot;,&quot;</code></pre>
+<h4 id="断点恢复">断点恢复</h4>
+<p>如果计算意外中断，重新运行相同命令即可继续：</p>
+<pre><code class="language-bash">bin/rph_run --smiles &quot;C=C(C)C(=O)O&quot; --output ./Output/rx_001</code></pre>
+<p>通过配置控制恢复策略：</p>
+<pre><code class="language-yaml">run:
+  resume: true
+  resume_rehydrate: true
+  resume_rehydrate_policy: best_effort</code></pre>
+<h4 id="自定义参数">自定义参数</h4>
+<p>创建自定义配置并通过 <code>--config</code> 使用：</p>
+<pre><code class="language-bash">bin/rph_run --config config/custom.yaml</code></pre>
+<p>示例覆盖：</p>
+<pre><code class="language-yaml">theory:
+  optimization:
+    method: M06-2X
+resources:
+  nproc: 32</code></pre>
+<h4 id="启用-nbo-分析">启用 NBO 分析</h4>
+<p><strong>方式 1：配置文件</strong></p>
+<pre><code class="language-yaml">step3:
+  reactant_opt:
+    enable_nbo: true  # 在反应物 OPT+Freq 中启用 NBO</code></pre>
+<p><strong>NBO 文件收集规则</strong>（由 RPH_Postprocess 执行）：</p>
+<ul>
+<li>自动搜索 <code>S3_TransitionAnalysis</code> 的以下子目录：</li>
+<li><code>nbo_analysis/</code></li>
+<li><code>nbo/</code></li>
+<li><code>S3_intermediate_opt/standard/</code></li>
+<li><code>S3_intermediate_opt/rescue/</code></li>
+<li>识别文件扩展名：<code>*.37</code>, <code>*.nbo</code>, <code>*.nbo7</code></li>
+</ul>
+<hr>
+<h2 id="-测试">🧪 测试</h2>
+<h3 id="运行测试">运行测试</h3>
+<pre><code class="language-bash"># 运行全部测试
+pytest -v tests/
+
+# 运行单个测试文件
+pytest tests/test_s4_no_qc_execution.py -v
+
+# 运行单个测试函数
+pytest tests/test_s4_no_qc_execution.py::test_extractor_degrades_gracefully -v
+
+# 快速 CI 检查（导入测试 + 无 QC 测试）
+pytest tests/test_imports_step4_features.py tests/test_s4_no_qc_execution.py -v
+
+# 仅运行 S4 合同测试
+pytest tests/test_s4_*.py tests/test_m2_*.py tests/test_m4_*.py -v
+
+# 测试覆盖率
+pytest --cov=rph_core --cov-report=html</code></pre>
+<h3 id="导入风格检查ci-门控">导入风格检查（CI 门控）</h3>
+<pre><code class="language-bash"># 检查多点多级相对导入（违规时退出码 1）
+python scripts/ci/check_imports.py rph_core</code></pre>
+<h3 id="注意事项">注意事项</h3>
+<ul>
+<li><code>tests/conftest.py</code> 自动将仓库根目录添加到 <code>sys.path</code>，无需可编辑安装即可运行测试</li>
+<li>集成测试使用 mock 量子化学计算，不需要真实的 Gaussian/ORCA</li>
+<li>详见 <a href="tests/AGENTS.md">tests/AGENTS.md</a> 了解测试组织方式</li>
+</ul>
+<hr>
+<h2 id="-故障排查">🐛 故障排查</h2>
+<h3 id="常见问题">常见问题</h3>
+<h4 id="1-gaussian-找不到可执行文件">1. Gaussian 找不到可执行文件</h4>
+<p><strong>错误信息</strong>：</p>
+<pre><code>FileNotFoundError: Gaussian executable not found: /root/g16/g16</code></pre>
+<p><strong>解决方案</strong>：</p>
+<ul>
+<li>检查 <code>config/defaults.yaml</code> 中的 <code>executables.gaussian.path</code> 是否正确</li>
+<li>确认已安装 Gaussian 并设置环境变量</li>
+<li>尝试直接运行 <code>g16 &lt; test.gjf</code> 测试 Gaussian 是否可用</li>
+</ul>
+<h4 id="2-内存不足导致计算崩溃">2. 内存不足导致计算崩溃</h4>
+<p><strong>错误信息</strong>：</p>
+<pre><code>Error termination via Lnk1e in /root/g16/g16</code></pre>
+<p><strong>解决方案</strong>：</p>
+<ul>
+<li>降低 <code>resources.mem</code> 和 <code>resources.nproc</code></li>
+<li>使用更小的基组（如 <code>def2-SVP</code> → <code>6-31G*</code>）</li>
+<li>启用 ORCA 的 <code>maxcore</code> 限制</li>
+</ul>
+<h4 id="3-构象搜索找不到低能构象">3. 构象搜索找不到低能构象</h4>
+<p><strong>错误信息</strong>：</p>
+<pre><code>ConformerSearchError: No conformers found below energy threshold</code></pre>
+<p><strong>解决方案</strong>：</p>
+<ul>
+<li>增加 CREST 的采样时间</li>
+<li>调整能量窗口阈值</li>
+<li>检查输入 SMILES 是否正确</li>
+</ul>
+<h4 id="4-ts-优化失败">4. TS 优化失败</h4>
+<p><strong>错误信息</strong>：</p>
+<pre><code>TSOptimizationError: TS optimization failed after 5 attempts</code></pre>
+<p><strong>解决方案</strong>：</p>
+<ul>
+<li>检查 <code>ts_guess.xyz</code> 是否合理（虚频数量、几何结构）</li>
+<li>启用救援策略（自动）</li>
+<li>手动调整 TS 初猜结构</li>
+</ul>
+<h4 id="5-特征提取缺失-nbo-数据">5. 特征提取缺失 NBO 数据</h4>
+<p><strong>错误信息</strong>：</p>
+<pre><code>Warning: NBO file not found in S3 subdirectories</code></pre>
+<p><strong>解决方案</strong>：</p>
+<ul>
+<li>确认已启用 <code>step3.reactant_opt.enable_nbo: true</code></li>
+<li>检查 <code>S3_TransitionAnalysis/S3_intermediate_opt/standard/</code> 中是否有 <code>*.37</code> 或 <code>*.nbo</code> 文件</li>
+<li>查看 Gaussian/ORCA 输出日志，确认 NBO 计算成功</li>
+</ul>
+<h3 id="日志文件">日志文件</h3>
+<p>所有运行日志保存在 <code>Output/[rx_id]/rph.log</code>，包含：</p>
+<ul>
+<li>每个步骤的详细执行信息</li>
+<li>量子化学计算的标准输出/错误</li>
+<li>异常堆栈跟踪</li>
+</ul>
+<p>查看日志：</p>
+<pre><code class="language-bash">tail -f Output/rx_001/rph.log</code></pre>
+<h3 id="调试模式">调试模式</h3>
+<p>启用详细日志：</p>
+<pre><code class="language-bash">bin/rph_run --smiles &quot;...&quot; --log-level DEBUG</code></pre>
+<h3 id="获取帮助">获取帮助</h3>
+<p>如果问题仍未解决：</p>
+<ol>
+<li>查看 <a href="https://github.com/yourusername/ReactionProfileHunter/issues">GitHub Issues</a></li>
+<li>附上完整错误日志和配置文件</li>
+<li>提供最小可复现示例</li>
+</ol>
+<hr>
+<h2 id="-进阶阅读">📚 进阶阅读</h2>
+<h3 id="文档索引">文档索引</h3>
+<table>
+<thead><tr>
+<th>文档</th>
+<th>内容</th>
+</tr></thead><tbody>
+<tr>
+<td><a href="AGENTS.md"><code>AGENTS.md</code></a></td>
+<td><strong>智能化编程指南</strong> — 构建/测试命令、代码规范、约定</td>
+</tr>
+<tr>
+<td><a href="rph_core/AGENTS.md"><code>rph_core/AGENTS.md</code></a></td>
+<td>核心包架构与代码地图</td>
+</tr>
+<tr>
+<td><a href="rph_core/steps/AGENTS.md"><code>rph_core/steps/AGENTS.md</code></a></td>
+<td>步骤架构与输出契约</td>
+</tr>
+<tr>
+<td><a href="rph_core/utils/AGENTS.md"><code>rph_core/utils/AGENTS.md</code></a></td>
+<td>41 个 QC/IO/检查点工具文件参考</td>
+</tr>
+<tr>
+<td><a href="config/AGENTS.md"><code>config/AGENTS.md</code></a></td>
+<td>配置文件结构说明</td>
+</tr>
+<tr>
+<td><a href="tests/AGENTS.md"><code>tests/AGENTS.md</code></a></td>
+<td>测试组织与约定</td>
+</tr>
+<tr>
+<td><a href="scripts/AGENTS.md"><code>scripts/AGENTS.md</code></a></td>
+<td>脚本与 CI 工具说明</td>
+</tr>
+<tr>
+<td><a href="docs/AGENTS.md"><code>docs/AGENTS.md</code></a></td>
+<td>设计文档目录与归档约定</td>
+</tr>
+<tr>
+<td><a href="rph_benchmark/AGENTS.md"><code>rph_benchmark/AGENTS.md</code></a></td>
+<td>基准测试套件文档</td>
+</tr>
+<tr>
+<td><a href="docs/DUAL<em>LEVEL</em>STRATEGY_SUMMARY.md"><code>docs/DUAL_LEVEL_STRATEGY_SUMMARY.md</code></a></td>
+<td>双层级计算策略详解</td>
+</tr>
+<tr>
+<td><a href="docs/QUICK<em>START</em>DUAL_LEVEL.md"><code>docs/QUICK_START_DUAL_LEVEL.md</code></a></td>
+<td>双层级计算快速上手</td>
+</tr>
+<tr>
+<td><a href="docs/BUGFIX<em>STEP3</em>QCRESULT.md"><code>docs/BUGFIX_STEP3_QCRESULT.md</code></a></td>
+<td>S3 QCResult 重构说明</td>
+</tr>
+<tr>
+<td><a href="docs/S4<em>FEATURES</em>SUMMARY.md"><code>docs/S4_FEATURES_SUMMARY.md</code></a></td>
+<td>S4 特征提取功能总结</td>
+</tr>
+<tr>
+<td><a href="docs/TESTING_GUIDE.md"><code>docs/TESTING_GUIDE.md</code></a></td>
+<td>测试指南与环境准备</td>
+</tr>
+<tr>
+<td><a href="docs/AGENTS.md"><code>docs/AGENTS.md</code></a></td>
+<td>设计文档目录与归档约定</td>
+</tr>
+</tbody></table>
+<h3 id="学术引用">学术引用</h3>
+<p>如果您在研究中使用 ReactionProfileHunter，请引用：</p>
+<pre><code class="language-bibtex">@software{reactionprofilehunter2025,
+  title = {ReactionProfileHunter: Automated Reaction Mechanism Exploration},
+  author = {Your Name},
+  year = {2025},
+  url = {https://github.com/yourusername/ReactionProfileHunter},
+  version = {3.0.0}
+}</code></pre>
+<h3 id="相关资源">相关资源</h3>
+<ul>
+<li><strong>理论背景</strong>：</li>
+<li>Houk 课题组的计算化学方法论（推荐阅读）</li>
+<li>Grimme 的 GFN-xTB 方法论文</li>
+<li>wB97X-D3 泛函性能评估</li>
+</ul>
+<ul>
+<li><strong>工具文档</strong>：</li>
+<li><a href="https://gaussian.com/man/">Gaussian 16 用户手册</a></li>
+<li><a href="https://sites.google.com/site/orcainputlibrary/">ORCA 输入库</a></li>
+<li><a href="https://xtb-docs.readthedocs.io/">xTB 文档</a></li>
+</ul>
+<hr>
+<h2 id="-贡献指南">🤝 贡献指南</h2>
+<p>我们欢迎各种形式的贡献！</p>
+<h3 id="如何贡献">如何贡献</h3>
+<ol>
+<li><strong>Fork 本仓库</strong></li>
+<li><strong>创建特性分支</strong>：<code>git checkout -b feature/amazing-feature</code></li>
+<li><strong>提交更改</strong>：<code>git commit -m &#x27;Add amazing feature&#x27;</code></li>
+<li><strong>推送到分支</strong>：<code>git push origin feature/amazing-feature</code></li>
+<li><strong>提交 Pull Request</strong></li>
+</ol>
+<h3 id="代码规范">代码规范</h3>
+<ul>
+<li>使用 <strong>pathlib.Path</strong> 处理所有路径（禁止使用字符串路径）</li>
+<li>使用 <strong>logging.getLogger(<strong>name</strong>) 或 LoggerMixin</strong> 进行日志记录（核心代码中禁止 <code>print</code>）</li>
+<li>遵循 <strong>输出目录幂等性</strong>：存在可复用输出时跳过重算</li>
+<li>所有量子化学调用必须通过 <code>utils/qc_interface.py</code></li>
+<li><strong>仅使用绝对导入</strong> —— 禁止多点多级相对导入（例如使用 <code>from rph_core.utils...</code> 而非 <code>from ...utils</code>）</li>
+<li>详见 <a href="AGENTS.md">AGENTS.md</a> 了解完整编码规范</li>
+</ul>
+<h3 id="测试要求">测试要求</h3>
+<ul>
+<li>新功能必须包含单元测试</li>
+<li>所有测试必须通过：<code>python -m pytest -q</code></li>
+<li>保持测试覆盖率 > 80%</li>
+</ul>
+<h3 id="文档要求">文档要求</h3>
+<ul>
+<li>更新相关的 <code>AGENTS.md</code> 文件</li>
+<li>为新功能添加使用示例</li>
+<li>更新 <code>rph_core/version.py</code> 和 README 徽章中的版本号</li>
+</ul>
+<hr>
+<h2 id="-许可证">📄 许可证</h2>
+<p>本项目采用 <a href="LICENSE">MIT License</a> 开源协议。</p>
+<hr>
+<h2 id="-联系方式">📧 联系方式</h2>
+<ul>
+<li><strong>作者</strong>：QCcalc Team</li>
+<li><strong>邮箱</strong>：your.email@example.com</li>
+<li><strong>项目主页</strong>：https://github.com/yourusername/ReactionProfileHunter</li>
+<li><strong>问题反馈</strong>：https://github.com/yourusername/ReactionProfileHunter/issues</li>
+</ul>
+<hr>
+<h2 id="-致谢">🙏 致谢</h2>
+<ul>
+<li><strong>Houk 教授</strong>：提供双层级计算策略建议</li>
+<li><strong>Grimme 课题组</strong>：开发 xTB 和 CREST 工具</li>
+<li><strong>Gaussian 和 ORCA 开发团队</strong>：提供优秀的量子化学软件</li>
+<li><strong>社区贡献者</strong>：感谢所有提交 issue 和 PR 的朋友</li>
+</ul>
+<hr>
+<div align="center">
+<p><strong>如果觉得本项目有帮助，请给我们一个 ⭐ Star！</strong></p>
+</div>
+</div>
+</body>
+</html>

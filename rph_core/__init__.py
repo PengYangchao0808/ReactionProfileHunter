@@ -9,8 +9,6 @@ Date: 2026-01-09
 """
 
 from rph_core.version import __version__
-from rph_core.orchestrator import ReactionProfileHunter
-
 __author__ = "QCcalc Team"
 
-__all__ = ["ReactionProfileHunter", "__version__"]
+__all__ = ["__version__"]

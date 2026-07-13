@@ -27,6 +27,20 @@ rph_output/
 rph_output_backup/
 test_ui_verify/rx_manual/
 
+# Local orchestration evidence and QC scratch state
+.omo/
+*.gbw
+*.engrad
+*.hess
+*.trj
+*.xtboptok
+.xtboptok
+xtbrestart
+xtbtopo.mol
+crest_input_copy.xyz
+fake_best.xyz
+Gau-*.inp
+
 # 外部数据 (ML 来源, 不入源码树)
 external_data/
 
@@ -49,6 +63,3 @@ benchmark_shit/
 # Backup files (single-file pattern)
 *.backup_*
 
-# Compiled binaries (keep .f90 source)
-scripts/Gau_XTB/extderi
-scripts/Gau_XTB/genxyz

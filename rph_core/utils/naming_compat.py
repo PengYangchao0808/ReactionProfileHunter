@@ -5,7 +5,6 @@ INTERMEDIATE_XYZ = "intermediate.xyz"
 TS_GUESS_XYZ = "ts_guess.xyz"
 PRODUCT_XYZ = "product_min.xyz"
 PRECURSOR_XYZ = "precursor_min.xyz"
-NEUTRAL_PRECURSOR_XYZ = "neutral_precursor.xyz"
 SUBSTRATE_XYZ = "substrate.xyz"  # legacy, prefer INTERMEDIATE_XYZ
 REACTANT_COMPLEX_XYZ = INTERMEDIATE_XYZ  # deprecated alias
 

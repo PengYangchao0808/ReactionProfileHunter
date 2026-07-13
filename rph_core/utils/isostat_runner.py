@@ -62,6 +62,8 @@ def _as_wsl_unix_path(raw_path: str) -> str:
 
 
 def _iter_isostat_candidates(isostat_bin: Path):
+    from rph_core.utils.resource_utils import _KNOWN_DIRS
+
     raw_from_cfg = str(isostat_bin)
     normalized = _as_wsl_unix_path(raw_from_cfg)
 
@@ -89,13 +91,9 @@ def _iter_isostat_candidates(isostat_bin: Path):
         if which_path:
             yield Path(which_path)
 
-    for candidate in (
-        "/opt/software/molclus/isostat",
-        "/opt/molclus/isostat",
-        "/usr/local/bin/isostat",
-        "/usr/bin/isostat",
-    ):
-        yield Path(candidate)
+    for known_dir in _KNOWN_DIRS.get('isostat', []):
+        yield Path(known_dir) / "isostat"
+        yield Path(known_dir) / "bin" / "isostat"
 
 
 def _resolve_isostat_path(isostat_bin: Path) -> Optional[Path]:

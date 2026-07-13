@@ -14,7 +14,7 @@ Session: #4 - ORCAInterface.single_point()
 
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Mapping, Optional, Union, TYPE_CHECKING, Dict, Any, List
+from typing import Mapping, Optional, Union, TYPE_CHECKING, Dict, Any, List, Tuple
 import uuid
 import hashlib
 import json
@@ -24,6 +24,7 @@ import shutil
 import os
 import logging
 import numpy as np
+from numpy.typing import NDArray
 
 if TYPE_CHECKING:
     from rph_core.utils.optimization_config import OptimizationConfig
@@ -45,7 +46,7 @@ from rph_core.utils.orca_input_renderer import OrcaInputRenderer
 logger = logging.getLogger(__name__)
 
 
-def _parse_orca_angstrom_lines(coord_lines: List[str]) -> Optional[np.ndarray]:
+def _parse_orca_angstrom_lines(coord_lines: List[str]) -> Optional[NDArray[np.float64]]:
     """Parse ORCA CARTESIAN COORDINATES (ANGSTROEM) block lines into (N,3) array.
 
     ORCA angstrom coordinate lines have format: ``[element] [x] [y] [z]``.
@@ -64,7 +65,11 @@ def _parse_orca_angstrom_lines(coord_lines: List[str]) -> Optional[np.ndarray]:
     return None
 
 
-def _write_orca_xyz_file(xyz_path: Path, coords: np.ndarray, input_xyz: Optional[Path] = None) -> None:
+def _write_orca_xyz_file(
+    xyz_path: Path,
+    coords: NDArray[np.float64],
+    input_xyz: Optional[Path] = None,
+) -> None:
     """Write coordinates to a plain XYZ file, inferring element symbols from input_xyz."""
     symbols: List[str] = ["X"] * coords.shape[0]
     if input_xyz is not None and input_xyz.exists():
@@ -85,6 +90,89 @@ def _write_orca_xyz_file(xyz_path: Path, coords: np.ndarray, input_xyz: Optional
     xyz_path.write_text("\n".join(xyz_lines) + "\n", encoding="utf-8")
 
 
+def _parse_orca_displacement_vectors(content: str) -> Dict[int, NDArray[np.float64]]:
+    """Parse imaginary-frequency displacement vectors from an ORCA output file.
+
+    ORCA prints a ``CARTESIAN DISPLACEMENTS`` section after frequency
+    analysis.  Each mode is a block::
+
+        CARTESIAN DISPLACEMENTS
+        -----------
+        Mode:   0
+        Freq:   -123.45 cm**-1 (imaginary mode)
+                dx          dy          dz
+        Atom 0:  0.123456   0.234567   0.345678
+        Atom 1: -0.012345   0.023456  -0.034567
+
+    Only modes with negative (imaginary) frequencies are collected.
+
+    Returns
+    -------
+    dict[int, np.ndarray]
+        *mode_index* (0 for the first imaginary mode) → (*N_atoms*, 3) array.
+        Empty dict on parse errors or when no imaginary modes exist.
+    """
+    result: Dict[int, NDArray[np.float64]] = {}
+
+    section_match = re.search(
+        r"CARTESIAN DISPLACEMENTS\s*\n\s*-+\s*\n",
+        content,
+    )
+    if not section_match:
+        return result
+
+    section = content[section_match.end():]
+
+    imaginary_count = 0
+    for mode_block in re.split(r"\n\s*(?=Mode:\s*\d+\s*\n)", section):
+        mode_match = re.search(r"Mode:\s*(\d+)", mode_block)
+        freq_match = re.search(r"Freq:\s*([\d\.\-+Ee]+)", mode_block)
+        if not mode_match or not freq_match:
+            continue
+
+        try:
+            freq = float(freq_match.group(1))
+        except ValueError:
+            continue
+
+        if freq >= 0:
+            continue
+
+        disp_lines: List[Tuple[float, float, float]] = []
+        for line in mode_block.split("\n"):
+            atom_match = re.match(r"\s*Atom\s+\d+\s*:\s+(.*)", line)
+            if not atom_match:
+                continue
+            parts = atom_match.group(1).split()
+            if len(parts) < 3:
+                continue
+            try:
+                dx, dy, dz = float(parts[0]), float(parts[1]), float(parts[2])
+            except ValueError:
+                continue
+            disp_lines.append((dx, dy, dz))
+
+        if not disp_lines:
+            continue
+
+        n_atoms = len(disp_lines)
+        array = np.zeros((n_atoms, 3))
+        for atom_j, (dx, dy, dz) in enumerate(disp_lines):
+            array[atom_j, 0] = dx
+            array[atom_j, 1] = dy
+            array[atom_j, 2] = dz
+
+        result[imaginary_count] = array
+        imaginary_count += 1
+
+    if result:
+        logger.debug(
+            "Extracted %d imaginary-mode displacement vector(s) from ORCA output",
+            len(result),
+        )
+    return result
+
+
 class ORCAInterface:
     """ORCA 接口 - 高精度单点能计算"""
 
@@ -97,6 +185,7 @@ class ORCAInterface:
         maxcore: Optional[int] = None,
         solvent: str = "acetone",
         route_extras: str = "",
+        solvent_model: Optional[str] = None,
         orca_binary_path: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
         method_spec: Optional[Dict[str, Any]] = None,
@@ -126,6 +215,8 @@ class ORCAInterface:
             }
             if maxcore is not None:
                 raw_method_spec["maxcore"] = maxcore
+        if solvent_model:
+            raw_method_spec["solvent_model"] = solvent_model
 
         self.method_alias = str(raw_method_spec.get("method", method) or method)
         self.method_profile = MethodRegistry.get_profile(self.method_alias, engine="orca")
@@ -148,7 +239,7 @@ class ORCAInterface:
         if maxcore is None and config:
             res_cfg = config.get('resources', {})
             mem = res_cfg.get('mem', '32GB')
-            safety_factor = res_cfg.get('orca_maxcore_safety', 0.8)
+            safety_factor = res_cfg.get('orca_maxcore_safety', 0.65)
             self.maxcore = calc_orca_maxcore(mem, nprocs, safety_factor)
         else:
             self.maxcore = maxcore if maxcore is not None else 4000
@@ -163,11 +254,13 @@ class ORCAInterface:
 
         # 设置日志
         self.logger = logging.getLogger(f"{__name__}.{method}/{basis}")
+        self.config = config
 
         # SP cache (in-memory, per-process)
         self._sp_cache = {}
         self._sp_cache_hits = 0
         self._sp_cache_misses = 0
+        self._last_resolved_final_xyz: Optional[Path] = None
 
     def _pal_block(self, nprocs: Optional[int] = None) -> str:
         effective_nprocs = self.nprocs if nprocs is None else nprocs
@@ -249,7 +342,7 @@ class ORCAInterface:
         for candidate in candidates:
             if isinstance(candidate, str) and candidate.strip():
                 return candidate.strip().upper()
-        return "SMD"
+        return "CPCM"
 
     def _solvent_name_for_orca(self) -> str:
         from rph_core.utils.solvent_map import orca_smd_solvent
@@ -434,6 +527,79 @@ class ORCAInterface:
                 error_message=str(e)
             )
 
+    def optimize_with_task(
+        self,
+        xyz_file: Path,
+        output_dir: Path,
+        task_type: str,
+        charge: int,
+        spin: int,
+        geom_block: Optional[str] = None,
+        timeout: Optional[int] = None,
+        job_tag: Optional[str] = None,
+    ) -> QCResult:
+        """Run an ORCA optimization with an explicit ORCA task type."""
+        normalized_task = str(task_type or "").strip().lower()
+        if normalized_task not in {"opt", "opt_freq", "ts", "ts_freq"}:
+            raise ValueError(
+                f"Unsupported ORCA task_type={task_type!r}; "
+                "expected one of: opt, opt_freq, ts, ts_freq"
+            )
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        route = self._render_route(task_type=normalized_task)
+        cpcm_block = self._render_cpcm_block()
+        rendered_blocks = self._render_named_blocks(self.render_blocks())
+
+        if job_tag is None:
+            job_tag = uuid.uuid4().hex[:8]
+
+        base_name = f"{xyz_file.stem}_{normalized_task}_{job_tag}"
+        xyz_copy = output_dir / f"{base_name}{xyz_file.suffix}"
+        shutil.copy(xyz_file, xyz_copy)
+
+        xyz_lines = xyz_copy.read_text().split('\n')
+        if len(xyz_lines) > 2:
+            xyz_content = '\n'.join(xyz_lines[2:])
+        else:
+            xyz_content = xyz_copy.read_text()
+
+        pal_block = self._pal_block()
+        rendered_geom_block = ""
+        if geom_block and geom_block.strip():
+            rendered_geom_block = f"{geom_block.rstrip()}\n"
+
+        inp_content = f"""{route}
+ %maxcore {self.maxcore}
+ {pal_block}{cpcm_block}{rendered_blocks}
+{rendered_geom_block}  * xyz {charge} {spin}
+{xyz_content}
+  *
+"""
+
+        inp_file = output_dir / f"{base_name}.inp"
+        inp_file.write_text(inp_content)
+
+        try:
+            out_file = self._run_orca(inp_file, output_dir, timeout=timeout)
+            result = self._parse_output(out_file)
+            result.coordinates = self._extract_final_orca_coordinates(out_file, xyz_copy)
+
+            if normalized_task in {"ts", "ts_freq", "opt_freq"}:
+                result.frequencies = self._extract_frequencies_from_output(out_file)
+
+            return result
+
+        except Exception as e:
+            self.logger.error("ORCA task optimization failed (%s): %s", normalized_task, e)
+            return QCResult(
+                energy=0.0,
+                converged=False,
+                error_message=str(e)
+            )
+
     def _parse_output(self, out_file: Path) -> QCResult:
         """
         解析 ORCA 输出文件
@@ -509,6 +675,33 @@ class ORCAInterface:
             error_message=None
         )
 
+    def extract_frequencies_from_output(self, out_file: Path) -> Optional[NDArray[np.float64]]:
+        """Extract vibrational frequencies from a completed ORCA output."""
+
+        return self._extract_frequencies_from_output(out_file)
+
+    def _extract_frequencies_from_output(self, out_file: Path) -> Optional[NDArray[np.float64]]:
+        """Extract the last ORCA vibrational-frequency block from an output file."""
+        try:
+            content = out_file.read_text(encoding="utf-8", errors="ignore")
+        except OSError as exc:
+            self.logger.warning("Failed to read ORCA output for frequency extraction %s: %s", out_file, exc)
+            return None
+
+        last_freq_pos = content.rfind("VIBRATIONAL FREQUENCIES")
+        if last_freq_pos < 0:
+            return None
+
+        block_content = content[last_freq_pos:]
+        freqs = re.findall(r'[-]?\d+\.\d+(?=\s+cm\*\*-1)', block_content)
+        if not freqs:
+            return None
+
+        try:
+            return np.array([float(freq) for freq in freqs], dtype=float)
+        except ValueError:
+            return None
+
     def _resolve_orca_final_xyz(
         self,
         out_file: Path,
@@ -568,7 +761,7 @@ class ORCAInterface:
         self,
         out_file: Path,
         input_xyz: Optional[Path] = None,
-    ) -> Optional[np.ndarray]:
+    ) -> Optional[NDArray[np.float64]]:
         """Extract the LAST Cartesian coordinate block from an ORCA .out file.
 
         Prefer :meth:`_resolve_orca_final_xyz` for canonical geometry —
@@ -617,7 +810,7 @@ class ORCAInterface:
         self,
         out_file: Path,
         input_xyz: Path
-    ) -> Optional[np.ndarray]:
+    ) -> Optional[NDArray[np.float64]]:
         """Legacy wrapper — prefer :meth:`_resolve_orca_final_xyz`.
 
         Returns the coordinates as a numpy array when a final .xyz file is
@@ -628,7 +821,7 @@ class ORCAInterface:
             return self._read_xyz_coordinates(final_xyz)
         return self._extract_orca_coordinates_from_out(out_file, input_xyz)
 
-    def _read_xyz_coordinates(self, xyz_path: Path) -> Optional[np.ndarray]:
+    def _read_xyz_coordinates(self, xyz_path: Path) -> Optional[NDArray[np.float64]]:
         """Read coordinates from a plain XYZ file, returning (N,3) array."""
         try:
             from rph_core.utils.file_io import read_xyz as _io_read_xyz
@@ -663,16 +856,11 @@ class ORCAInterface:
             else:
                 logger.warning(f"提供的 ORCA 路径不存在: {provided_path}")
 
-        if config:
-            exe_config = resolve_executable_config(config, 'orca', env_vars=['ORCA_PATH', 'ORCA_BIN'])
-            logger.info(f"从配置获取 ORCA: {exe_config}")
-            if exe_config.get('found'):
-                return exe_config['path']
-
-        orca_cmd = shutil.which('orca')
-        if orca_cmd:
-            logger.info(f"从系统 PATH 找到 ORCA: {orca_cmd}")
-            return Path(orca_cmd)
+        exe_config = resolve_executable_config(
+            config or {}, 'orca', env_vars=['ORCA_PATH', 'ORCA_BIN']
+        )
+        if exe_config.get('found'):
+            return exe_config['path']
 
         logger.error("未找到 ORCA 可执行文件")
         return None
@@ -685,7 +873,18 @@ class ORCAInterface:
 
         orca_dir = self.orca_binary.parent
 
-        mpi_bin_candidates = [
+        mpi_bin_from_config: Optional[str] = None
+        mpi_lib_from_config: Optional[str] = None
+        if self.config:
+            orca_cfg = self.config.get("executables", {}).get("orca", {})
+            mpi_bin_from_config = orca_cfg.get("mpi_bin_dir")
+            mpi_lib_from_config = orca_cfg.get("mpi_lib_dir")
+
+        mpi_bin_candidates: List[Path] = []
+        if mpi_bin_from_config:
+            mpi_bin_candidates.append(Path(mpi_bin_from_config))
+            self.logger.info(f"ORCA MPI bin dir from config: {mpi_bin_from_config}")
+        mpi_bin_candidates += [
             orca_dir / "openmpi" / "bin",
             orca_dir / "mpi" / "bin",
             orca_dir / "bin",
@@ -712,6 +911,14 @@ class ORCAInterface:
                 selected_mpi_bin = candidate
                 break
 
+        # Warn if configured MPI bin dir is missing or has no mpirun
+        if mpi_bin_from_config:
+            config_path = Path(mpi_bin_from_config)
+            if not config_path.exists() or not (config_path / "mpirun").exists():
+                self.logger.warning(
+                    f"Configured MPI bin dir not found or missing mpirun: {mpi_bin_from_config}"
+                )
+
         current_path = env.get("PATH", "")
         path_parts = [p for p in current_path.split(":") if p]
         preferred_path_parts = [str(orca_dir)]
@@ -725,7 +932,11 @@ class ORCAInterface:
             ]
         )
 
-        mpi_lib_candidates = [
+        mpi_lib_candidates: List[Path] = []
+        if mpi_lib_from_config:
+            mpi_lib_candidates.append(Path(mpi_lib_from_config))
+            self.logger.info(f"ORCA MPI lib dir from config: {mpi_lib_from_config}")
+        mpi_lib_candidates += [
             orca_dir / "openmpi" / "lib",
             orca_dir / "mpi" / "lib",
             orca_dir / "lib",
@@ -849,6 +1060,8 @@ class ORCAInterface:
                         )
 
                     if process.returncode != 0:
+                        if stderr.strip():
+                            self.logger.error("ORCA stderr:\n%s", stderr[-4000:])
                         raise RuntimeError(
                             f"ORCA 运行失败 (返回码 {process.returncode})\n"
                             f"错误信息: {stderr}"
@@ -907,6 +1120,8 @@ class ORCAInterface:
 
                 # 检查返回码
                 if process.returncode != 0:
+                    if stderr.strip():
+                        self.logger.error("ORCA stderr:\n%s", stderr[-4000:])
                     raise RuntimeError(
                         f"ORCA 运行失败 (返回码 {process.returncode})\n"
                         f"错误信息: {stderr}"
@@ -1001,6 +1216,11 @@ class ORCAInterface:
             # 步骤 3: 解析输出
             self.logger.debug("  解析 ORCA 输出...")
             result = self._parse_output(out_file)
+            # Frequency jobs are routed through this entrypoint by qc_jobs.
+            # _parse_output() owns common energy parsing, so explicitly
+            # populate frequencies when the output contains a Hessian block.
+            if result.converged and result.frequencies is None:
+                result.frequencies = self._extract_frequencies_from_output(out_file)
 
             if result.converged:
                 self.logger.info(f"  ✓ 计算成功: 能量 = {result.energy:.8f} Hartree")
@@ -1193,6 +1413,7 @@ class ORCAInterface:
         # 如果没有提供 opt_config，使用默认值
         if opt_config is None:
             opt_config = OptimizationConfig()
+        assert opt_config is not None
 
         # 检查超时设置
         if timeout is None:
@@ -1408,19 +1629,14 @@ class ORCAInterface:
 
         # 提取频率 — 使用最后一个 VIBRATIONAL FREQUENCIES 块（最终收敛频率）
         # re.search() 会匹配第一个块（优化中期的中间频率），导致虚频数错误
-        frequencies = None
-        last_freq_pos = content.rfind('VIBRATIONAL FREQUENCIES')
-        if last_freq_pos >= 0:
-            block_content = content[last_freq_pos:]
-            freqs = re.findall(r'[-]?\d+\.\d+(?=\s+cm\*\*-1)', block_content)
-            frequencies = np.array([float(f) for f in freqs]) if freqs else None
+        frequencies = self._extract_frequencies_from_output(out_file)
 
         # Resolve final geometry via sibling .xyz (preferred) or .out fallback
         final_xyz_path = self._resolve_orca_final_xyz(out_file, input_xyz)
         coordinates = None
         if final_xyz_path is not None:
             coordinates = self._read_xyz_coordinates(final_xyz_path)
-            # Store the resolved xyz path so downstream code (QCTaskRunner /
+        # Store the resolved xyz path so downstream job handling can
             # benchmark) can reference the canonical geometry file directly.
             self._last_resolved_final_xyz = final_xyz_path
         elif input_xyz is not None:

@@ -1,31 +1,7 @@
+"""Lazy V4 step package.
+
+Step modules must not be imported eagerly: QC interfaces import shared step
+utilities and eager imports create circular initialization failures.
 """
-ReactionProfileHunter Steps Module - v3.0
-===================================
 
-四大核心步骤模块（分子自治架构）
-"""
-
-# v3.0: 新的 AnchorPhase 替代 step1_anchor
-try:
-    from rph_core.steps.anchor.handler import AnchorPhase
-    anchor_available = True
-except ImportError:
-    anchor_available = False
-    AnchorPhase = None
-
-from rph_core.steps.step2_retro import RetroScanner
-from rph_core.steps.step3_opt import TSOptimizer
-
-# S4 (FeatureMiner) moved to rph_features package
-
-if anchor_available:
-    __all__ = [
-        "AnchorPhase",
-        "RetroScanner",
-        "TSOptimizer",
-    ]
-else:
-    __all__ = [
-        "RetroScanner",
-        "TSOptimizer",
-    ]
+__all__ = []

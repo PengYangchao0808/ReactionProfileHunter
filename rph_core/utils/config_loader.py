@@ -7,13 +7,13 @@ Configuration Loader
 
 import yaml
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-def load_config(config_path: Path) -> Dict[str, Any]:
+def load_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     """
     加载 YAML 配置文件
 
@@ -23,12 +23,16 @@ def load_config(config_path: Path) -> Dict[str, Any]:
     Returns:
         配置字典
     """
+    if config_path is None:
+        config_path = Path(__file__).resolve().parents[2] / "config" / "defaults.yaml"
+    config_path = Path(config_path)
     if not config_path.exists():
         raise FileNotFoundError(f"配置文件不存在: {config_path}")
 
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
 
+    validate_config_schema(config)
     logger.info(f"已加载配置文件: {config_path}")
     return config
 
@@ -81,9 +85,35 @@ def get_executable_config(
     Returns:
         {"path": "...", "ld_library_path": "..."}
     """
-    exe_cfg = config.get('executables', {}).get(program_key, {})
-
+    exe_cfg = (config.get('executables', {}) or {}).get(program_key, {})
+    if not isinstance(exe_cfg, dict):
+        exe_cfg = {}
     return {
         'path': exe_cfg.get('path', default_path),
         'ld_library_path': exe_cfg.get('ld_library_path', None)
     }
+
+
+_REQUIRED_TOP_KEYS = {"executables", "resources", "theory", "step1", "step2", "step3", "run"}
+
+
+def validate_config_schema(config: Dict[str, Any]) -> None:
+    """轻量级 schema 校验：检查顶层必需键和基本类型约束。"""
+    if not isinstance(config, dict):
+        raise ValueError(f"Config root must be dict, got {type(config).__name__}")
+
+    missing = _REQUIRED_TOP_KEYS - set(config.keys())
+    if missing:
+        raise ValueError(f"Config missing required top-level keys: {sorted(missing)}")
+
+    exe = config.get("executables")
+    if exe is not None and not isinstance(exe, dict):
+        raise ValueError(f"'executables' must be dict or null, got {type(exe).__name__}")
+
+    resources = config.get("resources")
+    if resources is not None:
+        if not isinstance(resources, dict):
+            raise ValueError(f"'resources' must be dict or null, got {type(resources).__name__}")
+        nproc = resources.get("nproc")
+        if nproc is not None and (not isinstance(nproc, int) or isinstance(nproc, bool) or nproc < 0):
+            raise ValueError(f"resources.nproc must be null or non-negative int, got {nproc!r}")

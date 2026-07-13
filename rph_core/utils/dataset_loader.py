@@ -185,6 +185,18 @@ def _enrich_cleaner_metadata(record: ReactionRecord, reaction_profiles: Dict[str
     if profile_key:
         raw["reaction_profile"] = profile_key
 
+    catalyst = _first_nonempty(raw, "catalyst", "catalysts_str", "catalyst_name")
+    if catalyst:
+        raw["catalyst"] = catalyst
+
+    additive = _first_nonempty(raw, "additive_str", "additive")
+    if additive:
+        raw["additive"] = additive
+
+    solvent = _first_nonempty(raw, "solvent_str", "solvent", "solvent_name")
+    if solvent:
+        raw["solvent"] = solvent
+
     record.raw = raw
 
 
