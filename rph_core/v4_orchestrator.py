@@ -170,7 +170,7 @@ class V4Orchestrator:
         # authoritative through S2.  Do not turn map numbers into XYZ indices.
         s0_manifest = work_dir / "S0_Mechanism" / "mechanism.json"
         s0_signature_payload = {
-            "signature_schema": "s0_signature_v2",
+            "signature_schema": "s0_signature_v3",
             "stage": "s0",
             "source": "trusted_reaction_record",
             "condition": condition_signature,

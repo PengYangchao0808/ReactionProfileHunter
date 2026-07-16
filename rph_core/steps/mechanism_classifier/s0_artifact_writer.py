@@ -5,7 +5,11 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from rph_core.steps.mechanism_classifier.context import ProductVariant, ReactionContext
+from rph_core.steps.mechanism_classifier.context import (
+    ProductVariant,
+    ReactionContext,
+    component_signature_payload,
+)
 from rph_core.steps.mechanism_classifier.dr_completion import (
     build_disabled_dr_branch_plan,
     build_dr_branch_plan,
@@ -48,6 +52,8 @@ def write_s0_artifacts(
         plan = build_disabled_dr_branch_plan(graph)
 
     product_variants = [_product_variant_from_branch(branch) for branch in plan.branches]
+    components = record.normalized_components()
+    component_payload = component_signature_payload(components)
     reaction_context = ReactionContext(
         reaction_id=record.rx_id,
         source_csv=str(record.source_csv),
@@ -66,13 +72,14 @@ def write_s0_artifacts(
         branch_plan_ref="dr_branch_plan.json",
         mapping_confidence=record.mapping_confidence,
         mapping_trusted=record.mapping_trusted,
+        components=components,
     )
 
     mechanism_path = stage_dir / "mechanism.json"
     _write_json(
         mechanism_path,
         {
-            "schema_version": "s0_mechanism_v2",
+            "schema_version": "s0_mechanism_v3",
             "stage": "S0",
             "source": "trusted_reaction_record",
             "rx_id": record.rx_id,
@@ -96,12 +103,13 @@ def write_s0_artifacts(
             "variants": [variant.variant_id for variant in product_variants],
             "mechanism_graph_ref": "mechanism_graph.json",
             "branch_plan_ref": "dr_branch_plan.json",
+            **component_payload,
         },
     )
     _write_json(
         stage_dir / "reaction_context.json",
         {
-            "schema_version": "s0_reaction_context_v1",
+            "schema_version": "s0_reaction_context_v2",
             **reaction_context.to_dict(),
         },
     )
