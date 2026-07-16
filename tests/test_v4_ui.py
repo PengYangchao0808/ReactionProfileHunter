@@ -18,6 +18,7 @@ import pytest
 
 from rph_core.utils.log_manager import setup_v4_logging
 from rph_core.utils.ui_adapter import (
+    adapt_batch,
     UiStructure,
     adapt_s3_structures,
     adapt_s4_structures,
@@ -25,7 +26,8 @@ from rph_core.utils.ui_adapter import (
 from rph_core.utils.ui_reporter import RichReporter
 from rph_core.utils.ui_state import UiStatus, normalize_status, status_markup
 from rph_core.utils.shared_console import get_console
-from rph_core.v4_watch import main as watch_main
+from rph_core.utils.stage_progress import StageProgressReporter
+from rph_core.v4_watch import main as watch_main, render_overview
 
 
 def _ansi_escape_count(text: str) -> int:
@@ -65,6 +67,17 @@ def test_setup_v4_logging_preserves_host_handlers(tmp_path: Path) -> None:
         assert len(host_handlers) == 1
     finally:
         root.removeHandler(dummy)
+
+
+def test_v4_detail_debug_goes_to_file_not_console(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    log_file = tmp_path / "rph_v4.log"
+    setup_v4_logging(log_file=log_file, level=logging.INFO, rich_console=False)
+    detail_logger = logging.getLogger("rph_core.utils.resource_utils")
+    detail_logger.debug("ORCA maxcore detail sentinel")
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+    assert "ORCA maxcore detail sentinel" in log_file.read_text(encoding="utf-8")
+    assert "ORCA maxcore detail sentinel" not in capsys.readouterr().out
 
 
 def test_ui_state_normalize_status_maps_all_existing_strings() -> None:
@@ -196,6 +209,220 @@ def test_rich_reporter_dedup_cache_ignores_duplicate_events() -> None:
         },
     )
     assert reporter._structure_cache.get(("S0", "product_major")) == first_fingerprint
+
+
+def test_plain_reporter_uses_stage_boundaries_and_hides_partial_science_summary() -> None:
+    class CaptureConsole:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def print(self, value: object = "") -> None:
+            self.lines.append(str(value))
+
+    console = CaptureConsole()
+    reporter = RichReporter(console, color=False)
+    reporter.event_callback(
+        "s1_started",
+        {
+            "stage": "S1",
+            "reaction_id": "1",
+            "condition_signature": "1234567890abcdef",
+            "resources": {"nproc": 16},
+        },
+    )
+    reporter.event_callback(
+        "funnel_progress",
+        {"stage": "S1", "variant": "precursor", "step": "crest", "candidates": 191},
+    )
+    reporter.event_callback(
+        "batch_started",
+        {
+            "stage": "S1",
+            "batch": "precursor:b97_sp",
+            "label": "B97-3c SP",
+            "total": 191,
+            "running": 2,
+        },
+    )
+    output = "\n".join(console.lines)
+    assert "S1  Conformer Search 1 | cfg=12345678 | cores=16" in output
+    assert "-" * 78 in output
+    assert "● S1 B97-3c SP" in output
+    assert "Progress 0/191 complete | 2 running | 0 failed" in output
+    assert "ensemble=-" not in output
+
+
+def test_batch_adapter_and_stage_snapshot_preserve_scientific_progress(tmp_path: Path) -> None:
+    reporter = StageProgressReporter(
+        tmp_path / "S1_ConfSearch",
+        "S1",
+        default_fields={"reaction_id": "RXN_UI", "ui": {"stalled_job_warning_seconds": 60}},
+    )
+    reporter.external_event(
+        "step_started",
+        {
+            "variant": "precursor",
+            "step": "b97_sp",
+            "index": 7,
+            "total_steps": 10,
+            "label": "ORCA B97-3c SP ranking",
+            "purpose": "rank conformers",
+            "started_at": 100.0,
+        },
+    )
+    reporter.external_event(
+        "batch_started",
+        {"batch": "precursor:b97_sp", "label": "B97-3c SP", "total": 4, "running": 2},
+    )
+    reporter.external_event(
+        "batch_job_started",
+        {
+            "batch": "precursor:b97_sp",
+            "job_id": "conf_0003",
+            "engine": "orca",
+            "method": "B97-3c",
+            "nprocs": 8,
+            "started_at": 101.0,
+            "output": "ranking/conf_0003",
+        },
+    )
+    reporter.external_event(
+        "batch_progress",
+        {
+            "batch": "precursor:b97_sp",
+            "label": "B97-3c SP",
+            "total": 4,
+            "done": 2,
+            "running": 2,
+            "failed": 1,
+            "rate_per_minute": 1.5,
+        },
+    )
+    reporter.science_summary(
+        variant="precursor",
+        ensemble_members=4,
+        representatives=3,
+        scoring_mode="b97_3c_plus_mrrho",
+        selected="precursor_conf_0001",
+    )
+    status = json.loads((tmp_path / "S1_ConfSearch" / "status.json").read_text(encoding="utf-8"))
+    batch = adapt_batch("precursor:b97_sp", status["batches"]["precursor:b97_sp"])
+    assert batch.done == 2
+    assert batch.failed == 1
+    assert batch.rate_per_minute == pytest.approx(1.5)
+    assert status["science_summary"]["variants"]["precursor"]["ensemble_members"] == 4
+    assert status["current_step"] == "precursor:b97_sp"
+    assert status["steps"]["precursor:b97_sp"]["index"] == 7
+    assert "conf_0003" in status["batches"]["precursor:b97_sp"]["active_jobs"]
+
+    reporter.external_event(
+        "batch_job_finished",
+        {
+            "batch": "precursor:b97_sp",
+            "job_id": "conf_0003",
+            "status": "complete",
+            "elapsed_seconds": 22.0,
+            "energy_hartree": -100.25,
+        },
+    )
+    reporter.external_event(
+        "step_finished",
+        {
+            "variant": "precursor",
+            "step": "b97_sp",
+            "index": 7,
+            "total_steps": 10,
+            "label": "ORCA B97-3c SP ranking",
+            "elapsed_seconds": 22.0,
+            "valid": 4,
+        },
+    )
+    status = json.loads((tmp_path / "S1_ConfSearch" / "status.json").read_text(encoding="utf-8"))
+    assert status["current_step"] is None
+    assert not status["batches"]["precursor:b97_sp"]["active_jobs"]
+    assert status["batches"]["precursor:b97_sp"]["completed_job_tail"][-1]["id"] == "conf_0003"
+
+
+def test_overview_surfaces_mechanism_bonds_and_s1_science(tmp_path: Path) -> None:
+    _write_terminal_stage_status(
+        tmp_path,
+        "S0",
+        "S0_Mechanism",
+        {
+            "stage": "S0",
+            "status": "completed",
+            "structures": {},
+            "science_summary": {"mechanism_valid": True, "forming_bonds": [[3, 17], [8, 22]]},
+        },
+    )
+    _write_terminal_stage_status(
+        tmp_path,
+        "S1",
+        "S1_ConfSearch",
+        {
+            "stage": "S1",
+            "status": "completed",
+            "structures": {},
+            "science_summary": {
+                "ensemble_members": 47,
+                "representatives": 6,
+                "scoring_mode": "b97_3c_plus_mrrho",
+                "selected": "conf_0001",
+            },
+        },
+    )
+    overview = render_overview(tmp_path, colour=False)
+    assert "bonds 3-17,8-22" in overview
+    assert "ensemble 47->6" in overview
+
+
+def test_overview_surfaces_current_step_funnel_and_active_jobs(tmp_path: Path) -> None:
+    now = time.time()
+    _write_terminal_stage_status(
+        tmp_path,
+        "S1",
+        "S1_ConfSearch",
+        {
+            "stage": "S1",
+            "status": "running",
+            "current_step": "precursor:b97_sp",
+            "steps": {
+                "precursor:b97_sp": {
+                    "variant": "precursor",
+                    "label": "ORCA B97-3c SP ranking",
+                    "index": 7,
+                    "total_steps": 10,
+                    "status": "running",
+                    "started_at": now - 60,
+                    "method": "B97-3c",
+                    "engine": "orca",
+                }
+            },
+            "funnel": {"precursor": {"crest_generated": 263, "torsion_unique": 191}},
+            "batches": {
+                "precursor:b97_sp": {
+                    "label": "B97-3c SP",
+                    "status": "running",
+                    "total": 191,
+                    "done": 37,
+                    "failed": 0,
+                    "active_jobs": {
+                        "conf_0038": {
+                            "engine": "orca",
+                            "method": "B97-3c",
+                            "attempt": 1,
+                            "started_at": now - 20,
+                        }
+                    },
+                }
+            },
+            "structures": {},
+        },
+    )
+    overview = render_overview(tmp_path, colour=False)
+    assert "step [7/10] ORCA B97-3c SP ranking" in overview
+    assert "crest_generated=263 -> torsion_unique=191" in overview
+    assert "conf_0038 | orca/B97-3c" in overview
 
 
 def _write_terminal_stage_status(tmp_path: Path, stage_name: str, stage_dir_name: str, payload: dict[str, Any]) -> None:

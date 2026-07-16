@@ -327,11 +327,30 @@ def _render_overview_plain(output_dir: Path, colour: bool) -> str:
         failed = summary.get("failed", 0)
         stage_label = _colour(stage_status, stage_status, colour)
         if total:
-            lines.append(f"  {stage_name}: {stage_label} | {completed}/{total} done" + (f", {failed} failed" if failed else ""))
+            line = f"  {stage_name}: {stage_label} | {completed}/{total} done"
+            if failed:
+                line += f", {failed} failed"
+            if summary.get("usable_for_ml"):
+                line += f", {summary['usable_for_ml']} ML-usable"
+            science = _science_brief(stage_name, data)
+            batch = _batch_brief(data)
+            lines.append(line + (f" | {science}" if science else "") + (f" | {batch}" if batch else ""))
         else:
             structures = data.get("structures", {})
             structure_count = len(structures) if isinstance(structures, (dict, list)) else 0
-            lines.append(f"  {stage_name}: {stage_label} | {structure_count} structures")
+            science = _science_brief(stage_name, data)
+            batch = _batch_brief(data)
+            lines.append(
+                f"  {stage_name}: {stage_label} | {structure_count} structures"
+                + (f" | {science}" if science else "")
+                + (f" | {batch}" if batch else "")
+            )
+    active_stage = _active_stage(stages)
+    active_data = stages.get(active_stage) or {}
+    activity = _activity_lines(active_stage, active_data)
+    if activity:
+        lines.extend(["", f"Current activity ({active_stage}):"])
+        lines.extend(f"  {line}" for line in activity)
     run_manifest = _read_json(Path(output_dir) / "run.manifest.json")
     if run_manifest:
         lines.append("")
@@ -366,10 +385,12 @@ def _render_overview_rich(output_dir: Path, event_count: int) -> Any:
     overview_table.add_column("done")
     overview_table.add_column("failed")
     overview_table.add_column("running")
+    overview_table.add_column("ML")
+    overview_table.add_column("scientific result")
     for stage_name in ("S0", "S1", "S2", "S3", "S4"):
         data = stages.get(stage_name)
         if data is None:
-            overview_table.add_row(stage_name, Text("not started", style="dim"), "-", "-", "-")
+            overview_table.add_row(stage_name, Text("not started", style="dim"), "-", "-", "-", "-", "-")
             continue
         summary = _stage_summary(data)
         status = normalize_status(data.get("status"))
@@ -379,8 +400,17 @@ def _render_overview_rich(output_dir: Path, event_count: int) -> Any:
             f"{summary.get('finished', 0)}/{summary.get('total', 0)}",
             str(summary.get("failed", 0)),
             str(summary.get("running", 0)),
+            str(summary.get("usable_for_ml", 0)),
+            _clip("; ".join(filter(None, [_science_brief(stage_name, data), _batch_brief(data)])), 54),
         )
     overview_panel = Panel(overview_table, title="Cross-Stage Overview", border_style="step.header")
+
+    activity_lines = _activity_lines(active, stages.get(active) or {})
+    activity_panel = Panel(
+        Text("\n".join(activity_lines) if activity_lines else "no active operation"),
+        title=f"Current Activity ({active})",
+        border_style="info",
+    )
 
     events = _recent_events(_stage_dir(output_dir, active), event_count)
     events_text = Text("\n".join(events) if events else f"no recent events for {active}")
@@ -390,39 +420,156 @@ def _render_overview_rich(output_dir: Path, event_count: int) -> Any:
     structures = _adapt_stage_structures(active, active_data or {}) if active_data else []
     structure_table = Table(box=None, show_header=True, expand=False)
     structure_table.add_column("id", style="step.title")
-    structure_table.add_column("kind")
-    structure_table.add_column("source")
+    structure_table.add_column("geometry")
     structure_table.add_column("status")
-    structure_table.add_column("active")
-    structure_table.add_column("opt")
-    structure_table.add_column("freq")
-    structure_table.add_column("sp")
-    structure_table.add_column("energy", justify="right", style="energy")
+    structure_table.add_column("validation")
+    structure_table.add_column("SP / Eh", justify="right", style="energy")
+    structure_table.add_column("ML")
     for structure in structures:
         structure_table.add_row(
             _clip(structure.id, 30),
-            _clip(structure.kind, 8),
-            _clip(structure.source, 12),
+            _clip(structure.geometry_source or structure.source, 16),
             Text.from_markup(status_markup(structure.status)),
-            _clip(structure.current_task, 17),
-            Text.from_markup(status_markup(structure.tasks.get("optimization", UiTask(name="optimization", status=UiStatus.PENDING)).status))
-            if structure.tasks.get("optimization")
-            else "-",
-            Text.from_markup(status_markup(structure.tasks.get("frequency", UiTask(name="frequency", status=UiStatus.PENDING)).status))
-            if structure.tasks.get("frequency")
-            else "-",
-            Text.from_markup(status_markup(structure.tasks.get("single_point", UiTask(name="single_point", status=UiStatus.PENDING)).status))
-            if structure.tasks.get("single_point")
-            else "-",
+            _clip(_structure_validation(structure), 28),
             _clip(_energy_text(structure.energy_hartree), 14),
+            "yes" if structure.usable_for_ml else "no",
         )
         if structure.error:
             structure_table.add_row(Text(f"  error: {structure.error}", style="warning"))
     structures_panel = Panel(structure_table, title=f"{active} Structures", border_style="info")
 
     layout = Layout(name="root")
-    layout.split_column(Layout(overview_panel, size=10), Layout(events_panel, size=10), Layout(structures_panel))
+    layout.split_column(
+        Layout(overview_panel, size=10),
+        Layout(activity_panel, size=max(7, min(15, len(activity_lines) + 2))),
+        Layout(events_panel, size=9),
+        Layout(structures_panel),
+    )
     return layout
+
+
+def _science_brief(stage: str, data: Dict[str, Any]) -> str:
+    science = dict(data.get("science_summary") or {})
+    stage_meta = dict(data.get("stage_meta") or {})
+    reused = bool(stage_meta.get("reused"))
+    if stage == "S0" and science:
+        bonds = [f"{pair[0]}-{pair[1]}" for pair in science.get("forming_bonds") or [] if len(pair) >= 2]
+        text = "mechanism valid" + (f"; bonds {','.join(bonds)}" if bonds else "")
+        return text + ("; reused" if reused else "")
+    if stage == "S1" and science:
+        ensemble = science.get("ensemble_members")
+        representatives = science.get("representatives")
+        selected = science.get("selected")
+        mode = science.get("scoring_mode")
+        if ensemble is not None:
+            text = f"ensemble {ensemble}->{representatives}; {mode}; selected {selected}"
+            rows = data.get("structures") or {}
+            values = rows.values() if isinstance(rows, dict) else rows
+            reused_count = sum(bool((row or {}).get("reused")) for row in values)
+            return text + (f"; {reused_count} reused" if reused_count else "")
+    if stage == "S2":
+        rows = data.get("structures") or {}
+        values = rows.values() if isinstance(rows, dict) else rows
+        confidences: Dict[str, int] = {}
+        bonds: list[str] = []
+        for row in values:
+            confidence = str((row or {}).get("confidence") or "unknown")
+            confidences[confidence] = confidences.get(confidence, 0) + 1
+            for pair in (row or {}).get("forming_bonds") or []:
+                if len(pair) >= 2:
+                    bonds.append(f"{pair[0]}-{pair[1]}")
+        pieces = [f"{name}:{count}" for name, count in sorted(confidences.items())]
+        if bonds:
+            pieces.append("bonds " + ",".join(dict.fromkeys(bonds)))
+        return "; ".join(pieces)
+    if stage in {"S3", "S4"}:
+        summary = _stage_summary(data)
+        return f"{summary.get('usable_for_ml', 0)} ML-usable" + ("; reused" if reused else "")
+    return ""
+
+
+def _structure_validation(structure: Any) -> str:
+    if structure.kind != "ts":
+        return structure.current_task or ("fallback geometry" if structure.fallback_source else "minimum")
+    if structure.imaginary_frequencies:
+        primary = min(structure.imaginary_frequencies)
+        return f"{len(structure.imaginary_frequencies)} imag ({primary:.0f} cm-1)"
+    return structure.ts_quality_summary or structure.current_task or "TS pending"
+
+
+def _batch_brief(data: Dict[str, Any]) -> str:
+    batches = dict(data.get("batches") or {})
+    active = [row for row in batches.values() if str((row or {}).get("status")) == "running"]
+    if not active:
+        return ""
+    row = active[-1]
+    text = (
+        f"{row.get('label', 'batch')} {row.get('done', 0)}/{row.get('total', 0)}"
+        f" running={row.get('running', 0)} failed={row.get('failed', 0)}"
+    )
+    rate = row.get("rate_per_minute")
+    if rate is not None:
+        text += f" {float(rate):.1f}/min"
+    threshold = float((data.get("ui") or {}).get("stalled_job_warning_seconds", 720))
+    last = row.get("last_completion_at") or row.get("updated_at")
+    if last is not None and time.time() - float(last) > threshold:
+        text += " STALLED"
+    return text
+
+
+def _activity_lines(stage: str, data: Dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    current_key = data.get("current_step")
+    steps = dict(data.get("steps") or {})
+    step = dict(steps.get(current_key) or {}) if current_key else {}
+    if step:
+        started = step.get("started_at")
+        elapsed = time.time() - float(started) if started is not None else float(step.get("elapsed_seconds") or 0)
+        lines.append(
+            f"step [{step.get('index', '?')}/{step.get('total_steps', '?')}] "
+            f"{step.get('label', current_key)} | running {int(max(0, elapsed))}s"
+        )
+        detail = []
+        if step.get("method") or step.get("engine"):
+            detail.append("/".join(filter(None, [str(step.get("engine") or ""), str(step.get("method") or "")])))
+        if step.get("purpose"):
+            detail.append(str(step["purpose"]))
+        if detail:
+            lines.append("  " + " | ".join(detail))
+        last_age = step.get("last_output_age_seconds")
+        if last_age is not None:
+            lines.append(f"  output updated {int(float(last_age))}s ago | {step.get('output', '-')}")
+    funnel_all = dict(data.get("funnel") or {})
+    variant = str(step.get("variant") or "") if step else ""
+    funnel = dict(funnel_all.get(variant) or funnel_all.get("default") or {})
+    if not funnel and funnel_all:
+        funnel = dict(next(reversed(funnel_all.values())))
+    if funnel:
+        lines.append("funnel " + " -> ".join(f"{name}={count}" for name, count in funnel.items()))
+    batches = dict(data.get("batches") or {})
+    for batch_id, batch in batches.items():
+        if str((batch or {}).get("status")) != "running":
+            continue
+        lines.append(
+            f"batch {(batch or {}).get('label', batch_id)} | "
+            f"{(batch or {}).get('done', 0)}/{(batch or {}).get('total', 0)} complete | "
+            f"{len((batch or {}).get('active_jobs') or {})} active | "
+            f"{(batch or {}).get('failed', 0)} failed"
+        )
+        active_jobs = dict((batch or {}).get("active_jobs") or {})
+        limit = max(1, int((data.get("ui") or {}).get("active_job_limit", 8)))
+        for job_id, job in list(sorted(active_jobs.items()))[:limit]:
+            started = (job or {}).get("started_at")
+            elapsed = time.time() - float(started) if started is not None else float((job or {}).get("elapsed_seconds") or 0)
+            lines.append(
+                f"  {job_id} | {(job or {}).get('engine', '-')}/{(job or {}).get('method', '-')} | "
+                f"attempt {(job or {}).get('attempt', 1)} | {int(max(0, elapsed))}s"
+            )
+    decisions = list(data.get("decisions") or [])
+    if decisions:
+        latest = decisions[-1]
+        lines.append(f"decision {latest.get('message') or latest.get('decision')}")
+    return lines
 
 
 def _build_renderable(output_dir: Path, overview: bool, colour: bool, event_count: int) -> Any:

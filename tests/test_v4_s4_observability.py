@@ -20,7 +20,7 @@ def test_s4_writes_live_status_events_and_manifest(monkeypatch, tmp_path: Path):
         def run_structure(self, structure, output_dir):
             payload = {
                 "structure_id": structure["id"],
-                "engine": "gaussian",
+                "engine": "orca",
                 "method": "M062X",
                 "solvent": "acetone",
                 "solvent_model": "CPCM",
@@ -42,6 +42,7 @@ def test_s4_writes_live_status_events_and_manifest(monkeypatch, tmp_path: Path):
                 "frequency_status": "not_requested",
                 "ts_frequency_valid": None,
                 "status": "complete",
+                "usable_for_ml": True,
             }
 
     monkeypatch.setattr(highlevel_module, "StageCalculator", FakeCalculator)
@@ -60,7 +61,8 @@ def test_s4_writes_live_status_events_and_manifest(monkeypatch, tmp_path: Path):
     assert status["structures"][0]["tasks"]["single_point"]["status"] == "complete"
     assert any('"event": "optimization_started"' in line for line in events)
     assert any('"event": "stage_finished"' in line for line in events)
-    assert saved_manifest["schema_version"] == "s4_high_level_v2"
+    assert saved_manifest["schema_version"] == "s4_high_level_v3"
+    assert saved_manifest["status"] == "complete"
     assert (stage_dir / "s4.log").exists()
 
     viewer_status = load_status(tmp_path)
@@ -105,5 +107,60 @@ def test_gaussian_frequency_route_uses_explicit_cpcm_and_parses_frequencies(monk
     assert result.frequencies_cm1 == (-345.6, 120.0, 345.0)
     assert "Freq" in captured["route"]
     assert "SCRF=(CPCM,Solvent=acetone)" in captured["route"]
-    assert "Integral=UltraFine" in captured["route"]
+    assert "M062X/def2SVP" in captured["route"]
+    assert "Int=UltraFine" in captured["route"]
     assert "SCF=XQC" in captured["route"]
+
+
+def test_s4_marks_failed_optimization_incomplete_and_unusable(monkeypatch, tmp_path: Path):
+    xyz = tmp_path / "seed.xyz"
+    xyz.write_text("1\nseed\nH 0.0 0.0 0.0\n", encoding="utf-8")
+
+    class FakeCalculator:
+        def __init__(self, config, theory, event_callback=None):
+            pass
+
+        def run_structure(self, structure, output_dir):
+            return {
+                "id": structure["id"],
+                "kind": structure["kind"],
+                "input_xyz": structure["input_xyz"],
+                "opt_status": "failed",
+                "sp_status": "complete",
+                "sp_energy_hartree": -1.23,
+                "frequency_status": "not_requested",
+                "status": "opt_failed_sp_complete",
+                "usable_for_ml": False,
+                "error": "optimization failed",
+            }
+
+    monkeypatch.setattr(highlevel_module, "StageCalculator", FakeCalculator)
+    manifest = HighLevelEngine({"theory": {"s4_high_precision": {}}}).run(
+        [{"id": "product", "kind": "minimum", "input_xyz": str(xyz)}],
+        tmp_path / "S4_HighLevel",
+    )
+
+    saved = json.loads(manifest.read_text(encoding="utf-8"))
+    assert saved["status"] == "incomplete"
+    assert saved["summary"]["complete"] == 0
+    assert saved["summary"]["degraded"] == 1
+    assert saved["summary"]["usable_for_ml"] == 0
+    assert saved["structures"][0]["usable_for_ml"] is False
+
+
+def test_s4_rejects_non_orca_engine():
+    try:
+        HighLevelEngine(
+            {
+                "theory": {
+                    "s4_high_precision": {
+                        "optimization": {"engine": "gaussian"},
+                        "single_point": {"engine": "orca"},
+                    }
+                }
+            }
+        )
+    except ValueError as exc:
+        assert "requires engine=orca" in str(exc)
+    else:
+        raise AssertionError("S4 accepted a non-ORCA optimization engine")

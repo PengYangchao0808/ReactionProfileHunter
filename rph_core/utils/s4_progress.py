@@ -46,6 +46,9 @@ class S4ProgressReporter:
                     "id": str(structure["id"]),
                     "kind": str(structure.get("kind", "minimum")),
                     "input_source": "S3_OPT" if structure.get("opt_xyz") else "S3_fallback",
+                    "geometry_source": "S3_OPT" if structure.get("opt_xyz") else "S3_input_fallback",
+                    "fallback_source": structure.get("fallback_xyz"),
+                    "source_s3": dict(structure.get("source_s3") or {}),
                     "status": "pending",
                     "current_task": None,
                     "tasks": {},
@@ -93,6 +96,15 @@ class S4ProgressReporter:
         row["mode_displacement_valid"] = payload.get("mode_displacement_valid")
         row["irc_valid"] = payload.get("irc_valid")
         row["ts_quality_summary"] = payload.get("ts_quality_summary")
+        row["imaginary_frequencies_cm1"] = payload.get("imaginary_frequencies_cm1") or payload.get(
+            "imaginary_frequencies"
+        )
+        row["ml_exclusion_reason"] = payload.get("ml_exclusion_reason") or (
+            payload.get("error") if not row["usable_for_ml"] else None
+        )
+        row["geometry_source"] = (
+            "S4_OPT" if payload.get("opt_xyz") else row.get("geometry_source")
+        )
         self._touch()
         self.emit(
             "structure_finished",
@@ -100,6 +112,16 @@ class S4ProgressReporter:
             status=row["status"],
             usable_for_ml=row["usable_for_ml"],
             error=row["error"],
+            sp_energy_hartree=row["sp_energy_hartree"],
+            ts_frequency_valid=row["ts_frequency_valid"],
+            ts_mode_displacement_verified=row["ts_mode_displacement_verified"],
+            frequency_count_valid=row["frequency_count_valid"],
+            mode_displacement_valid=row["mode_displacement_valid"],
+            imaginary_frequencies_cm1=row["imaginary_frequencies_cm1"],
+            ts_quality_summary=row["ts_quality_summary"],
+            ml_exclusion_reason=row["ml_exclusion_reason"],
+            geometry_source=row["geometry_source"],
+            fallback_source=row.get("fallback_source"),
         )
 
     def fail_structure(self, structure_id: str, error: str) -> None:
@@ -136,6 +158,11 @@ class S4ProgressReporter:
                 "error": payload.get("error"),
             }
         )
+        if action == "started":
+            task_state["started_at"] = task_state.get("started_at") or _timestamp()
+            task_state["finished_at"] = None
+        else:
+            task_state["finished_at"] = _timestamp()
         row["tasks"][task] = task_state
         row["current_task"] = task if action == "started" else None
         self._touch()
@@ -176,7 +203,12 @@ class S4ProgressReporter:
             with self.log_path.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
                 handle.flush()
-            logger.info("[S4] %s", line)
+            if event.endswith("_failed") or str(payload.get("status") or "").lower() == "failed":
+                logger.warning("[S4] %s", line)
+            elif event == "stage_finished":
+                logger.info("[S4] %s", line)
+            else:
+                logger.debug("[S4] %s", line)
         except OSError as exc:
             logger.warning("Could not write S4 progress event %s: %s", event, exc)
         if self._event_callback is not None:
@@ -199,6 +231,7 @@ class S4ProgressReporter:
             "running": sum(row["status"] == "running" for row in rows),
             "finished": sum(row["status"] in terminal for row in rows),
             "failed": sum(row["status"] == "failed" for row in rows),
+            "degraded": sum(row["status"] in {"degraded", "opt_failed_sp_complete", "ts_frequency_unverified"} for row in rows),
             "noncomplete": sum(row["status"] not in {"pending", "running", "complete"} for row in rows),
             "usable_for_ml": sum(bool(row.get("usable_for_ml")) for row in rows),
         }

@@ -29,6 +29,14 @@ except ImportError:
 
 HAS_RICH = _has_rich
 _V4_LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+_V4_DETAIL_LOGGERS = (
+    "rph_core.utils.orca_interface",
+    "rph_core.utils.resource_utils",
+    "rph_core.steps.conformer_search.censo_lite",
+    "rph_core.steps.conformer_search.censo_lite_runtime",
+    "rph_core.steps.conformer_search.xtb_thermo",
+    "rph_core.utils.s4_progress",
+)
 
 
 def _build_v4_formatter() -> logging.Formatter:
@@ -86,7 +94,7 @@ def setup_v4_logging(
             handler.close()
             continue
         if active_file_handler is None:
-            handler.setLevel(level)
+            handler.setLevel(logging.DEBUG)
             handler.setFormatter(_build_v4_formatter())
             active_file_handler = handler
             continue
@@ -94,14 +102,19 @@ def setup_v4_logging(
         handler.close()
 
     if resolved_log_file is None or active_file_handler is not None:
+        if resolved_log_file is not None:
+            for logger_name in _V4_DETAIL_LOGGERS:
+                logging.getLogger(logger_name).setLevel(logging.DEBUG)
         return
 
     resolved_log_file.parent.mkdir(parents=True, exist_ok=True)
     file_handler = logging.FileHandler(resolved_log_file, encoding="utf-8")
-    file_handler.setLevel(level)
+    file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(_build_v4_formatter())
     setattr(file_handler, "_rph_v4_log_path", str(resolved_log_file))
     root.addHandler(file_handler)
+    for logger_name in _V4_DETAIL_LOGGERS:
+        logging.getLogger(logger_name).setLevel(logging.DEBUG)
 
 
 def setup_logger(

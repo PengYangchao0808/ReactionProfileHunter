@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -39,10 +40,19 @@ class StageProgressReporter:
         self._default_fields = dict(default_fields or {})
         self._event_callback = event_callback
         self._structures: Dict[str, Dict[str, Any]] = {}
+        self._batches: Dict[str, Dict[str, Any]] = {}
+        self._steps: Dict[str, Dict[str, Any]] = {}
+        self._current_step: Optional[str] = None
+        self._funnel: Dict[str, Dict[str, Any]] = {}
+        self._decisions: list[Dict[str, Any]] = []
+        self._science_summary: Dict[str, Any] = {}
+        self._alerts: list[Dict[str, Any]] = []
+        self._stage_fields: Dict[str, Any] = {}
         self._status = "running"
         self._started_at = _now()
         self._updated_at = self._started_at
         self._finished_at: Optional[float] = None
+        self._lock = threading.RLock()
         self._write_status()
 
     @property
@@ -60,12 +70,13 @@ class StageProgressReporter:
         if structure_id:
             record["structure_id"] = structure_id
         record.update(fields)
-        try:
-            with self._events_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-                handle.flush()
-        except OSError as exc:
-            logger.warning("Could not write %s progress event %s: %s", self.stage_name, event, exc)
+        with self._lock:
+            try:
+                with self._events_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+                    handle.flush()
+            except OSError as exc:
+                logger.warning("Could not write %s progress event %s: %s", self.stage_name, event, exc)
         if self._event_callback is not None:
             try:
                 self._event_callback(event, dict(record))
@@ -114,6 +125,7 @@ class StageProgressReporter:
         self._write_status()
 
     def emit_stage_event(self, event: str, **fields: Any) -> None:
+        self._stage_fields.update(fields)
         normalized = _terminal_status(fields.get("status"))
         if event.endswith("_started") or event == "stage_started":
             self._status = "running"
@@ -125,6 +137,149 @@ class StageProgressReporter:
             self._status = str(fields.get("status") or self._stage_terminal_status())
             self._finished_at = _now()
         self.emit(event, None, **fields)
+        self._write_status()
+
+    def batch_event(self, event: str, payload: Dict[str, Any]) -> None:
+        """Persist a homogeneous batch event and forward it to the UI."""
+
+        fields = dict(payload or {})
+        batch_id = str(fields.get("batch") or fields.get("batch_id") or "batch")
+        state = dict(self._batches.get(batch_id) or {})
+        state.update(fields)
+        state["updated_at"] = _now()
+        if event == "batch_progress":
+            state["last_completion_at"] = state["updated_at"]
+        state["label"] = str(fields.get("label") or state.get("label") or batch_id)
+        if event == "batch_started":
+            state.update({"status": "running", "done": 0, "failed": 0})
+        elif event == "batch_finished":
+            state["status"] = str(fields.get("status") or "complete")
+        else:
+            state["status"] = str(fields.get("status") or state.get("status") or "running")
+        self._batches[batch_id] = state
+        self.emit(event, None, **fields)
+        self._write_status()
+
+    def step_event(self, event: str, payload: Dict[str, Any]) -> None:
+        fields = dict(payload or {})
+        step_id = str(fields.get("step") or fields.get("step_id") or "step")
+        variant = str(fields.get("variant") or "")
+        key = f"{variant}:{step_id}" if variant else step_id
+        state = dict(self._steps.get(key) or {})
+        state.update(fields)
+        state.update({"id": step_id, "key": key, "updated_at": _now()})
+        if event == "step_started":
+            state["status"] = "running"
+            state["started_at"] = fields.get("started_at") or _now()
+            state["finished_at"] = None
+            self._current_step = key
+        elif event == "step_heartbeat":
+            state["status"] = "running"
+        elif event == "step_finished":
+            state["status"] = str(fields.get("status") or "complete")
+            state["finished_at"] = fields.get("finished_at") or _now()
+            if self._current_step == key:
+                self._current_step = None
+        elif event == "step_failed":
+            state["status"] = "failed"
+            state["finished_at"] = fields.get("finished_at") or _now()
+            if self._current_step == key:
+                self._current_step = None
+        self._steps[key] = state
+        fields["status"] = state["status"]
+        self.emit(event, None, **fields)
+        self._write_status()
+
+    def batch_job_event(self, event: str, payload: Dict[str, Any]) -> None:
+        fields = dict(payload or {})
+        batch_id = str(fields.get("batch") or "batch")
+        job_id = str(fields.get("job_id") or fields.get("current") or "job")
+        batch = dict(self._batches.get(batch_id) or {"label": batch_id})
+        active = dict(batch.get("active_jobs") or {})
+        state = dict(active.get(job_id) or {})
+        state.update(fields)
+        state.update({"id": job_id, "updated_at": _now()})
+        if event == "batch_job_started":
+            state["status"] = "running"
+            state["started_at"] = fields.get("started_at") or _now()
+            active[job_id] = state
+        elif event == "batch_job_heartbeat":
+            state["status"] = "running"
+            active[job_id] = state
+        elif event == "batch_job_retry":
+            state["status"] = "running"
+            state["attempt"] = int(fields.get("attempt") or int(state.get("attempt") or 1) + 1)
+            active[job_id] = state
+            batch["retried"] = int(batch.get("retried") or 0) + 1
+        else:
+            state["status"] = "failed" if event == "batch_job_failed" else str(
+                fields.get("status") or "complete"
+            )
+            state["finished_at"] = fields.get("finished_at") or _now()
+            active.pop(job_id, None)
+            tail = list(batch.get("completed_job_tail") or [])
+            tail.append(state)
+            limit = int((self._default_fields.get("ui") or {}).get("completed_job_tail", 5))
+            batch["completed_job_tail"] = tail[-max(1, limit):]
+        batch["active_jobs"] = active
+        batch["running"] = len(active)
+        batch["updated_at"] = _now()
+        self._batches[batch_id] = batch
+        self.emit(event, None, **fields)
+        self._write_status()
+
+    def record_decision(self, **fields: Any) -> None:
+        record = {"timestamp": _now(), **fields}
+        self._decisions.append(record)
+        self._decisions = self._decisions[-50:]
+        self.emit("decision", None, **record)
+        self._write_status()
+
+    def external_event(self, event: str, payload: Dict[str, Any]) -> None:
+        """Route stage-runtime UI events into the durable status contract."""
+
+        fields = dict(payload or {})
+        with self._lock:
+            if event.startswith("batch_job_"):
+                self.batch_job_event(event, fields)
+            elif event.startswith("batch_"):
+                self.batch_event(event, fields)
+            elif event.startswith("step_"):
+                self.step_event(event, fields)
+            elif event == "science_summary":
+                self.science_summary(**fields)
+            elif event == "funnel_progress":
+                variant = str(fields.get("variant") or "default")
+                funnel = dict(self._funnel.get(variant) or {})
+                funnel[str(fields.get("step") or "unknown")] = fields.get("candidates")
+                self._funnel[variant] = funnel
+                self.emit("funnel_progress", None, **fields)
+                self._write_status()
+            elif event == "decision":
+                self.record_decision(**fields)
+            elif event == "alert":
+                message = str(fields.pop("message", "runtime alert"))
+                self.alert(message, **fields)
+            else:
+                self.emit(event, None, **fields)
+                self._write_status()
+
+    def science_summary(self, **fields: Any) -> None:
+        variant = str(fields.get("variant") or "")
+        if variant:
+            variants = dict(self._science_summary.get("variants") or {})
+            variants[variant] = dict(fields)
+            self._science_summary["variants"] = variants
+        self._science_summary.update(fields)
+        self.emit("science_summary", None, **fields)
+        self._write_status()
+
+    def alert(self, message: str, **fields: Any) -> None:
+        record = {"message": message, **fields}
+        self._alerts.append(record)
+        limit = int((self._default_fields.get("ui") or {}).get("recent_alert_limit", 50))
+        self._alerts = self._alerts[-max(1, limit):]
+        self.emit("alert", None, **record)
         self._write_status()
 
     def calculator_event(self, event: str, payload: Dict[str, Any]) -> None:
@@ -162,6 +317,11 @@ class StageProgressReporter:
                 "error": event_payload.get("error"),
             }
         )
+        if action == "started":
+            task_state["started_at"] = task_state.get("started_at") or _now()
+            task_state["finished_at"] = None
+        else:
+            task_state["finished_at"] = _now()
         entry["tasks"][task] = task_state
         entry["current_task"] = task if action == "started" else None
         if action == "started":
@@ -175,6 +335,10 @@ class StageProgressReporter:
         return "completed"
 
     def _write_status(self) -> None:
+        with self._lock:
+            self._write_status_unlocked()
+
+    def _write_status_unlocked(self) -> None:
         self._updated_at = _now()
         completed = 0
         failed = 0
@@ -187,6 +351,7 @@ class StageProgressReporter:
         payload = {
             "schema_version": self.schema_version,
             "stage": self.stage_name,
+            **self._default_fields,
             "status": self._status,
             "started_at": self._started_at,
             "updated_at": self._updated_at,
@@ -195,6 +360,19 @@ class StageProgressReporter:
             "completed": completed,
             "failed": failed,
             "structures": dict(self._structures),
+            "batches": dict(self._batches),
+            "current_step": self._current_step,
+            "steps": dict(self._steps),
+            "funnel": dict(self._funnel),
+            "decisions": list(self._decisions),
+            "timing": {
+                "started_at": self._started_at,
+                "updated_at": self._updated_at,
+                "elapsed_seconds": self._updated_at - self._started_at,
+            },
+            "science_summary": dict(self._science_summary),
+            "alerts": list(self._alerts),
+            "stage_meta": dict(self._stage_fields),
         }
         try:
             temporary = self._status_path.with_suffix(".json.tmp")
