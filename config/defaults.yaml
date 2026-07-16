@@ -70,6 +70,7 @@ theory:
           ts: 12
         accept_partial_geometry: true
       frequency:
+        enabled_for_minima: true
         enabled_for_ts: true
         task: freq
         imaginary_cutoff_cm1: -50.0
@@ -101,6 +102,7 @@ theory:
       max_cycles: 200
       timeout: 864000
       frequency:
+        enabled_for_minima: true
         enabled_for_ts: true
         task: freq
         imaginary_cutoff_cm1: -50.0
@@ -232,10 +234,32 @@ step2:
 step3:
   enabled: true
   continue_on_structure_failure: true
+  scheduling:
+    enabled: true
+    max_workers: 2
+    nproc_per_job: 8
+    memory_per_job: 16GB
+    # Work-conserving queue: a free worker immediately starts the next entry.
+    # Expensive TS structures start first to minimize the final single-job tail.
+    priority_roles:
+      - ts
+      - intermediate
+      - precursor
+      - product
 
 step4:
   enabled: true
   continue_on_structure_failure: true
+  scheduling:
+    enabled: true
+    max_workers: 2
+    nproc_per_job: 8
+    memory_per_job: 16GB
+    priority_roles:
+      - ts
+      - intermediate
+      - precursor
+      - product
 
 ui:
   # auto selects the embedded Live dashboard on a capable TTY and classic

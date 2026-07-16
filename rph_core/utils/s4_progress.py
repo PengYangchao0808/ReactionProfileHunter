@@ -91,6 +91,11 @@ class S4ProgressReporter:
         row["error"] = payload.get("error")
         row["sp_energy_hartree"] = payload.get("sp_energy_hartree")
         row["ts_frequency_valid"] = payload.get("ts_frequency_valid")
+        row["minimum_frequency_valid"] = payload.get("minimum_frequency_valid")
+        row["gibbs_free_energy_hartree"] = payload.get("gibbs_free_energy_hartree")
+        row["composite_gibbs_free_energy_hartree"] = payload.get(
+            "composite_gibbs_free_energy_hartree"
+        )
         row["ts_mode_displacement_verified"] = payload.get("ts_mode_displacement_verified")
         row["frequency_count_valid"] = payload.get("frequency_count_valid")
         row["mode_displacement_valid"] = payload.get("mode_displacement_valid")
@@ -224,14 +229,14 @@ class S4ProgressReporter:
 
     def _refresh_summary(self) -> None:
         rows = list(self.state["structures"])
-        terminal = {"complete", "ts_frequency_unverified", "degraded", "opt_failed_sp_complete", "failed"}
+        terminal = {"complete", "ts_frequency_unverified", "minimum_frequency_unverified", "degraded", "opt_failed_sp_complete", "failed"}
         self.state["summary"] = {
             "total": len(rows),
             "pending": sum(row["status"] == "pending" for row in rows),
             "running": sum(row["status"] == "running" for row in rows),
             "finished": sum(row["status"] in terminal for row in rows),
             "failed": sum(row["status"] == "failed" for row in rows),
-            "degraded": sum(row["status"] in {"degraded", "opt_failed_sp_complete", "ts_frequency_unverified"} for row in rows),
+            "degraded": sum(row["status"] in {"degraded", "opt_failed_sp_complete", "ts_frequency_unverified", "minimum_frequency_unverified"} for row in rows),
             "noncomplete": sum(row["status"] not in {"pending", "running", "complete"} for row in rows),
             "usable_for_ml": sum(bool(row.get("usable_for_ml")) for row in rows),
         }
