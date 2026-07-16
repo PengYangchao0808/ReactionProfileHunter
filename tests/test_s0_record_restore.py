@@ -25,9 +25,10 @@ def test_csv_cli_passes_authoritative_s0_record_to_orchestrator(monkeypatch, tmp
     captured = {}
 
     class FakeOrchestrator:
-        def __init__(self, config_path, color=False):
+        def __init__(self, config_path, color=False, ui_mode=None):
             captured["config"] = config_path
             captured["color"] = color
+            captured["ui_mode"] = ui_mode
 
         def run(self, s0_record, work_dir, stop_after):
             captured.update(

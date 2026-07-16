@@ -4,6 +4,7 @@ import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+import pytest
 from _pytest.monkeypatch import MonkeyPatch
 
 import rph_core.v4_orchestrator as v4_orchestrator
@@ -189,11 +190,12 @@ def test_variant_checkpoint_tracks_per_variant_state(tmp_path: Path):
     checkpoint.mark("product_major", "s1", signature, manifest)
     checkpoint.mark_failed("product_major", "s2", "sig_s2", "boom")
 
-    saved = json.loads((tmp_path / ".rph" / "checkpoint.json").read_text(encoding="utf-8"))
+    saved = json.loads((tmp_path / "pipeline.state").read_text(encoding="utf-8"))
     assert checkpoint.reusable("product_major", "s1", signature, manifest)
     assert saved["reaction_id"] == "RXN_P2"
-    assert saved["variants"]["product_major"]["s1"]["status"] == "complete"
-    assert saved["variants"]["product_major"]["s2"]["status"] == "failed"
+    assert saved["stages"]["s1"]["scopes"]["product_major"]["status"] == "complete"
+    assert saved["stages"]["s2"]["scopes"]["product_major"]["status"] == "failed"
+    assert not (tmp_path / ".rph" / "checkpoint.json").exists()
 
 
 def test_single_variant_run_writes_run_manifest(monkeypatch: MonkeyPatch, tmp_path: Path):
@@ -260,7 +262,16 @@ def test_variant_registry_drives_all_variants_into_s3_with_prefixed_ids(monkeypa
         "product_minor_001_int",
         "product_minor_001_ts",
     ]
-    assert all("forming_bonds" not in row for row in s3_structures if row["kind"] == "minimum")
+    assert all(
+        "forming_bonds" not in row
+        for row in s3_structures
+        if row.get("role") == "product"
+    )
+    assert all(
+        row.get("forming_bonds") == [[0, 1], [2, 3]]
+        for row in s3_structures
+        if row.get("role") == "intermediate"
+    )
     assert [row["forming_bonds"] for row in s3_structures if row["kind"] == "ts"] == [
         [[0, 1], [2, 3]],
         [[0, 1], [2, 3]],
@@ -312,3 +323,132 @@ def test_variant_failure_does_not_abort_other_variants(monkeypatch: MonkeyPatch,
     assert run_manifest["variant_status"]["product_major"] == "s2_complete"
     assert run_manifest["variant_status"]["product_minor_001"] == "failed"
     assert run_manifest["stages"]["s2"]["product_minor_001"]["status"] == "failed"
+
+
+def test_unchanged_s1_is_reused_when_continuing_to_s2(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+):
+    variants = [{
+        "variant_id": "product_major",
+        "directory_name": "product_major",
+        "branch_product_smiles": "C=C",
+    }]
+    monkeypatch.setattr(
+        v4_orchestrator.V4Orchestrator,
+        "_write_s0_from_record",
+        staticmethod(_fake_s0_writer(variants)),
+    )
+    s1_calls, s2_calls, _structures = _install_variant_fakes(monkeypatch)
+    output = tmp_path / "run"
+
+    _orchestrator().run(StubRecord(), output, stop_after="s1")
+    _orchestrator().run(StubRecord(), output, stop_after="s2")
+    _orchestrator().run(StubRecord(), output, stop_after="s2")
+
+    assert s1_calls == ["product_major"]
+    assert s2_calls == ["product_major"]
+    assert (output / "run.config.json").exists()
+
+
+def test_scientific_s1_change_fails_before_qc_under_strict_policy(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+):
+    variants = [{
+        "variant_id": "product_major",
+        "directory_name": "product_major",
+        "branch_product_smiles": "C=C",
+    }]
+    monkeypatch.setattr(
+        v4_orchestrator.V4Orchestrator,
+        "_write_s0_from_record",
+        staticmethod(_fake_s0_writer(variants)),
+    )
+    s1_calls, _s2_calls, _structures = _install_variant_fakes(monkeypatch)
+    output = tmp_path / "run"
+    _orchestrator().run(StubRecord(), output, stop_after="s1")
+
+    changed = _orchestrator()
+    changed.config["step1"]["censo_lite"] = {
+        "xtb_thermo": {"gfn_level": 2}
+    }
+    with pytest.raises(v4_orchestrator.ResumeCheckpointError, match="signature mismatch"):
+        changed.run(StubRecord(), output, stop_after="s2")
+
+    assert s1_calls == ["product_major"]
+
+
+def test_explicit_start_from_s2_accepts_existing_s1_signature(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+):
+    variants = [{
+        "variant_id": "product_major",
+        "directory_name": "product_major",
+        "branch_product_smiles": "C=C",
+    }]
+    monkeypatch.setattr(
+        v4_orchestrator.V4Orchestrator,
+        "_write_s0_from_record",
+        staticmethod(_fake_s0_writer(variants)),
+    )
+    s1_calls, s2_calls, _structures = _install_variant_fakes(monkeypatch)
+    output = tmp_path / "run"
+    _orchestrator().run(StubRecord(), output, stop_after="s1")
+    before = json.loads((output / "pipeline.state").read_text(encoding="utf-8"))
+    recorded_s1_signature = before["stages"]["s1"]["scopes"]["product_major"]["signature"]
+
+    resumed = _orchestrator()
+    resumed.config["step1"]["censo_lite"] = {
+        "xtb_thermo": {"gfn_level": 2}
+    }
+    resumed.resume_policy = "use-existing-upstream"
+    resumed.start_from = "s2"
+    resumed.recompute_from = None
+    resumed.run(StubRecord(), output, stop_after="s2")
+
+    after = json.loads((output / "pipeline.state").read_text(encoding="utf-8"))
+    assert s1_calls == ["product_major"]
+    assert s2_calls == ["product_major"]
+    assert after["stages"]["s1"]["scopes"]["product_major"]["signature"] == recorded_s1_signature
+
+
+def test_explicit_recompute_from_s1_reruns_s1(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+):
+    variants = [{
+        "variant_id": "product_major",
+        "directory_name": "product_major",
+        "branch_product_smiles": "C=C",
+    }]
+    monkeypatch.setattr(
+        v4_orchestrator.V4Orchestrator,
+        "_write_s0_from_record",
+        staticmethod(_fake_s0_writer(variants)),
+    )
+    s1_calls, _s2_calls, _structures = _install_variant_fakes(monkeypatch)
+    output = tmp_path / "run"
+    _orchestrator().run(StubRecord(), output, stop_after="s1")
+
+    recompute = _orchestrator()
+    recompute.resume_policy = "recompute"
+    recompute.start_from = None
+    recompute.recompute_from = "s1"
+    recompute.run(StubRecord(), output, stop_after="s1")
+
+    assert s1_calls == ["product_major", "product_major"]
+
+
+def test_s1_scheduling_changes_do_not_change_scientific_signature():
+    first = _orchestrator()
+    first.config["step1"]["censo_lite"] = {
+        "b97_3c": {"parallel_jobs": 1, "cores_per_job": 16},
+        "xtb_thermo": {"gfn_level": 2},
+    }
+    second = _orchestrator()
+    second.config["step1"]["censo_lite"] = {
+        "b97_3c": {"parallel_jobs": 16, "cores_per_job": 1},
+        "xtb_thermo": {"gfn_level": 2},
+    }
+
+    assert first._s1_signature_payload("C=C", "product_major", "product_major") == second._s1_signature_payload(
+        "C=C", "product_major", "product_major"
+    )

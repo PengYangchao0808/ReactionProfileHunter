@@ -16,9 +16,21 @@ def test_cli_forwards_stop_after(monkeypatch, tmp_path: Path):
     captured = {}
 
     class FakeOrchestrator:
-        def __init__(self, config_path=None, color=False):
+        def __init__(
+            self,
+            config_path=None,
+            color=False,
+            ui_mode=None,
+            resume_policy=None,
+            start_from=None,
+            recompute_from=None,
+        ):
             captured["config"] = config_path
             captured["color"] = color
+            captured["ui_mode"] = ui_mode
+            captured["resume_policy"] = resume_policy
+            captured["start_from"] = start_from
+            captured["recompute_from"] = recompute_from
 
         def run(self, s0_record, output, stop_after="s4"):
             captured.update(
@@ -43,6 +55,64 @@ def test_cli_forwards_stop_after(monkeypatch, tmp_path: Path):
     ) == 0
     assert captured["stop_after"] == "s3"
     assert captured["s0_record"].reaction_type == "4+3"
+
+
+def test_cli_forwards_explicit_resume_policy(monkeypatch, tmp_path: Path):
+    captured = {}
+
+    class FakeOrchestrator:
+        def __init__(self, _config=None, **kwargs):
+            captured.update(kwargs)
+
+        def run(self, _record, _output, stop_after="s4"):
+            captured["stop_after"] = stop_after
+            return {}
+
+    monkeypatch.setattr(v4_module, "V4Orchestrator", FakeOrchestrator)
+    assert v4_module.main([
+        "--csv", str(DATASET),
+        "--rx-id", "1",
+        "--output", str(tmp_path),
+        "--stop-after", "s2",
+        "--resume-policy", "use-existing-upstream",
+        "--start-from", "s2",
+    ]) == 0
+
+    assert captured["resume_policy"] == "use-existing-upstream"
+    assert captured["start_from"] == "s2"
+    assert captured["stop_after"] == "s2"
+
+
+def test_cli_forwards_dashboard_ui_mode(monkeypatch, tmp_path: Path):
+    captured = {}
+
+    class FakeOrchestrator:
+        def __init__(self, _config=None, **kwargs):
+            captured.update(kwargs)
+
+        def run(self, _record, _output, stop_after="s4"):
+            return {}
+
+    monkeypatch.setattr(v4_module, "V4Orchestrator", FakeOrchestrator)
+    assert v4_module.main([
+        "--csv", str(DATASET),
+        "--rx-id", "1",
+        "--output", str(tmp_path),
+        "--stop-after", "s1",
+        "--ui", "dashboard",
+    ]) == 0
+    assert captured["ui_mode"] == "dashboard"
+
+
+def test_cli_requires_explicit_policy_for_start_from(tmp_path: Path):
+    with pytest.raises(SystemExit):
+        v4_module.main([
+            "--csv", str(DATASET),
+            "--rx-id", "1",
+            "--output", str(tmp_path),
+            "--stop-after", "s2",
+            "--start-from", "s2",
+        ])
 
 
 def test_cli_rejects_product_smiles_mode(tmp_path: Path):

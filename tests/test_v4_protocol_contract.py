@@ -24,7 +24,7 @@ def test_default_config_is_v4_only():
     assert "protocol_stack" not in config["step1"]
     assert "optimization" not in config["theory"]
     assert config["theory"]["s3_low_level"]["optimization"]["engine"] == "orca"
-    assert config["theory"]["s4_high_precision"]["optimization"]["engine"] == "gaussian"
+    assert config["theory"]["s4_high_precision"]["optimization"]["engine"] == "orca"
     optimization = config["theory"]["s3_low_level"]["optimization"]
     assert optimization["route_minimum"] == "Opt"
     assert optimization["route_ts"] == "OptTS"
@@ -35,8 +35,17 @@ def test_default_config_is_v4_only():
     assert optimization["frequency"]["require_exactly_one"] is True
     assert config["theory"]["s3_low_level"]["single_point"]["solvent_model"] == "CPCM"
     s4_optimization = config["theory"]["s4_high_precision"]["optimization"]
+    assert s4_optimization["method"] == "M062X"
+    assert s4_optimization["basis"] == "def2-SVP"
+    assert s4_optimization["aux_basis"] == "def2/J"
+    assert s4_optimization["route_minimum"] == "Opt"
+    assert s4_optimization["route_ts"] == "OptTS"
+    assert s4_optimization["grid"] == "DefGrid3"
+    assert s4_optimization["scf"] == "TightSCF"
     assert s4_optimization["solvent_model"] == "CPCM"
     assert s4_optimization["frequency"]["enabled_for_ts"] is True
+    assert s4_optimization["frequency"]["task"] == "freq"
+    assert config["theory"]["s4_high_precision"]["single_point"]["engine"] == "orca"
     assert config["theory"]["s4_high_precision"]["single_point"]["solvent_model"] == "CPCM"
     scan = config["step2"]["scan"]
     assert scan["scan_start_distance"] > scan["scan_end_distance"]
