@@ -101,12 +101,12 @@ def check_imports(directory: Path) -> Tuple[int, int]:
 
     # Report results
     if all_violations:
-        print("❌ IMPORT VIOLATIONS FOUND", file=sys.stderr)
+        print("ERROR: IMPORT VIOLATIONS FOUND", file=sys.stderr)
         print("=" * 80, file=sys.stderr)
 
         for file_path, violations in all_violations:
             rel_path = file_path.relative_to(directory.parent)
-            print(f"\n📄 {rel_path}", file=sys.stderr)
+            print(f"\nFILE: {rel_path}", file=sys.stderr)
 
             for line_num, matched_text, description in violations:
                 print(
@@ -114,13 +114,13 @@ def check_imports(directory: Path) -> Tuple[int, int]:
                     file=sys.stderr
                 )
                 print(
-                    f"   ⚠️  {description}",
+                    f"   WARNING: {description}",
                     file=sys.stderr
                 )
 
                 # Provide fix suggestion
                 print(
-                    f"   ✅ FIX: Use 'from rph_core.utils...' instead",
+                    f"   FIX: Use 'from rph_core.utils...' instead",
                     file=sys.stderr
                 )
 
@@ -128,14 +128,14 @@ def check_imports(directory: Path) -> Tuple[int, int]:
         total_violations = sum(len(v) for _, v in all_violations)
         total_files = len(all_violations)
         print(
-            f"\n📊 SUMMARY: {total_violations} violation(s) in {total_files} file(s)",
+            f"\nSUMMARY: {total_violations} violation(s) in {total_files} file(s)",
             file=sys.stderr
         )
         return total_violations, total_files
 
     else:
-        print("✅ No forbidden import patterns found", file=sys.stdout)
-        print(f"📁 Scanned {len(python_files)} Python files", file=sys.stdout)
+        print("OK: No forbidden import patterns found", file=sys.stdout)
+        print(f"Scanned {len(python_files)} Python files", file=sys.stdout)
         return 0, 0
 
 
@@ -148,7 +148,7 @@ def main():
         target_dir = Path(__file__).parent.parent / "rph_core"
 
     if not target_dir.exists():
-        print(f"❌ ERROR: Directory not found: {target_dir}", file=sys.stderr)
+        print(f"ERROR: Directory not found: {target_dir}", file=sys.stderr)
         sys.exit(2)
 
     # Run checks
@@ -156,14 +156,14 @@ def main():
 
     # Exit with appropriate code
     if total_violations > 0:
-        print("\n❌ FAILED: Multi-dot relative imports detected", file=sys.stderr)
+        print("\nFAILED: Multi-dot relative imports detected", file=sys.stderr)
         print(
             "Please follow IMPORT_GUIDELINES.md and use absolute imports for rph_core.utils",
             file=sys.stderr
         )
         sys.exit(1)
     else:
-        print("✅ PASSED: Import style check", file=sys.stdout)
+        print("PASSED: Import style check", file=sys.stdout)
         sys.exit(0)
 
 
