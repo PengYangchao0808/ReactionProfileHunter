@@ -36,7 +36,7 @@ V3 orchestration, `QCTaskRunner`, Berny/QST2/IRC rescue and S2 pre-optimization 
 ```text
 S1: CREST/GFN2 + B97-3c SP ranking + xTB mRRHO; no DFT OPT/FREQ
 S3: ORCA B97-3c OPT/OptTS → ORCA r2SCAN-3c SP
-S4: Gaussian M062X OPT/OptTS → ORCA wB97M-V SP
+S4: ORCA M062X OPT/OptTS/FREQ → ORCA wB97M-V SP
 ```
 
 All methods, paths, resources and timeouts belong in `config/defaults.yaml`. Do not hardcode them in stage code.

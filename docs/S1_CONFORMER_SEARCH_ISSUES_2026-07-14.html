@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RPH V4 S1 构象搜索阶段问题汇总</title>
+<style>
+:root {
+  --w: #fff;
+  --bga: #f5f6f7;
+  --fg: #1d2129;
+  --muted: #646a73;
+  --line: #e4e6eb;
+  --accent: #1a6eff;
+  --accent-bg: #f0f5ff;
+  --code-bg: #f2f3f5;
+  --p0: #e03e2d;
+  --p0-bg: #fff1f0;
+  --p1: #d46b08;
+  --p1-bg: #fff7e6;
+  --p2: #7c6f2e;
+  --p2-bg: #fcffe6;
+  --p3: #63656e;
+  --p3-bg: #f5f5f5;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font: 400 15px/1.8 -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  background: var(--bga);
+  color: var(--fg);
+}
+
+/* top bar */
+.topbar {
+  background: var(--fg);
+  color: var(--w);
+  padding: 16px 24px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.topbar h1 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin: 0;
+  flex: 1;
+  min-width: 200px;
+}
+.topbar .meta {
+  font-size: 0.8rem;
+  opacity: 0.7;
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.container {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 24px 20px 80px;
+}
+
+/* TOC */
+.toc {
+  background: var(--w);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: 20px;
+  padding: 12px 16px;
+}
+.toc > summary {
+  font-weight: 600;
+  font-size: 0.9rem;
+  cursor: pointer;
+  user-select: none;
+}
+.toc ul {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+}
+.toc li {
+  margin: 2px 0;
+  font-size: 0.85rem;
+}
+.toc a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.toc a:hover { text-decoration: underline; }
+.toc ul ul a { opacity: 0.85; }
+.toc > div.toc > ul > li > a { font-weight: 500; }
+
+/* content blocks */
+.section {
+  background: var(--w);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 20px 24px;
+  margin-bottom: 12px;
+}
+
+h2 {
+  font-size: 1.2rem;
+  margin: 0 0 12px;
+  padding-bottom: 6px;
+  border-bottom: 2px solid var(--accent);
+  color: var(--fg);
+}
+h3 {
+  font-size: 1.05rem;
+  margin: 20px 0 8px;
+  color: var(--fg);
+}
+h4 {
+  font-size: 1rem;
+  margin: 16px 0 6px;
+  color: var(--fg);
+}
+p {
+  margin: 0 0 10px;
+  font-size: 0.95rem;
+}
+ul, ol {
+  margin: 0 0 10px;
+  padding-left: 20px;
+}
+li {
+  margin: 3px 0;
+  font-size: 0.95rem;
+}
+strong { color: var(--fg); }
+
+code {
+  font-family: "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+  background: var(--code-bg);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.88em;
+  color: #c41d7f;
+}
+pre {
+  background: #1b1f23;
+  color: #e6e7e9;
+  padding: 14px 16px;
+  border-radius: 6px;
+  overflow-x: auto;
+  font: 0.85rem/1.5 "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+  margin: 0 0 14px;
+}
+pre code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  font-size: inherit;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 14px;
+  font-size: 0.88rem;
+}
+th, td {
+  border: 1px solid var(--line);
+  padding: 7px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+thead { background: var(--bga); }
+tbody tr:nth-child(even) { background: #fafafa; }
+
+blockquote {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-bg);
+  border-radius: 0 4px 4px 0;
+  font-size: 0.9rem;
+}
+blockquote p { margin: 0; }
+
+/* priority badges */
+.b {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+.b0 { background: var(--p0); color: #fff; }
+.b1 { background: var(--p1); color: #fff; }
+.b2 { background: #7c6f2e; color: #fff; }
+.b3 { background: var(--p3); color: #fff; }
+
+@media (max-width: 600px) {
+  .container { padding: 12px; }
+  .section { padding: 14px 16px; }
+  .topbar { padding: 12px 16px; }
+  .topbar h1 { font-size: 0.95rem; }
+}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <h1>RPH V4 S1 构象搜索阶段问题汇总</h1>
+  <div class="meta">
+    <span>2026-07-14</span>
+    <span>V4 S1 CENSO-LITE</span>
+    <span>问题盘点与影响分析</span>
+  </div>
+</header>
+
+<div class="container">
+<details class="toc" open><summary>目录</summary><div class="toc">
+<ul>
+<li><a href="#rph-v4-s1">RPH V4 S1 构象搜索阶段问题汇总</a><ul>
+<li><a href="#1">1. 执行流程概况</a></li>
+<li><a href="#2">2. 本次实际运行暴露的问题</a><ul>
+<li><a href="#21-b97-3c-sp">2.1 B97-3c SP 候选数仍然较大</a></li>
+<li><a href="#22-b97-3c">2.2 B97-3c 构象级并行默认未启用</a></li>
+<li><a href="#23-xtb-mrrho-hessian">2.3 xTB mRRHO 多线程数值 Hessian 不稳定</a></li>
+<li><a href="#24-gfn0-fallback">2.4 GFN0 fallback 因参数搜索路径缺失全部失败</a></li>
+<li><a href="#25-fallback">2.5 Fallback 同时改变线程数和理论方法</a></li>
+<li><a href="#26">2.6 重试结构无法表达"同方法降线程重试"</a></li>
+<li><a href="#27-mrrho-ensemble">2.7 单 mRRHO 失败使整个 ensemble 放弃热校正</a></li>
+</ul>
+</li>
+<li><a href="#3">3. 科学语义与结果一致性问题</a><ul>
+<li><a href="#31">3.1 电荷/自旋默认固定为中性闭壳层</a></li>
+<li><a href="#32-mrrho-fallback-ranking-formula-score">3.2 mRRHO fallback 后 ranking formula 可能与实际 score 不一致</a></li>
+<li><a href="#33-mrrho-provenance">3.3 mRRHO 方法 provenance 缺失</a></li>
+<li><a href="#34-boltzmann-population">3.4 缺少 Boltzmann population</a></li>
+<li><a href="#35-rph-censo_lite-censo-light">3.5 RPH censo_lite 与论文 CENSO-light 名称相近但协议不等同</a></li>
+<li><a href="#36">3.6 固定候选数上限可能覆盖能量分布</a></li>
+</ul>
+</li>
+<li><a href="#4">4. 可恢复性与缓存问题</a><ul>
+<li><a href="#41-sp-s1">4.1 SP 内存缓存对 S1 实际无效</a></li>
+<li><a href="#42-b97-3c">4.2 缺少 B97-3c 逐构象恢复</a></li>
+<li><a href="#43-mrrho">4.3 缺少 mRRHO 逐构象恢复</a></li>
+<li><a href="#44-manifest">4.4 Manifest 只在末尾写入</a></li>
+</ul>
+</li>
+<li><a href="#5">5. 日志与审计问题</a><ul>
+<li><a href="#51">5.1 缺少实时相对能与排序日志</a></li>
+<li><a href="#52">5.2 中间筛选数量没有及时输出</a></li>
+<li><a href="#53">5.3 被过滤/失败候选缺少完整历史</a></li>
+<li><a href="#54-mrrho">5.4 mRRHO 错误日志冗长重复</a></li>
+<li><a href="#55">5.5 日志截面易导致状态误判</a></li>
+</ul>
+</li>
+<li><a href="#6">6. 配置契约问题</a><ul>
+<li><a href="#61">6.1 未实际消费的配置字段</a></li>
+<li><a href="#62-torsion_bin_deg">6.2 torsion_bin_deg 与实际去重判据不同</a></li>
+<li><a href="#63-mrrho">6.3 mRRHO 环境依赖未纳入配置合同</a></li>
+</ul>
+</li>
+<li><a href="#7">7. 实现与仓库约束问题</a><ul>
+<li><a href="#71-stage-subprocessrun">7.1 Stage 模块直接调用 subprocess.run</a></li>
+<li><a href="#72">7.2 外部任务路由不统一</a></li>
+<li><a href="#73-precursor-product-variants-s1">7.3 Precursor + product variants 各自重复完整 S1</a></li>
+</ul>
+</li>
+<li><a href="#8">8. 测试覆盖问题</a><ul>
+<li><a href="#81-xtb-mrrho">8.1 缺少真实 xTB mRRHO 集成测试</a></li>
+<li><a href="#82">8.2 缺少自由能组合回归测试</a></li>
+<li><a href="#83">8.3 缺少中断恢复测试</a></li>
+<li><a href="#84-censo-benchmark">8.4 缺少参考 CENSO 数值 benchmark</a></li>
+</ul>
+</li>
+<li><a href="#9">9. 问题优先级总览</a><ul>
+<li><a href="#p0">P0：可能影响科学正确性或最终结果语义</a></li>
+<li><a href="#p1">P1：已造成任务失败、计算浪费或不可恢复</a></li>
+<li><a href="#p2">P2：效率、可观测性和协议清晰度问题</a></li>
+<li><a href="#p3">P3：实现一致性与维护问题</a></li>
+</ul>
+</li>
+<li><a href="#10">10. 总结</a></li>
+<li><a href="#11-rph-censo_lite-rtconf55-16k-censo-light">11. RPH censo_lite 与 RTCONF55-16K 论文 CENSO-light 的核心差异</a><ul>
+<li><a href="#111">11.1 对比依据</a></li>
+<li><a href="#112-censo-light">11.2 论文 CENSO-light 的核心自由能定义</a></li>
+<li><a href="#113">11.3 论文实际计算层级</a></li>
+<li><a href="#114-rph">11.4 RPH 当前实际语义</a></li>
+<li><a href="#115">11.5 核心差异对照表</a></li>
+<li><a href="#116-ensemble">11.6 提前漏斗与 ensemble 语义不一致</a></li>
+<li><a href="#117-representative-refinement-s3s4">11.7 Representative refinement 与 S3/S4 不能等同</a></li>
+<li><a href="#118-ts">11.8 TS 管线适用边界</a></li>
+<li><a href="#119">11.9 定性结论</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</div>
+</details>
+<div class="section">
+<h1 id="rph-v4-s1">RPH V4 S1 构象搜索阶段问题汇总</h1>
+<p><strong>日期：</strong> 2026-07-14
+<strong>范围：</strong> V4 S1 <code>CENSO-LITE</code> 构象搜索阶段
+<strong>依据：</strong> 当前实现代码、<code>config/defaults.yaml</code>、<code>rx_id_1</code> precursor 实际运行日志与输出目录
+<strong>文档性质：</strong> 问题盘点与影响分析，不包含修复方案</p>
+<h2 id="1">1. 执行流程概况</h2>
+<p>S1 对 precursor 及每个 product variant 分别执行：</p>
+<pre><code class="language-text">RDKit ETKDGv3 -&gt; CREST GFN2/ALPB -&gt; 扭转角/重原子 RMSD 去重
+  -&gt; xTB 相对能窗口预筛 -&gt; 多样性截断 -&gt; ORCA B97-3c/CPCM SP
+  -&gt; B97-3c 相对能窗口 -&gt; thermo pool 截断
+  -&gt; xTB GFN1 SPH+mRRHO -&gt; E(B97-3c)+G(RRHO) 最终排序
+  -&gt; 固定窗口/min_keep/max_keep -&gt; manifest.json + selected.xyz
+</code></pre>
+<p>S1 不执行 DFT 几何优化或频率计算，符合 V4 理论合同。与完整 CENSO 分阶段优化/精修协议不同。</p>
+<h2 id="2">2. 本次实际运行暴露的问题</h2>
+<h3 id="21-b97-3c-sp">2.1 B97-3c SP 候选数仍然较大</h3>
+<p><code>rx_id_1</code> precursor 实际数量：</p>
+<pre><code class="language-text">CREST 原始构象：191
+B97-3c SP：60（达 prefilter.max_candidates_soft 上限）
+mRRHO pool：约 30
+</code></pre>
+<p>B97-3c 前已执行 RMSD 去重、<code>xtb_window_kcal: 5.0</code>、<code>max_candidates_soft: 60</code> 截断。较大的 SP 数量是阈值+多样性保留策略的共同结果，非缺漏 preselection。</p>
+<h3 id="22-b97-3c">2.2 B97-3c 构象级并行默认未启用</h3>
+<p><code>ThreadPoolExecutor</code> 已实现，但默认 <code>parallel_jobs: 1, cores_per_job: 16</code>。构象间串行，单任务 16 核。~20s/SP，60 任务约 20 min wall time。属默认资源策略问题。</p>
+<h3 id="23-xtb-mrrho-hessian">2.3 xTB mRRHO 多线程数值 Hessian 不稳定</h3>
+<p>28 个 mRRHO 目录中：成功 23，失败 4，未执行 1。</p>
+<table>
+<thead>
+<tr>
+<th>构象</th>
+<th>错误</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>conf_0004</code></td>
+<td>rc=-11，Biased Numerical Hessian 崩溃</td>
+</tr>
+<tr>
+<td><code>conf_0018</code></td>
+<td>Fortran 153：allocatable array 未分配</td>
+</tr>
+<tr>
+<td><code>conf_0025</code></td>
+<td>Fortran 174：SIGSEGV</td>
+</tr>
+<tr>
+<td><code>conf_0009</code></td>
+<td>Fortran 153 + Coulomb evaluator setup failure</td>
+</tr>
+</tbody>
+</table>
+<p>所有失败均发生在 <code>--bhess normal</code> 阶段。隔离复现：保持 GFN1/ALPB(acetone)/charge/UHF/<code>--bhess</code>/<code>--enso</code> 不变，线程数从 4 降为 1 后全部成功。</p>
+<p>根因分析：</p>
+<pre><code class="language-text">xTB 6.7.1
+stack limit: 8192 KB
+OMP_STACKSIZE: 未设置
+可用内存: ~53 GiB
+</code></pre>
+<p><code>omp_stacksize: null</code> 导致代码主动移除继承的 <code>OMP_STACKSIZE</code>。设置足够的 OpenMP 线程栈后 4 线程任务成功。本次问题的直接原因是 xTB 6.7.1 并行 Hessian 线程栈需求与运行环境不匹配，非内存耗尽。</p>
+<h3 id="24-gfn0-fallback">2.4 GFN0 fallback 因参数搜索路径缺失全部失败</h3>
+<p>mRRHO fallback（GFN1/4t → GFN0/1t）均报错：</p>
+<pre><code class="language-text">Parameter file param_gfn0-xtb.txt not found
+</code></pre>
+<p>文件实际存在于 <code>/opt/software/xtb/share/xtb/</code>，但子进程 <code>XTBPATH</code> 和 <code>XTBHOME</code> 均为空。属环境传播问题，非 GFN0 未安装。</p>
+<h3 id="25-fallback">2.5 Fallback 同时改变线程数和理论方法</h3>
+<pre><code class="language-text">primary:   GFN1 / 4 threads
+fallback:  GFN0 / 1 thread
+</code></pre>
+<p>一次重试改变两个变量，无法判断成功来自线程还是方法变化。隔离测试已证明 GFN1/1t 即可成功。若部分构象 GFN1 成功、部分 GFN0 fallback 成功，ensemble 会静默混用不同 GFN level 的 <code>G(RRHO)</code>，且无 provenance 记录。</p>
+<h3 id="26">2.6 重试结构无法表达"同方法降线程重试"</h3>
+<p>代码仅当 <code>fallback_gfn_level != primary</code> 时添加 fallback attempt。无法表达：</p>
+<pre><code class="language-text">GFN1 / 多线程失败 -&gt; GFN1 / 单线程重试
+</code></pre>
+<p>重试机制与本次真实故障模式不匹配。</p>
+<h3 id="27-mrrho-ensemble">2.7 单 mRRHO 失败使整个 ensemble 放弃热校正</h3>
+<p>默认 <code>failure_policy: ensemble_electronic_only</code>。任一构象 mRRHO 最终失败 → 所有候选退回 B97-3c 电子能排序。已成功的 23 个 mRRHO 不参与最终排序，计算时间浪费。</p>
+<h2 id="3">3. 科学语义与结果一致性问题</h2>
+<h3 id="31">3.1 电荷/自旋默认固定为中性闭壳层</h3>
+<p>S1 从局部配置读取 charge/multiplicity，未配置时默认 charge=0, mult=1。未从 S0 分子记录自动传递。对离子、开壳层体系造成直接理论输入错误。</p>
+<h3 id="32-mrrho-fallback-ranking-formula-score">3.2 mRRHO fallback 后 ranking formula 可能与实际 score 不一致</h3>
+<p>ensemble electronic-only fallback 后 score 重置为 B97-3c 电子能，但 manifest 的 <code>ranking_formula</code> 仅由 <code>xtb_thermo.enabled</code> 决定，可能仍写为 <code>E_B97-3c_SP + G(RRHO)_xTB</code>。成功构象 metadata 可能仍保留 <code>g_rrho_correction_hartree</code>，但 <code>s1_score_hartree</code> 已不包含。</p>
+<h3 id="33-mrrho-provenance">3.3 mRRHO 方法 provenance 缺失</h3>
+<p><code>run_mrrho()</code> 只返回浮点校正值或 <code>None</code>，未返回：GFN level、线程数、是否 fallback、primary/fallback failure 原因、xTB 版本。manifest 无法判断热化学方法来源。</p>
+<h3 id="34-boltzmann-population">3.4 缺少 Boltzmann population</h3>
+<p>最终筛选仅使用固定 <code>final_window_kcal</code>、<code>min_keep</code>、<code>max_keep</code>。未计算 Boltzmann weight、normalized population、cumulative population。无法按累计 population 筛选。</p>
+<h3 id="35-rph-censo_lite-censo-light">3.5 RPH <code>censo_lite</code> 与论文 <code>CENSO-light</code> 名称相近但协议不等同</h3>
+<p>2024 年 RTCONF55-16K 论文正式定义了 <code>CENSO-zero</code> / <code>CENSO-light</code>。RPH <code>censo_lite</code> 只实现了部分低层级 ensemble ranking 思想，未实现论文定义的完整输出和 representative refinement。详见第 11 节。</p>
+<h3 id="36">3.6 固定候选数上限可能覆盖能量分布</h3>
+<p><code>max_candidates_soft</code> 和 <code>thermo_pool_max</code> 是固定数量上限，非纯能量窗口。多样性截断优先覆盖不同 torsion signature，cluster 数超上限时删除部分 cluster。</p>
+<h2 id="4">4. 可恢复性与缓存问题</h2>
+<h3 id="41-sp-s1">4.1 SP 内存缓存对 S1 实际无效</h3>
+<p><code>ORCAInterface</code> SP cache 是实例级、进程内缓存。每个构象新建实例 → 日志 <code>cache hit rate: 0/1</code>。不能跨构象、跨进程、跨重启复用。</p>
+<h3 id="42-b97-3c">4.2 缺少 B97-3c 逐构象恢复</h3>
+<p>S1 仅整分子级 checkpoint。B97-3c 阶段中断后：CREST 可复用，但已有 ranking 目录不会被可靠解析，重启可能重算。</p>
+<h3 id="43-mrrho">4.3 缺少 mRRHO 逐构象恢复</h3>
+<p>同理，已生成的 <code>xtb_enso.json</code> 无独立 checkpoint，已完成/失败构象无稳定状态索引。重启可能重算。</p>
+<h3 id="44-manifest">4.4 Manifest 只在末尾写入</h3>
+<p>候选状态只在整个 S1 结束后写入。中途无结构化候选文件，中断时无法区分成功/失败/未运行/已过滤。</p>
+<h2 id="5">5. 日志与审计问题</h2>
+<h3 id="51">5.1 缺少实时相对能与排序日志</h3>
+<p>B97 日志输出绝对 Hartree 能量，无完整 <code>conf_id / E_B97-3c / relative energy / G(RRHO) / final score / rank</code> 摘要。</p>
+<h3 id="52">5.2 中间筛选数量没有及时输出</h3>
+<p><code>pipeline_log</code> 内部维护候选中继数量，但运行中无稳定漏斗统计。附件日志无法直接看出 191→60 的筛选过程。</p>
+<h3 id="53">5.3 被过滤/失败候选缺少完整历史</h3>
+<p>manifest 只保留最终候选。未保留：去重/窗口/截断排除的构象、全部 B97-3c 能量、mRRHO 状态、淘汰步骤和原因。</p>
+<h3 id="54-mrrho">5.4 mRRHO 错误日志冗长重复</h3>
+<p>primary 崩溃 + fallback 崩溃输出两套长日志，关键错误信息淹没在重复信息中。</p>
+<h3 id="55">5.5 日志截面易导致状态误判</h3>
+<p>附件在 B97/mRRHO 中间截取，曾出现判断："只执行了 45 个 B97"、"mRRHO 未实现"、"缺少 xTB preselection"。实际分别为 60 个 SP 任务和已启动 mRRHO。</p>
+<h2 id="6">6. 配置契约问题</h2>
+<h3 id="61">6.1 未实际消费的配置字段</h3>
+<pre><code class="language-yaml">prefilter.preserve_torsion_clusters
+prefilter.min_per_cluster
+deduplication.preserve_stereochemistry
+deduplication.preserve_mirror_pairs
+retention.energy_window_kcal
+retention.always_keep_lowest
+</code></pre>
+<p>修改它们不会改变当前行为。</p>
+<h3 id="62-torsion_bin_deg">6.2 <code>torsion_bin_deg</code> 与实际去重判据不同</h3>
+<p>实际 duplicate 判定使用 <code>torsion_rmsd_deg</code> + 重原子 RMSD。<code>torsion_bin_deg</code> 影响 signature key 和 diversity grouping，非直接 duplicate 判据。</p>
+<h3 id="63-mrrho">6.3 mRRHO 环境依赖未纳入配置合同</h3>
+<p>executable 路径已配置，但启动前未验证：GFN parameter file 可发现性、<code>XTBPATH</code> 有效性、OpenMP stack 是否满足、xTB build 与 fallback level 兼容性。</p>
+<h2 id="7">7. 实现与仓库约束问题</h2>
+<h3 id="71-stage-subprocessrun">7.1 Stage 模块直接调用 <code>subprocess.run</code></h3>
+<p><code>xtb_thermo.py</code> 直接使用 <code>subprocess.run</code>，不符合"所有外部 QC job 通过 <code>qc_jobs.py</code>"的编码规则。</p>
+<h3 id="72">7.2 外部任务路由不统一</h3>
+<p>B97-3c（ORCAInterface）与 mRRHO（XTBInterface + <code>run_xtb_enso()</code> + 子进程）在缓存、重试、环境变量、checkpoint、失败记录、输出复用上使用不同实现。</p>
+<h3 id="73-precursor-product-variants-s1">7.3 Precursor + product variants 各自重复完整 S1</h3>
+<p>V4 orchestrator 先处理 precursor，再遍历所有 product variants。每个 variant 独立运行 CREST + B97-3c + mRRHO 全流程。</p>
+<h2 id="8">8. 测试覆盖问题</h2>
+<h3 id="81-xtb-mrrho">8.1 缺少真实 xTB mRRHO 集成测试</h3>
+<p>现有测试覆盖：<code>xtb_enso.json</code> 解析、命令参数、模拟 crash fallback、部分能量解析。未覆盖：多线程 Hessian 栈需求、GFN 参数搜索路径、GFN1/GFN0 一致性、部分 mRRHO 失败的 score、fallback 后 manifest formula 真实性。</p>
+<h3 id="82">8.2 缺少自由能组合回归测试</h3>
+<p>无回归断言验证 <code>s1_score = b973c_sp + g_rrho_correction</code>。无 ensemble electronic-only fallback 后 score/metadata/formula 同步变化测试。</p>
+<h3 id="83">8.3 缺少中断恢复测试</h3>
+<p>未覆盖：CREST 完成后、部分 B97-3c 后、部分 mRRHO 后、primary 失败 fallback 成功后、manifest 写入前的中断恢复。</p>
+<h3 id="84-censo-benchmark">8.4 缺少参考 CENSO 数值 benchmark</h3>
+<p>无固定版本/分子集的对照：最低构象一致性、前若干构象 RMSD、相对能排序、population、筛选召回率、QC 任务数和 wall time。</p>
+<h2 id="9">9. 问题优先级总览</h2>
+<p>优先级仅表示影响严重程度，不代表修复顺序。</p>
+<h3 id="p0"><span class="b b0">P0</span> P0：可能影响科学正确性或最终结果语义</h3>
+<ol>
+<li>电荷/自旋未按分子自动传递，默认中性闭壳层。</li>
+<li>mRRHO fallback 可能混用 GFN1/GFN0 校正。</li>
+<li>Ensemble fallback 后 manifest ranking formula 与实际 score 不一致。</li>
+<li>mRRHO 方法和 fallback provenance 未写入结果。</li>
+</ol>
+<h3 id="p1"><span class="b b1">P1</span> P1：已造成任务失败、计算浪费或不可恢复</h3>
+<ol>
+<li>xTB 6.7.1 多线程 <code>--bhess</code> 在当前 OpenMP 栈环境下不稳定。</li>
+<li>GFN0 fallback 因 <code>XTBPATH</code> 缺失全部失败。</li>
+<li>重试结构不能表达同 GFN level 降线程重试。</li>
+<li>单 mRRHO 失败使整个 ensemble 放弃已成功热校正。</li>
+<li>B97-3c 和 mRRHO 缺少逐构象 checkpoint 与磁盘复用。</li>
+<li>ORCA SP instance cache 对 S1 实际无效。</li>
+</ol>
+<h3 id="p2"><span class="b b2">P2</span> P2：效率、可观测性和协议清晰度问题</h3>
+<ol>
+<li>B97-3c 默认构象级串行。</li>
+<li>默认 SP pool 上限仍可产生 60 个 B97-3c 任务。</li>
+<li>缺少实时相对能、最终 rank 和 Boltzmann population。</li>
+<li>被筛除/失败候选缺少完整历史。</li>
+<li>多项配置字段未被实际使用。</li>
+<li><code>censo_lite</code> 名称易与 RTCONF55-16K 论文 <code>CENSO-light</code> 混淆。</li>
+<li>Precursor + product variants 重复完整 S1 成本。</li>
+<li>mRRHO 错误日志冗长，缺少聚合摘要。</li>
+</ol>
+<h3 id="p3"><span class="b b3">P3</span> P3：实现一致性与维护问题</h3>
+<ol>
+<li>Stage 模块直接 <code>subprocess.run</code>，违反 QC job 路由规则。</li>
+<li>ORCA SP 与 xTB mRRHO 使用不同任务生命周期/缓存/恢复语义。</li>
+<li>真实二进制、失败回退、分数一致性、中断恢复测试不足。</li>
+</ol>
+<h2 id="10">10. 总结</h2>
+<p>S1 已具备完整基本漏斗：CREST/GFN2、xTB 预筛、B97-3c 排序、xTB mRRHO 自由能校正。问题集中在四类：</p>
+<ol>
+<li><strong>运行稳定性：</strong> xTB 多线程 Hessian 栈配置不当 + fallback 环境不可用。</li>
+<li><strong>结果一致性：</strong> charge/spin、混合 GFN fallback、ensemble fallback、manifest formula 之间的科学语义风险。</li>
+<li><strong>恢复与审计：</strong> 缺少逐构象 checkpoint、磁盘复用和完整候选历史。</li>
+<li><strong>效率与可观测性：</strong> B97 候选池偏大、默认串行、缺乏实时漏斗和排序摘要。</li>
+</ol>
+<p>这些共同导致本次运行 B97-3c 数量大、mRRHO 大量报错、fallback 全部失效、已成功热化学计算可能被整体弃用。</p>
+<h2 id="11-rph-censo_lite-rtconf55-16k-censo-light">11. RPH <code>censo_lite</code> 与 RTCONF55-16K 论文 <code>CENSO-light</code> 的核心差异</h2>
+<h3 id="111">11.1 对比依据</h3>
+<p>本节"论文 CENSO-light"指以下文章定义的协议：</p>
+<blockquote>
+<p>B. B. Mészáros et al., <em>J. Chem. Theory Comput.</em> <strong>2024</strong>, 20, 7385–7392. DOI: <a href="https://doi.org/10.1021/acs.jctc.4c00565">10.1021/acs.jctc.4c00565</a>.</p>
+</blockquote>
+<p>论文定义四种协议：</p>
+<table>
+<thead>
+<tr>
+<th>协议</th>
+<th>Ensemble optimization</th>
+<th>Ensemble ranking</th>
+<th>Representative refinement</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CENSO-zero</td>
+<td>xTB</td>
+<td>xTB</td>
+<td>RSH//GGA</td>
+</tr>
+<tr>
+<td>CENSO-light</td>
+<td>xTB</td>
+<td>GGA</td>
+<td>RSH//GGA</td>
+</tr>
+<tr>
+<td>CENSO-default</td>
+<td>narrowed GGA ensemble</td>
+<td>narrowed RSH ensemble</td>
+<td>RSH//GGA</td>
+</tr>
+<tr>
+<td>CENSO-brute-force</td>
+<td>GGA</td>
+<td>RSH</td>
+<td>RSH//GGA</td>
+</tr>
+</tbody>
+</table>
+<p>论文 CENSO-light = 低成本 ensemble 热力学 + GGA 单点排序 + 单代表构象 RSH//GGA refinement。RPH <code>censo_lite</code> 与论文名称相近但非同一协议。</p>
+<h3 id="112-censo-light">11.2 论文 CENSO-light 的核心自由能定义</h3>
+<p>论文将一个状态的构象 ensemble Gibbs free energy 分解为：</p>
+<p>$$G_{\mathrm{ens}} = G_0 + G_{\mathrm{conf}}^{\mathrm{rel}}$$</p>
+<p>其中 $G_0$ 为最低自由能构象的精修自由能，$G_{\mathrm{conf}}^{\mathrm{rel}} = -RT\ln\sum_i g_i\exp[-(G_i-G_0)/RT]$ 为其余构象的构象自由能稳定化。</p>
+<p>低层级排序自由能：$G_i^{\mathrm{light}} = E_i^{\mathrm{B97-3c//xTB}} + \Delta G_{i,\mathrm{therm}}^{\mathrm{xTB//xTB}}$（热统计校正，非 xTB 总自由能）。</p>
+<p>最终语义：
+$$G_{\mathrm{ens}}^{\mathrm{CENSO-light}} = G_0^{\mathrm{RSH//GGA}} + G_{\mathrm{conf}}^{\mathrm{rel,GGA//xTB}}$$</p>
+<h3 id="113">11.3 论文实际计算层级</h3>
+<table>
+<thead>
+<tr>
+<th>环节</th>
+<th>方法</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>构象搜索</td>
+<td>CREST GFN2-xTB, iMTD-sMTD, 6.0 kcal/mol window</td>
+</tr>
+<tr>
+<td>xTB 溶剂</td>
+<td>ALPB(DCM)</td>
+</tr>
+<tr>
+<td>Ensemble geometry</td>
+<td>xTB optimized</td>
+</tr>
+<tr>
+<td>GGA ranking</td>
+<td>B97-3c/CPCM(DCM) SP</td>
+</tr>
+<tr>
+<td>Thermal contribution</td>
+<td>xTB//xTB, 全构象</td>
+</tr>
+<tr>
+<td>Repr. geometry refinement</td>
+<td>B97-3c/CPCM(DCM) OPT</td>
+</tr>
+<tr>
+<td>Repr. final SP</td>
+<td>ωB97M-V/def2-TZVPP/CPCM(DCM)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="114-rph">11.4 RPH 当前实际语义</h3>
+<p>RPH S1 低层级排序：$S_i = E_i^{\mathrm{B97-3c//CREST}} + G_i^{\mathrm{RRHO,GFN1}}$（<code>G(T)</code> 作为 correction 使用，避免了重复 xTB electronic energy）。</p>
+<p>但 RPH 只输出 rank-1 构象及其排序分数，不组装 $G_{\mathrm{conf}}^{\mathrm{rel}}$，也不将 conformational correction 传递到后续阶段。</p>
+<h3 id="115">11.5 核心差异对照表</h3>
+<table>
+<thead>
+<tr>
+<th>比较项</th>
+<th>论文 CENSO-light</th>
+<th>RPH censo_lite</th>
+<th>差异性质</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>目标输出</td>
+<td>状态的 ensemble Gibbs free energy</td>
+<td>S1 rank-1 构象、有限候选及排序分数</td>
+<td>输出物理量不同</td>
+</tr>
+<tr>
+<td>Ensemble 保留到最终热力学</td>
+<td>是，通过 $G_{\mathrm{conf}}^{\mathrm{rel}}$</td>
+<td>否，主要用于选 rank-1</td>
+<td>核心语义缺失</td>
+</tr>
+<tr>
+<td>Partition function</td>
+<td>计算 $Z_{\mathrm{rel}}$</td>
+<td>未计算</td>
+<td>核心差异</td>
+</tr>
+<tr>
+<td>Boltzmann population</td>
+<td>参与 conformational correction</td>
+<td>未输出</td>
+<td>核心差异</td>
+</tr>
+<tr>
+<td>CREST workflow</td>
+<td>GFN2-xTB iMTD-sMTD</td>
+<td>GFN2 <code>imtd_gc</code></td>
+<td>搜索协议不同</td>
+</tr>
+<tr>
+<td>CREST window</td>
+<td>6.0 kcal/mol</td>
+<td>6.0 kcal/mol</td>
+<td>一致</td>
+</tr>
+<tr>
+<td>溶剂</td>
+<td>ALPB/CPCM(DCM)</td>
+<td>ALPB/CPCM(acetone)</td>
+<td>benchmark 条件不同</td>
+</tr>
+<tr>
+<td>B97 SP 覆盖范围</td>
+<td>全 xTB ensemble</td>
+<td>去重 + 5 kcal + cap ≤ 60</td>
+<td>RPH 提前截断</td>
+</tr>
+<tr>
+<td>Thermal correction 范围</td>
+<td>全 partition function 构象</td>
+<td>B97 window + cap ≤ 30</td>
+<td>范围不同</td>
+</tr>
+<tr>
+<td>Thermal level</td>
+<td>GFN2-xTB//xTB</td>
+<td>默认 GFN1，失败可能 GFN0</td>
+<td>方法层级不同</td>
+</tr>
+<tr>
+<td>热校正前筛选</td>
+<td>ensemble free-energy 语义</td>
+<td>B97 electronic window 后再 mRRHO</td>
+<td>排序顺序不同</td>
+</tr>
+<tr>
+<td>代表构象优化</td>
+<td>B97-3c OPT</td>
+<td>S1 不做，S3 做 B97-3c OPT/OptTS</td>
+<td>阶段与对象不同</td>
+</tr>
+<tr>
+<td>代表构象最终 SP</td>
+<td>ωB97M-V on B97-3c geom</td>
+<td>ωB97M-V on M062X geom (S4)</td>
+<td>geometry level 不同</td>
+</tr>
+<tr>
+<td>最终组装</td>
+<td>$G_0^{\mathrm{RSH//GGA}} + G_{\mathrm{conf}}^{\mathrm{rel}}$</td>
+<td>未加 conformational correction</td>
+<td>核心语义缺失</td>
+</tr>
+<tr>
+<td>mRRHO 失败</td>
+<td>无此降级（全 thermal）</td>
+<td>任一失败 → pool 退回电子能</td>
+<td>RPH 特有降级</td>
+</tr>
+<tr>
+<td>适用对象</td>
+<td>55 reaction states benchmark</td>
+<td>precursor/product/intermediate/TS</td>
+<td>外推范围不同</td>
+</tr>
+</tbody>
+</table>
+<h3 id="116-ensemble">11.6 提前漏斗与 ensemble 语义不一致</h3>
+<p>RPH 的两轮固定数量截断 + "先 electronic 筛选后 thermal correction"的顺序改变了进入 partition function 的构象集合。即使保留构象的单点 score 与论文相近，也不等于 ensemble free-energy 语义。</p>
+<h3 id="117-representative-refinement-s3s4">11.7 Representative refinement 与 S3/S4 不能等同</h3>
+<p>论文代表构象精修链：low-level rank-1 → B97-3c OPT → ωB97M-V SP。
+RPH：S1 rank-1 → S2 PEB（引入 TS/intermediate）→ S3 B97-3c OPT + r2SCAN-3c SP → S4 M062X OPT + ωB97M-V SP。S3/S4 计算对象不再只是 S1 rank-1 平衡态构象，S4 ωB97M-V 在 M062X 而非 B97-3c 优化几何上计算。</p>
+<h3 id="118-ts">11.8 TS 管线适用边界</h3>
+<p>RTCONF55-16K 验证的是反应物/产物等反应状态，TS 构象评估仍在进行。论文的 MAE ≈ 0.6 (CENSO-light) / 0.9 (CENSO-zero) kcal/mol 及 "~10x faster" 不能直接作为 RPH 过渡态和反应剖面的误差或加速比。</p>
+<h3 id="119">11.9 定性结论</h3>
+<p>RPH 已实现论文 CENSO-light 的部分计算思想——CREST/GFN2 ensemble、B97-3c ranking、xTB thermal correction、rank-1 进入后续管线、不做全 ensemble DFT optimization——但尚未实现决定其最终物理语义的核心部分：partition function、$G_{\mathrm{conf}}^{\mathrm{rel}}$、Boltzmann population、rank-1 refined energy 与 conformational correction 的组装、GFN2 thermal level、RSH//GGA representative refinement。</p>
+<p>当前更准确的定义为：<strong>CENSO-light-inspired rank-1 conformer selection stage</strong>，非完整的论文 <code>CENSO-light ensemble free-energy protocol</code>。</p>
+</div>
+</div>
+
+</body>
+</html>

@@ -8,7 +8,7 @@
 
 ## 1. 执行结论
 
-当前 V4 已完成计算协议层的关键替换：可信数据集 S0、固定 CENSO-LITE S1、PEB S2、ORCA 低级别 S3、Gaussian/ORCA 高精度 S4，以及 S4 的 WSL 实时状态查看。
+当前 V4 已完成计算协议层的关键替换：可信数据集 S0、固定 CENSO-LITE S1、PEB S2、ORCA 低级别 S3、ORCA 高精度 S4，以及 S4 的 WSL 实时状态查看。
 
 但它仍是单一路径原型，尚未恢复原 RPH 的完整反应拓扑：S0 机理图、DR 结构变体、precursor、结构变体隔离 checkpoint 与统一运行面板。因此，V4 目前不应被视为 V3 的能力等价替代品。默认 V4 在 S1 选择唯一代表构象；S2–S4 不再暴露或复制 `conf_0001` 等构象目录。
 
@@ -206,13 +206,13 @@ S3/S4 必须使用平铺的完整结构对象目录，禁止 `product_major/inte
 | S2 | xTB PEB 逆向扫描 | 只从各 product variant 的 S1 `selected.xyz` 启动 |
 | S3 minima | ORCA B97-3c/CPCM(acetone) OPT + r2SCAN-3c/CPCM SP | 快速、完整、可用于失败保留 |
 | S3 TS | ORCA B97-3c/CPCM OptTS + 独立 Freq + r2SCAN-3c/CPCM SP | 记录虚频、模式和失败原因 |
-| S4 minima | Gaussian M062X/def2-SVP/CPCM OPT + ORCA wB97M-V/def2-TZVPP/CPCM SP | 所有候选结构执行 |
-| S4 TS | Gaussian M062X/def2-SVP/CPCM OptTS + 独立 Freq + ORCA wB97M-V/def2-TZVPP/CPCM SP | 高精度 TS 质量门槛 |
+| S4 minima | ORCA M062X/def2-SVP/CPCM OPT + ORCA wB97M-V/def2-TZVPP/CPCM SP | 所有候选结构执行 |
+| S4 TS | ORCA M062X/def2-SVP/CPCM OptTS + 独立 Freq + ORCA wB97M-V/def2-TZVPP/CPCM SP | 高精度 TS 质量门槛 |
 
-S3/S4 中 `CPCM(acetone)` 必须是实际 QC 输入的一部分，不能只是 YAML 注释。Gaussian 路由应出现：
+S3/S4 中 `CPCM(acetone)` 必须是实际 ORCA 输入的一部分，不能只是 YAML 注释。ORCA 路由应出现：
 
 ```text
-SCRF=(CPCM,Solvent=acetone)
+CPCM(acetone)
 ```
 
 ---
@@ -413,7 +413,7 @@ product_minor_001 + intermediate + TS     = 2 + 2 + 3 = 7
 1. **烟雾测试：** `rx_id=1`，`--stop-after s1`；
 2. **PEB 测试：** 同一记录，`--stop-after s2`，检查方向与 forming bonds；
 3. **低级别测试：** `--stop-after s3`，检查 product、precursor、intermediate、TS；
-4. **高精度测试：** 独立新输出目录运行 S4，检查 Gaussian CPCM route、TS Freq、ORCA SP；
+4. **高精度测试：** 独立新输出目录运行 S4，检查 ORCA CPCM route、TS Freq 和 ORCA SP；
 5. **DR variant 测试：** 至少一个有明确 DR 的反应，检查 `product_major/product_minor_001`；
 6. **条件测试：** 基线与 LiCl 使用两个独立运行根目录；
 7. **小型 benchmark：** 20–50 条代表反应，统计成功率、耗时、TS Freq 通过率、结构保留率与 ML 特征覆盖率。

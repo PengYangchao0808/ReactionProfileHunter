@@ -19,7 +19,7 @@ Single source of truth for all runtime configuration: `defaults.yaml` (V4 canoni
 | `theory.s3_low_level.optimization` | ORCA B97-3c OPT/OptTS method/basis/solvent (CPCM acetone) |
 | `theory.s3_low_level.optimization.frequency` | `enabled_for_ts`, `imaginary_cutoff_cm1` (default -50.0) |
 | `theory.s3_low_level.single_point` | ORCA r2SCAN-3c SP method/basis/solvent |
-| `theory.s4_high_precision.optimization` | Gaussian M062X OPT/OptTS method/basis/solvent (CPCM acetone) |
+| `theory.s4_high_precision.optimization` | ORCA M062X OPT/OptTS/FREQ method/basis/solvent (CPCM acetone) |
 | `theory.s4_high_precision.optimization.frequency` | TS frequency validation |
 | `theory.s4_high_precision.single_point` | ORCA wB97M-V SP method/basis/solvent |
 | `step1.protocol` | Must be `censo_lite` (only allowed protocol) |

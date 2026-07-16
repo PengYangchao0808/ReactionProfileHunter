@@ -15,7 +15,7 @@ Core package: `v4_orchestrator.py` wires S0→S4; `steps/` holds per-step busine
 | S1 torsion dedup | `steps/conformer_search/torsion_signature.py`, `deduplicator.py` | Torsion-aware conformer deduplication |
 | S2 PEB | `steps/step2_retro/peb_scanner.py` → `retro_scanner.py` | xTB PEB backward scan from S1 selected product |
 | S3 low-level | `steps/step3_lowlevel/engine.py` | ORCA B97-3c OPT/OptTS → r2SCAN-3c SP |
-| S4 high-level | `steps/step4_highlevel/engine.py` | Gaussian M062X OPT/OptTS → ORCA wB97M-V SP |
+| S4 high-level | `steps/step4_highlevel/engine.py` | ORCA M062X OPT/OptTS/FREQ → ORCA wB97M-V SP |
 | Shared stage engine | `steps/stage_calculator.py` | OPT/Freq/SP dispatch for both S3 and S4 |
 | QC job routing | `utils/qc_jobs.py`, `qc_models.py` | `run_optimization()`, `run_frequency()`, `run_single_point()` |
 | QC interfaces | `utils/orca_interface.py`, `qc_interface.py` | ORCA + Gaussian + xTB + CREST runners |
@@ -28,7 +28,7 @@ Core package: `v4_orchestrator.py` wires S0→S4; `steps/` holds per-step busine
 ## V4 CONFIG CONTRACT
 All methods, paths, resources and timeouts belong in `config/defaults.yaml`. Key sections:
 - `theory.s3_low_level` — ORCA B97-3c OPT/Freq + r2SCAN-3c SP (with CPCM acetone)
-- `theory.s4_high_precision` — Gaussian M062X OPT/Freq + ORCA wB97M-V SP (with CPCM acetone)
+- `theory.s4_high_precision` — ORCA M062X OPT/Freq + ORCA wB97M-V SP (with CPCM acetone)
 - `step1.protocol: censo_lite` (only allowed protocol)
 - `step1.censo_lite` — CREST, ranking, xTB thermo, deduplication parameters
 - `step2.scan` — PEB backward scan parameters

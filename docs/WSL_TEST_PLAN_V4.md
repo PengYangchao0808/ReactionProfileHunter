@@ -13,7 +13,7 @@
 | S1 | V4 强制 `censo_lite`；CREST/GFN2、B97-3c SP、xTB mRRHO、二面角签名去重 | 已切换到独立 `CensoLiteRuntime`，需真实 QC 实测 |
 | S2 | `PEBScanner` 目前是旧 `RetroScanner` 的 V4 别名 | 功能可接入，破坏性拆分尚未完成 |
 | S3 | 新 `LowLevelEngine` + `StageCalculator`；ORCA B97-3c OPT/OptTS + r2SCAN-3c SP | 静态检查通过，尚无真实 ORCA 运行结果 |
-| S4 | 新 `HighLevelEngine`；Gaussian M062X OPT/OptTS + ORCA wB97M-V SP | 静态检查通过，尚无真实 Gaussian/ORCA 运行结果 |
+| S4 | 新 `HighLevelEngine`；ORCA M062X OPT/OptTS/FREQ + ORCA wB97M-V SP | 静态检查通过，需真实 ORCA 运行验证 |
 | 检查点 | `pipeline.state` 记录签名并参与 S0–S4 manifest 复用 | 已实现，需做中断/配置变更实测 |
 | QCTaskRunner | V4 活动路径和旧 V3 文件已移除 | 需通过全量 import 和 WSL 运行确认无残留 |
 
@@ -33,7 +33,7 @@ V4/检查点/路径相关测试       PASS（10 passed）
 - `rdkit`
 - `rph_features`（外部 RPH_Postprocess 测试依赖）
 
-WSL 当前状态为 Ubuntu/WSL2，32 核、约 54 GiB 可用内存；仓库已挂载到 `/mnt/e`，但尚未发现 `pytest`、`rdkit`、ORCA、CREST、xTB 或 Gaussian 可执行文件。
+WSL 当前状态为 Ubuntu/WSL2，32 核、约 54 GiB 可用内存；仓库已挂载到 `/mnt/e`，但尚未发现 `pytest`、`rdkit`、ORCA、CREST 或 xTB 可执行文件。
 
 ## 3. WSL 环境准备
 
@@ -64,19 +64,17 @@ V4 的默认配置期望以下路径，建议先保持路径一致：
 /opt/software/orca/orca
 /opt/software/crest/crest
 /opt/software/xtb/bin/xtb
-/opt/software/gaussian/g16/g16
 ```
 
-ORCA、CREST、xTB 和 Gaussian 必须分别确认：
+ORCA、CREST 和 xTB 必须分别确认：
 
 ```bash
 test -x /opt/software/orca/orca
 test -x /opt/software/crest/crest
 test -x /opt/software/xtb/bin/xtb
-test -x /opt/software/gaussian/g16/g16
 ```
 
-Gaussian 需要合法授权和可用 license；ORCA 需要其动态库目录可被找到。若实际安装路径不同，应复制 `config/defaults.yaml` 为本地配置并只修改 `executables.*.path`、库路径和资源配置，不要修改代码中的路径。
+ORCA 需要其动态库目录可被找到。若实际安装路径不同，应复制 `config/defaults.yaml` 为本地配置并只修改 `executables.*.path`、库路径和资源配置，不要修改代码中的路径。
 
 ### 3.3 运行时依赖检查
 
@@ -89,7 +87,6 @@ for name in ('numpy', 'scipy', 'yaml', 'pytest', 'rdkit'):
 PY
 
 for exe in orca crest xtb; do command -v "$exe" || true; done
-command -v g16 || true
 nproc
 free -h
 df -h /tmp "$RPH_ROOT"
@@ -145,9 +142,9 @@ T0 通过标准：编译成功、导入门禁成功、V4 相关测试全部通�
 2. ORCA `B97-3c OptTS` 输入能够生成；
 3. ORCA `r2SCAN-3c SP`；
 4. ORCA `wB97M-V/def2-TZVPP` SP；
-5. Gaussian `M062X/def2-SVP Opt`；
-6. Gaussian `M062X/def2-SVP Opt=(TS,CalcFC,NoEigenTest)` 输入和运行；
-7. ORCA、Gaussian 输出均能被现有接口解析出能量和坐标。
+5. ORCA `M062X/def2-SVP Opt`；
+6. ORCA `M062X/def2-SVP OptTS` 与 `Freq` 输入和运行；
+7. ORCA 输出能被现有接口解析出能量、坐标和频率。
 
 每个 smoke job 必须保留输入、输出、退出码和运行时间。T1 不要求找到真实过渡态，但要求 `OptTS` 作业能启动并给出可诊断结果。
 
@@ -224,7 +221,7 @@ S3_LowLevel/manifest.json
 - S3 运行日志中没有 Gaussian 调用；
 - S3 运行日志中没有 `QCTaskRunner`、FREQ、NBO 或旧 TS rescue；
 - OPT 失败时仍尝试对原始输入进行 SP；
-- SP 成功时 `usable_for_ml == true`；
+- OPT 和 SP 均成功时 `usable_for_ml == true`；
 - 每个结构的输入、优化坐标、SP 输入和输出路径都写入 manifest。
 
 ### T5：S4 高精度测试
@@ -241,14 +238,14 @@ S4_HighLevel/manifest.json
 
 | 结构 | OPT | SP |
 |---|---|---|
-| minimum/intermediate | Gaussian M062X/def2-SVP Opt | ORCA wB97M-V/def2-TZVPP + def2/J SP |
-| TS seed | Gaussian M062X/def2-SVP Opt=(TS,CalcFC,NoEigenTest) | ORCA wB97M-V/def2-TZVPP + def2/J SP |
+| minimum/intermediate | ORCA M062X/def2-SVP Opt + Freq 验证 | ORCA wB97M-V/def2-TZVPP + def2/J SP |
+| TS seed | ORCA M062X/def2-SVP OptTS + Freq 验证 | ORCA wB97M-V/def2-TZVPP + def2/J SP |
 
 必须确认：
 
 - S4 对每一个 S3 结构执行完整 OPT+SP，不只计算最低能结构；
-- Gaussian 和 ORCA 的输出文件均被保留；
-- Gaussian OPT 不收敛时，manifest 仍保留 S3 坐标，并将 S4 标记为 degraded；
+- ORCA 的优化、频率和单点输出文件均被保留；
+- ORCA OPT 不收敛时，manifest 仍保留 S3 坐标，将 S4 标记为 incomplete，并令该结构 `usable_for_ml == false`；
 - S3 低精度结果不会被 S4 失败覆盖；
 - ML 使用的最低保障字段仍可从 S3 manifest 读取。
 
@@ -257,7 +254,7 @@ S4_HighLevel/manifest.json
 至少完成以下失败注入：
 
 1. 删除 ORCA：S3/S4 manifest 应报告失败，不应 Python 崩溃；
-2. 删除 Gaussian：S4 OPT 失败，但 S3 结果仍完整；
+2. 将 S4 engine 配成非 ORCA：配置应被明确拒绝，S3 结果仍完整；
 3. 让一个结构 OPT 超时：其他结构继续运行；
 4. 删除一个 XYZ：对应结构 degraded，其他结构继续运行；
 5. 修改配置后重跑：签名变化，不能错误复用旧 manifest；
@@ -277,8 +274,8 @@ V4 进入 benchmark 前必须同时满足：
 
 1. T0、T1、T2、T3、T4、T5 全部有日志和 manifest；
 2. 至少一个真实样本完成 S3 的 OPT+SP；
-3. 至少一个真实样本完成 S4 的 OPT+SP，或有可复现的 Gaussian 失败诊断；
-4. S3 不再调用 Gaussian、FREQ、NBO 和 QCTaskRunner；
+3. 至少一个真实样本完成 S4 的 ORCA OPT+SP；
+4. S3/S4 不再调用 Gaussian、NBO 和 QCTaskRunner；
 5. S4 失败时 S3 低级别坐标和能量仍可直接用于 ML；
 6. 输出目录中不得混入旧版 `S1_ConfGeneration`、`S2_Retro`、`S3_TransitionAnalysis` 作为 V4 的主产物；
 7. 全量测试中的外部 `rph_features` 依赖必须单独安装或从 RPH 核心测试集合中隔离，不能把 collection error 当作 V4 通过。

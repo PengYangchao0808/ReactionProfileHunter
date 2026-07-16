@@ -10,7 +10,7 @@ V4 step implementations: S0 mechanism → S1 CENSO-LITE conformer search → S2 
 | S1 CENSO-LITE | `conformer_search/` | `censo_lite.py` → `CensoLiteEngine.run()` | CREST/GFN2 + B97-3c SP + xTB mRRHO |
 | S2 PEB | `step2_retro/` | `peb_scanner.py` → `RetroScanner.run()` | xTB PEB backward scan |
 | S3 low-level | `step3_lowlevel/` | `engine.py` → `LowLevelEngine.run()` | ORCA B97-3c OPT/OptTS → r2SCAN-3c SP |
-| S4 high-level | `step4_highlevel/` | `engine.py` → `HighLevelEngine.run()` | Gaussian M062X OPT/OptTS → ORCA wB97M-V SP |
+| S4 high-level | `step4_highlevel/` | `engine.py` → `HighLevelEngine.run()` | ORCA M062X OPT/OptTS/FREQ → ORCA wB97M-V SP |
 | Shared engine | — | `stage_calculator.py` → `StageCalculator` | OPT/Freq/SP dispatch for S3 + S4 |
 
 ## V4 OUTPUT CONTRACT

@@ -25,7 +25,7 @@ ReactionProfileHunter (RPH) 是一个**产物驱动**的自动化 DFT 反应机�
 
 - **产物驱动策略**：从产物分子出发，自动逆向搜索反应路径
 - **五阶段 DFT 流水线**：机理验证 -> CENSO-LITE 构象搜索 -> PEB 逆向扫描 -> 低级别计算 -> 高精度计算
-- **固定理论协议**：CREST/GFN2 + B97-3c SP (S1)、ORCA B97-3c -> r2SCAN-3c (S3)、Gaussian M062X -> ORCA wB97M-V (S4)
+- **固定理论协议**：CREST/GFN2 + B97-3c SP (S1)、ORCA B97-3c -> r2SCAN-3c (S3)、ORCA M062X -> ORCA wB97M-V (S4)
 - **多引擎支持**：Gaussian、ORCA、xTB、CREST
 - **基于清单的断点恢复**：每结构失败隔离
 - **WSL 实时状态查看**（`rph_watch`）
@@ -52,7 +52,7 @@ V4 流水线以清晰、可重复的协议取代了 V3 的 Berny/QST2/IRC 救援
 | S1 | CENSO-LITE 构象搜索 | CREST/GFN2 采样 + ORCA B97-3c SP 排序 + xTB mRRHO。无 DFT OPT/FREQ。 |
 | S2 | PEB 逆向扫描 | 从 S1 选定构象出发的 xTB 势能面成键扫描；生成 TS 初猜和中间体 |
 | S3 | 低级别计算 | ORCA B97-3c OPT/OptTS + Freq；ORCA r2SCAN-3c SP（CPCM 丙酮） |
-| S4 | 高精度计算 | Gaussian M062X OPT/OptTS + Freq；ORCA wB97M-V SP（CPCM 丙酮） |
+| S4 | 高精度计算 | ORCA M062X OPT/OptTS + Freq；ORCA wB97M-V SP（CPCM 丙酮） |
 
 流水线流程：
 
@@ -154,8 +154,7 @@ ReactionProfileHunter/
 
 V4 完整运行 S0-S4 需要以下全部软件：
 
-- Gaussian 16 — S4 几何优化
-- ORCA — S3/S4 单点能、S1 B97-3c 排序
+- ORCA — S1 B97-3c 排序以及全部 S3/S4 DFT 任务
 - xTB — S1 mRRHO 热化学、S2 PEB 扫描
 - CREST — S1 构象采样
 
@@ -177,11 +176,7 @@ V4 完整运行 S0-S4 需要以下全部软件：
    编辑 `config/defaults.yaml`，填入已安装软件的路径：
    ```yaml
    executables:
-     gaussian:
-       path: "/path/to/g16/g16"
-       root: "/path/to/g16"
-       profile: "/path/to/g16/g16.profile"
-     orca:
+      orca:
        path: "/path/to/orca/orca"
        ld_library_path: "/path/to/orca"
      xtb:
@@ -216,6 +211,20 @@ bin/rph_run --csv data/trusted_reactions.csv --rx-id RXN_000001 --output ./Outpu
 # 运行到 S3（跳过高精度 S4）
 bin/rph_run --csv data/trusted_reactions.csv --rx-id RXN_000001 --output ./Output/RXN_000001 --stop-after s3
 ```
+
+恢复运行默认采用严格策略。如果已完成阶段与当前科学配置不一致，RPH 会在启动
+QC 前停止并报告差异，需要显式选择后续动作：
+
+```bash
+# 从 S1 重新计算，并使 S2-S4 失效
+bin/rph_run --csv data/trusted_reactions.csv --rx-id RXN_000001 --output ./Output/RXN_000001 --stop-after s2 --recompute-from s1
+
+# 保留已完成的 S0/S1 产物，从 S2 开始新计算
+bin/rph_run --csv data/trusted_reactions.csv --rx-id RXN_000001 --output ./Output/RXN_000001 --stop-after s2 --resume-policy use-existing-upstream --start-from s2
+```
+
+首次运行会将配置冻结到 `run.config.json`。所有可恢复的阶段及变体状态统一存储在
+`pipeline.state`；旧 `.rph/checkpoint.json` 仅做只读迁移。
 
 #### WSL 实时状态查看
 
@@ -308,7 +317,7 @@ S3: ORCA B97-3c OPT（最小值）/ OptTS（TS）+ 独立 Freq（仅 TS）
     -> ORCA r2SCAN-3c SP
     溶剂: CPCM(丙酮)
 
-S4: Gaussian M062X/def2-SVP OPT / OptTS + 独立 Freq（仅 TS）
+S4: ORCA M062X/def2-SVP OPT / OptTS + 独立 Freq（仅 TS）
     -> ORCA wB97M-V/def2-TZVPP SP
     溶剂: CPCM(丙酮)
 ```
@@ -459,14 +468,16 @@ theory:
 theory:
   s4_high_precision:
     optimization:
-      engine: gaussian
+      engine: orca
       method: M062X
       basis: def2-SVP
+      aux_basis: def2/J
       solvent: acetone
       solvent_model: CPCM
-      route_ts: "Opt=(TS,CalcFC,NoEigenTest)"
-      grid: UltraFine
-      scf: XQC
+      route_minimum: Opt
+      route_ts: OptTS
+      grid: DefGrid3
+      scf: TightSCF
       frequency:
         enabled_for_ts: true
         imaginary_cutoff_cm1: -50.0
@@ -553,7 +564,7 @@ python scripts/ci/check_imports.py rph_core
 ### 注意事项
 
 - `tests/conftest.py` 自动将仓库根目录添加到 `sys.path`，无需可编辑安装即可运行测试
-- 集成测试使用 mock 量子化学计算，不需要真实的 Gaussian/ORCA
+- 集成测试使用 mock 量子化学计算，不需要真实的 ORCA
 - V3 测试已归档到 `tests/deprecated_v3/`
 - 参见 [AGENTS.md](AGENTS.md) 了解验证命令
 
@@ -561,7 +572,9 @@ python scripts/ci/check_imports.py rph_core
 
 ## 故障排查
 
-### 1. Gaussian 找不到可执行文件
+### 1. 可选 Gaussian 兼容后端找不到可执行文件
+
+受支持的 V4 S0-S4 流程不再使用 Gaussian；本节仅适用于直接调用保留的兼容接口。
 
 **错误信息**：
 ```
@@ -601,7 +614,7 @@ RuntimeError: S1 manifest has no selected candidate
 
 当 `continue_on_structure_failure` 启用时（默认），流水线会继续处理其余结构。检查清单中的每结构状态：
 
-- 如果 `opt_status` 不是 `complete`，检查 opt 目录中的 ORCA/Gaussian 输出
+- 如果 `opt_status` 不是 `complete`，检查 opt 目录中的 ORCA 输出
 - 如果 `sp_status` 不是 `complete`，检查单点输出
 - 如果 `ts_frequency_valid` 是 `false`，检查频率输出中的虚频模式
 

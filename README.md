@@ -25,7 +25,7 @@ ReactionProfileHunter (RPH) is a product-driven automated DFT reaction mechanism
 
 - Product-driven strategy: start from products and search reaction pathways backward
 - Five-stage DFT pipeline: mechanism validation -> CENSO-LITE conformer search -> PEB retro scan -> low-level QC -> high-precision QC
-- Fixed theory contract: CREST/GFN2 + B97-3c SP (S1), ORCA B97-3c -> r2SCAN-3c (S3), Gaussian M062X -> ORCA wB97M-V (S4)
+- Fixed theory contract: CREST/GFN2 + B97-3c SP (S1), ORCA B97-3c -> r2SCAN-3c (S3), ORCA M062X -> ORCA wB97M-V (S4)
 - Multi-engine support: Gaussian, ORCA, xTB, CREST
 - Manifest-based checkpoint/resume with per-structure failure isolation
 - WSL live status viewer (`rph_watch`)
@@ -52,7 +52,7 @@ The V4 pipeline replaces the V3 Berny/QST2/IRC rescue chain and SMILES entry wit
 | S1 | CENSO-LITE conformer search | CREST/GFN2 sampling + ORCA B97-3c SP ranking + xTB mRRHO. No DFT OPT/FREQ. |
 | S2 | PEB retro scan | xTB potential-energy-bond scan from S1 selected conformer; produces TS guess + intermediate |
 | S3 | Low-level QC | ORCA B97-3c OPT/OptTS + Freq; ORCA r2SCAN-3c SP (CPCM acetone) |
-| S4 | High-precision QC | Gaussian M062X OPT/OptTS + Freq; ORCA wB97M-V SP (CPCM acetone) |
+| S4 | High-precision QC | ORCA M062X OPT/OptTS + Freq; ORCA wB97M-V SP (CPCM acetone) |
 
 Pipeline flow:
 
@@ -154,8 +154,7 @@ ReactionProfileHunter/
 
 V4 requires all of the following for full S0-S4 operation:
 
-- Gaussian 16 — S4 geometry optimization
-- ORCA — S3/S4 single-point energies, S1 B97-3c ranking
+- ORCA — S1 B97-3c ranking plus all S3/S4 DFT jobs
 - xTB — S1 mRRHO thermochemistry, S2 PEB scan
 - CREST — S1 conformer sampling
 
@@ -177,11 +176,7 @@ V4 requires all of the following for full S0-S4 operation:
    Edit `config/defaults.yaml` and fill in installed paths:
    ```yaml
    executables:
-     gaussian:
-       path: "/path/to/g16/g16"
-       root: "/path/to/g16"
-       profile: "/path/to/g16/g16.profile"
-     orca:
+      orca:
        path: "/path/to/orca/orca"
        ld_library_path: "/path/to/orca"
      xtb:
@@ -216,6 +211,22 @@ bin/rph_run --csv data/trusted_reactions.csv --rx-id RXN_000001 --output ./Outpu
 # Run through S3 only (skip high-precision S4)
 bin/rph_run --csv data/trusted_reactions.csv --rx-id RXN_000001 --output ./Output/RXN_000001 --stop-after s3
 ```
+
+Resume is strict by default. If a completed stage no longer matches the active
+scientific configuration, RPH stops before launching QC and reports the
+checkpoint difference. Choose the intended action explicitly:
+
+```bash
+# Recalculate S1 and invalidate S2-S4
+bin/rph_run --csv data/trusted_reactions.csv --rx-id RXN_000001 --output ./Output/RXN_000001 --stop-after s2 --recompute-from s1
+
+# Keep the completed S0/S1 artifacts and begin new work at S2
+bin/rph_run --csv data/trusted_reactions.csv --rx-id RXN_000001 --output ./Output/RXN_000001 --stop-after s2 --resume-policy use-existing-upstream --start-from s2
+```
+
+The first invocation also freezes its configuration in `run.config.json`.
+All resumable stage and variant state is stored in `pipeline.state`; legacy
+`.rph/checkpoint.json` files are imported read-only.
 
 #### WSL live status viewer
 
@@ -308,7 +319,7 @@ S3: ORCA B97-3c OPT (minimum) / OptTS (TS) + independent Freq (TS only)
     -> ORCA r2SCAN-3c SP
     Solvent: CPCM(acetone)
 
-S4: Gaussian M062X/def2-SVP OPT / OptTS + independent Freq (TS only)
+S4: ORCA M062X/def2-SVP OPT / OptTS + independent Freq (TS only)
     -> ORCA wB97M-V/def2-TZVPP SP
     Solvent: CPCM(acetone)
 ```
@@ -459,14 +470,16 @@ theory:
 theory:
   s4_high_precision:
     optimization:
-      engine: gaussian
+      engine: orca
       method: M062X
       basis: def2-SVP
+      aux_basis: def2/J
       solvent: acetone
       solvent_model: CPCM
-      route_ts: "Opt=(TS,CalcFC,NoEigenTest)"
-      grid: UltraFine
-      scf: XQC
+      route_minimum: Opt
+      route_ts: OptTS
+      grid: DefGrid3
+      scf: TightSCF
       frequency:
         enabled_for_ts: true
         imaginary_cutoff_cm1: -50.0
@@ -550,7 +563,7 @@ python scripts/ci/check_imports.py rph_core
 
 ### Notes
 - `tests/conftest.py` adds the repo root to `sys.path`, so tests can run without editable install.
-- Integration tests use mocked QC calculations and do not require real Gaussian/ORCA binaries.
+- Integration tests use mocked QC calculations and do not require real ORCA binaries.
 - V3 tests have been archived to `tests/deprecated_v3/`.
 - See [AGENTS.md](AGENTS.md) for verification commands.
 
@@ -558,7 +571,10 @@ python scripts/ci/check_imports.py rph_core
 
 ## Troubleshooting
 
-### 1. Gaussian executable not found
+### 1. Optional Gaussian backend executable not found
+
+The supported V4 S0-S4 runtime does not use Gaussian. This only applies when
+calling the retained compatibility interface directly.
 
 Error:
 ```
@@ -598,7 +614,7 @@ Fix:
 
 The pipeline continues with remaining structures when `continue_on_structure_failure` is enabled (default). Check the per-structure status in the manifest:
 
-- If `opt_status` is not `complete`, inspect the ORCA/Gaussian output in the opt directory
+- If `opt_status` is not `complete`, inspect the ORCA output in the opt directory
 - If `sp_status` is not `complete`, check the single-point output
 - If `ts_frequency_valid` is `false`, inspect the frequency output for the imaginary mode
 

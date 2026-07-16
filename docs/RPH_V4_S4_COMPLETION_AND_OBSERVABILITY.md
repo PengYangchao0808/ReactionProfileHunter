@@ -25,20 +25,20 @@ S4 不承担以下职责：
 
 | 结构角色 | 高精度 OPT | 高精度 Freq | 高精度 SP | 目的 |
 |---|---|---|---|---|
-| product / precursor / intermediate | Gaussian M062X/def2-SVP, CPCM(acetone) | 默认不做 | ORCA wB97M-V/def2-TZVPP, CPCM(acetone) | 高精度极小值几何与电子能 |
-| TS | Gaussian M062X/def2-SVP `Opt=(TS,CalcFC,NoEigenTest)`, CPCM(acetone) | Gaussian M062X/def2-SVP, CPCM(acetone), 独立 `Freq` 作业 | ORCA wB97M-V/def2-TZVPP, CPCM(acetone) | 高精度 TS 几何、虚频计数与电子能 |
+| product / precursor / intermediate | ORCA M062X/def2-SVP, CPCM(acetone) | 默认不做 | ORCA wB97M-V/def2-TZVPP, CPCM(acetone) | 高精度极小值几何与电子能 |
+| TS | ORCA M062X/def2-SVP `OptTS`, CPCM(acetone) | ORCA M062X/def2-SVP, CPCM(acetone), 独立 `Freq` 作业 | ORCA wB97M-V/def2-TZVPP, CPCM(acetone) | 高精度 TS 几何、虚频计数与电子能 |
 
 S4 的 TS Freq 必须独立于 OptTS 运行，输入为 S4 优化后的几何。这避免将频率 Hessian 固定在优化前结构，也使失败能够单独记录。
 
 ### 溶剂约束
 
-S4 的 Gaussian 与 ORCA 均要求显式 CPCM。对 Gaussian，实际输入路由必须包含：
+S4 的 ORCA 优化、频率与单点作业均要求显式 CPCM。实际输入路由必须包含：
 
 ```text
-SCRF=(CPCM,Solvent=acetone)
+CPCM(acetone)
 ```
 
-仅在 YAML 中写 `solvent: acetone` 而没有将其渲染进 Gaussian route，等价于气相计算，不能接受。S4 不默认使用 SMD；若未来要变更模型，必须同时修改 YAML、计算签名、基准测试与 manifest 方法记录。
+仅在 YAML 中写 `solvent: acetone` 而没有将其渲染进 ORCA route，等价于气相计算，不能接受。S4 不默认使用 SMD；若未来要变更模型，必须同时修改 YAML、计算签名、基准测试与 manifest 方法记录。
 
 ## 3. S3 → S4 结构选择与溯源
 
@@ -145,7 +145,7 @@ frequency_skipped
 single_point_started / single_point_finished
 ```
 
-每个任务事件记录 `structure_id`、engine、method、solvent、solvent_model、完成状态、输出文件、能量和错误。该文件是排查 ORCA/Gaussian 失败、重建时间线和后续 UI 的唯一增量数据源。
+每个任务事件记录 `structure_id`、engine、method、solvent、solvent_model、完成状态、输出文件、能量和错误。该文件是排查 ORCA 失败、重建时间线和后续 UI 的唯一增量数据源。
 
 ## 7. WSL 实时可视化
 
@@ -169,7 +169,7 @@ python bin/rph_watch \
   --interval 3
 ```
 
-该面板显示总体完成数、失败数、当前结构、当前 QC 子任务和 OPT/Freq/SP 状态。它不读取正在写入的 ORCA/Gaussian 原始输出，因此不会与计算进程争抢文件。
+该面板显示总体完成数、失败数、当前结构、当前 QC 子任务和 OPT/Freq/SP 状态。它不读取正在写入的 ORCA 原始输出，因此不会与计算进程争抢文件。
 
 需要原始事件时间线时：
 
@@ -209,7 +209,7 @@ RXN/<reaction_id>/
 
 一次 S4 代码变更只有同时满足以下条件才算完成：
 
-1. Gaussian S4 输入中可见 `SCRF=(CPCM,Solvent=acetone)`；
+1. ORCA S4 输入中可见 `CPCM(acetone)`；
 2. ORCA S4 SP manifest 记录 CPCM；
 3. TS 在高精度 OptTS 后确实出现独立 `freq/` 作业和频率数组；
 4. 单个结构失败不会阻止下一个结构继续执行；
@@ -218,7 +218,7 @@ RXN/<reaction_id>/
 7. `bin/rph_watch` 可在无 Rich、无 jq 的原生 WSL 环境工作；
 8. 配置或 S3 输入发生变化时，S4 checkpoint 签名失效并重跑；
 9. S4 manifest 保留 S3 溯源与降级输入来源；
-10. 回归测试覆盖 Gaussian CPCM route、Gaussian Freq、S4 日志和查看器。
+10. 回归测试覆盖 ORCA CPCM route、ORCA Freq、S4 日志和查看器。
 
 ## 10. 后续增强（不在当前自动化中隐式开启）
 

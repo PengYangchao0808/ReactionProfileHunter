@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Standardized the supported S4 runtime on ORCA: M062X/def2-SVP OPT/OptTS/FREQ followed by wB97M-V/def2-TZVPP SP.
+- Upgraded the S4 manifest and checkpoint signature schemas to v3.
+
+### Fixed
+
+- Propagated ORCA grid and SCF controls into optimization and frequency routes.
+- Prevented failed S4 optimizations from being marked usable for ML or checkpointed as complete.
+
 ## [4.0.0] - 2026-07-13
 
 ### Added

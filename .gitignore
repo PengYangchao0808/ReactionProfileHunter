@@ -48,6 +48,14 @@ external_data/
 test_tmpdir/
 tests/test_output/
 
+# Local virtual environments and version-isolated QC/runtime artifacts
+.venv/
+RPH_Test_Results/
+*.scratch/
+*cache.db*
+*cache.sqlite*
+*benchmark_tmp*
+
 # 编辑器配置
 .vscode/
 .idea/
