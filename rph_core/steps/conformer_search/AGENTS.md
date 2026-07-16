@@ -15,6 +15,7 @@ DFT FREQ is performed in S1.
 |------|------|
 | `censo_lite.py` | `CensoLiteEngine` — V4 S1 orchestrator: embed → CREST → SP → mRRHO → dedup → manifest |
 | `censo_lite_runtime.py` | Runtime primitives: `embed()`, `crest_search()`, `split_ensemble()`, `extract_energy()`, `run_sp()`, `run_mrrho()` |
+| `ensemble_thermo.py` | Canonical partition function, Boltzmann populations and `G_conf_rel` |
 | `torsion_signature.py` | `TorsionSignature` — rotatable-bond dihedral binning for dedup keys |
 | `deduplicator.py` | `TorsionAwareDeduplicator` — torsion signature + heavy-atom RMSD dedup |
 | `xtb_thermo.py` | `run_xtb_enso()` — xTB `--bhess --enso` mRRHO thermochemistry |
@@ -63,8 +64,15 @@ S1_ConfSearch/<molecule>/
 └── candidates/            # ranked + deduplicated conf_####.xyz
 ```
 
-The `manifest.json` `selected` field names the lowest-energy candidate. The V4
-orchestrator resolves this to an XYZ path for S2 PEB consumption.
+The v3 `manifest.json` uses schema `s1_censo_light_ranking_v3`. It separates
+`thermodynamic_rank1` from `reactivity_screening_candidates`; the deprecated
+`selected` and `representative_candidates` aliases remain for one migration
+cycle. When mRRHO is incomplete, the partition function, populations and
+`G_conf_rel` are null and `selected` denotes only the provisional B97-3c
+geometry handoff used by S2.
+
+Deduplication records `merged_from` and `merge_count` as search provenance.
+Those counts must never be promoted automatically to physical `degeneracy`.
 
 ## V3 FILES (deprecated — see docs/ARCHIVE_V3.md)
 

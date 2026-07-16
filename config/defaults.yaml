@@ -4,6 +4,8 @@
 schema_version: rph_v4_config_v1
 
 executables:
+  # Optional compatibility backend. The supported V4 S0-S4 runtime does not
+  # invoke Gaussian; S4 optimization, frequency and SP jobs all use ORCA.
   gaussian:
     path: /opt/software/gaussian/g16/g16
     root: /opt/software/gaussian/g16
@@ -30,6 +32,9 @@ resources:
   mem: 32GB
   nproc: 16
   orca_maxcore_safety: 0.65
+  # ORCA uses %pal for rank parallelism. Keep inherited BLAS/OpenMP libraries
+  # serial inside each rank so the S1 scheduler's core accounting remains true.
+  orca_math_threads_per_rank: 1
 
 thermo:
   temperature_k: 298.15
@@ -50,6 +55,20 @@ theory:
       route_extras: ""
       max_cycles: 100
       timeout: 864000
+      # Sequential B97-3c conditioning on the target PES. Only S2-derived
+      # intermediate/TS seeds are restrained; final OPT/OptTS is unrestrained.
+      warmup:
+        enabled: true
+        roles:
+          - intermediate
+          - ts
+        # LooseOpt applies only to the constrained warm-up; the final Opt/OptTS
+        # remains unconstrained and retains the standard convergence policy.
+        convergence: loose
+        max_cycles:
+          intermediate: 8
+          ts: 12
+        accept_partial_geometry: true
       frequency:
         enabled_for_ts: true
         task: freq
@@ -67,16 +86,18 @@ theory:
 
   s4_high_precision:
     optimization:
-      engine: gaussian
+      engine: orca
       task: opt
       method: M062X
       basis: def2-SVP
+      aux_basis: def2/J
       solvent: acetone
       solvent_model: CPCM
       route_minimum: "Opt"
-      route_ts: "Opt=(TS,CalcFC,NoEigenTest)"
-      grid: UltraFine
-      scf: XQC
+      route_ts: "OptTS"
+      route_extras: ""
+      grid: DefGrid3
+      scf: TightSCF
       max_cycles: 200
       timeout: 864000
       frequency:
@@ -102,6 +123,8 @@ step1:
     crest:
       engine: crest
       gfn_level: 2
+      # auto uses the global S1 core budget; explicit values are clamped to it.
+      nproc: auto
       search_mode: imtd_gc
       energy_window_kcal: 6.0
       solvent: acetone
@@ -116,30 +139,57 @@ step1:
       solvent: acetone
       timeout: 864000
     prefilter:
-      xtb_window_kcal: 5.0
-      max_candidates_soft: 60
+      # CREST already applies its 6 kcal/mol ensemble window. Null values keep
+      # that complete unique ensemble for the S1 partition function.
+      xtb_window_kcal: null
+      max_candidates_soft: null
       extra_deduplication: true
       preserve_torsion_clusters: true
       min_per_cluster: 1
     b97_3c:
-      energy_window_kcal: 4.0
-      parallel_jobs: 1
-      cores_per_job: 16
+      failure_policy: strict
+      parallel_jobs: 16
+      cores_per_job: 1
+      max_parallel_jobs: 16
+      scheduling:
+        policy: throughput_first
+        memory:
+          job_overhead_mb: 256
+          min_maxcore_mb_per_rank: 1000
+          maxcore_cap_mb_per_rank: 4000
+        # Enabled layouts must come from a fixed-ensemble benchmark. With no
+        # exact profile entry every conformer remains a one-core throughput job.
+        final_wave:
+          enabled: false
+          max_cores_per_job: 4
+          profile_layouts: {}
     xtb_thermo:
       enabled: true
-      thermo_pool_max: 30
-      failure_policy: ensemble_electronic_only
-      gfn_level: 1
-      nproc: 4
+      # strict aborts S1 on any missing correction. defer preserves the full
+      # B97 ensemble for S2 geometry handoff but emits no Zrel/population/Gconf.
+      failure_policy: defer
+      gfn_level: 2
+      parallel_jobs: auto
+      cores_per_job: 1
+      max_parallel_jobs: 16
+      scheduling:
+        policy: throughput_first
+        final_wave:
+          enabled: false
+          max_cores_per_job: 4
+          profile_layouts: {}
+      retry_nproc: 1
+      scc_retry_max_iterations: 1000
       bhess_level: normal
-      omp_stacksize: null
+      omp_stacksize: 1G
       omp_max_active_levels: 1
-      fallback_enabled: true
+      fallback_enabled: false
       fallback_gfn_level: 0
       fallback_nproc: 1
       sthr: 50.0
       imagthr: -100.0
       temperature_k: 298.15
+      ledger_tolerance_hartree: 1.0e-7
       timeout: 864000
     deduplication:
       backend: torsion_signature
@@ -164,6 +214,15 @@ step2:
     scan_steps: 24
     retry_on_boundary_maximum: true
     retry_factor: 1.15
+    intermediate_selection:
+      method: stable_midpoint
+      endpoint_exclusion_points: 1
+      stable_quantile: 0.5
+      min_candidate_points: 2
+      require_topology_valid: true
+      allow_degraded_fallback: false
+      endpoint_jump_warning_ratio: 5.0
+      endpoint_jump_warning_min_kcal: 5.0
   xtb_settings:
     charge: 0
     multiplicity: 1
@@ -178,8 +237,33 @@ step4:
   enabled: true
   continue_on_structure_failure: true
 
+ui:
+  # auto selects the embedded Live dashboard on a capable TTY and classic
+  # single-line output for redirected/no-colour runs.
+  mode: auto
+  heartbeat_seconds: 30
+  non_tty_heartbeat_seconds: 60
+  progress_snapshots: 20
+  active_job_limit: 8
+  completed_job_tail: 5
+  top_population_count: 5
+  show_output_paths: true
+  stalled_job_warning_seconds: 720
+  recent_alert_limit: 50
+  dashboard:
+    refresh_per_second: 4
+    min_width: 80
+    wide_width: 120
+    max_active_jobs: 6
+    recent_alerts: 3
+    recent_decisions: 3
+    retain_final_summary: true
+
 run:
   resume: true
+  # Refuse silent upstream recomputation when a completed checkpoint no longer
+  # matches the active scientific configuration.
+  resume_policy: strict
   checkpoint:
     enabled: true
   output_root: ./Output

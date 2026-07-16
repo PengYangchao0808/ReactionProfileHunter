@@ -48,25 +48,79 @@ class TorsionAwareDeduplicator:
     def deduplicate(self, mol: Chem.Mol, candidates: Iterable[DedupCandidate]) -> List[DedupCandidate]:
         kept: List[DedupCandidate] = []
         for candidate in sorted(candidates, key=lambda item: (float(item.score), str(item.path))):
-            duplicate = False
-            for existing in kept:
+            duplicate_index = None
+            for index, existing in enumerate(kept):
                 if not signatures_equivalent(candidate.signature, existing.signature, self.torsion_tolerance_deg):
                     continue
                 try:
-                    _, left = read_xyz(candidate.path)
-                    _, right = read_xyz(existing.path)
+                    left, _ = read_xyz(candidate.path)
+                    right, _ = read_xyz(existing.path)
                     if _heavy_atom_rmsd(mol, left, right) <= self.rmsd_prefilter:
-                        duplicate = True
+                        duplicate_index = index
                         break
                 except (OSError, ValueError, IndexError):
                     continue
-            if not duplicate:
-                kept.append(candidate)
+            if duplicate_index is None:
+                kept.append(self._with_merge_provenance(candidate))
+                continue
+
+            # CREST sampling frequency is search provenance, not a physical
+            # statistical degeneracy. Merge the provenance while deliberately
+            # retaining the representative's independently justified d_i.
+            existing = kept[duplicate_index]
+            metadata = dict(existing.metadata)
+            merged_from = list(metadata.get("merged_from") or self._source_ids(existing))
+            for source_id in self._source_ids(candidate):
+                if source_id not in merged_from:
+                    merged_from.append(source_id)
+            metadata.update(
+                {
+                    "merged_from": merged_from,
+                    "merge_count": len(merged_from),
+                    "degeneracy": int(metadata.get("degeneracy", 1)),
+                    "degeneracy_source": metadata.get(
+                        "degeneracy_source", "default_unique_minimum"
+                    ),
+                }
+            )
+            kept[duplicate_index] = DedupCandidate(
+                existing.path, existing.score, existing.signature, metadata
+            )
         return kept
+
+    @staticmethod
+    def _source_ids(candidate: DedupCandidate) -> List[str]:
+        values = candidate.metadata.get("merged_from")
+        if isinstance(values, Sequence) and not isinstance(values, (str, bytes)) and values:
+            return [str(value) for value in values]
+        return [str(candidate.metadata.get("source_conformer_id") or candidate.path.stem)]
+
+    def _with_merge_provenance(self, candidate: DedupCandidate) -> DedupCandidate:
+        metadata = dict(candidate.metadata)
+        merged_from = self._source_ids(candidate)
+        metadata.update(
+            {
+                "source_conformer_id": str(
+                    metadata.get("source_conformer_id") or candidate.path.stem
+                ),
+                "merged_from": merged_from,
+                "merge_count": len(merged_from),
+                "degeneracy": int(metadata.get("degeneracy", 1)),
+                "degeneracy_source": metadata.get(
+                    "degeneracy_source", "default_unique_minimum"
+                ),
+            }
+        )
+        return DedupCandidate(candidate.path, candidate.score, candidate.signature, metadata)
 
     def annotate(self, mol: Chem.Mol, path: Path, score: float, metadata: Dict[str, Any] | None = None) -> DedupCandidate:
         coordinates, _ = read_xyz(path)
         signature = build_signature(mol, coordinates, self.bin_width_deg)
         payload = dict(metadata or {})
         payload["torsion_signature"] = signature.key()
+        payload.setdefault("source_conformer_id", Path(path).stem)
+        payload.setdefault("merged_from", [str(payload["source_conformer_id"])])
+        payload.setdefault("merge_count", len(payload["merged_from"]))
+        payload.setdefault("degeneracy", 1)
+        payload.setdefault("degeneracy_source", "default_unique_minimum")
         return DedupCandidate(Path(path), float(score), signature, payload)

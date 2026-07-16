@@ -16,6 +16,7 @@ from rph_core.utils.constants import HARTREE_TO_KCAL
 from rph_core.utils.file_io import write_xyz
 from rph_core.utils.qc_interface import CRESTInterface, XTBInterface
 from rph_core.utils.orca_interface import ORCAInterface
+from rph_core.steps.conformer_search.xtb_thermo import XTBThermoResult
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,8 @@ class CensoLiteRuntime:
     def __init__(self, config: Dict[str, Any], work_dir: Path, molecule_name: str):
         self.config = config
         self.work_dir = Path(work_dir)
+        self.molecule_name = molecule_name
+        self._event_callback = None
         self.molecule_dir = self.work_dir / molecule_name
         self.crest_dir = self.molecule_dir / "crest"
         self.raw_dir = self.molecule_dir / "candidates_raw"
@@ -37,6 +40,17 @@ class CensoLiteRuntime:
         self.mrrho_dir = self.molecule_dir / "mrrho"
         for directory in (self.crest_dir, self.raw_dir, self.ranking_dir, self.mrrho_dir):
             directory.mkdir(parents=True, exist_ok=True)
+
+    def set_event_callback(self, callback) -> None:
+        self._event_callback = callback
+
+    def _emit(self, event: str, **fields: Any) -> None:
+        if self._event_callback is None:
+            return
+        try:
+            self._event_callback(event, fields)
+        except Exception as exc:  # pragma: no cover - UI isolation
+            logger.warning("Ignoring CENSO-LITE runtime UI callback failure: %s", exc)
 
     def embed(self, smiles: str) -> Path:
         mol = Chem.MolFromSmiles(smiles)
@@ -58,7 +72,19 @@ class CensoLiteRuntime:
     def crest_search(self, input_xyz: Path) -> Path:
         cfg = dict(self.config.get("step1", {}).get("censo_lite", {}).get("crest", {}) or {})
         resources = dict(self.config.get("resources", {}) or {})
-        nproc = int(cfg.get("nproc") or resources.get("nproc", 1))
+        total_cores = max(1, int(resources.get("nproc", 1)))
+        requested_nproc = cfg.get("nproc", "auto")
+        if requested_nproc is None or str(requested_nproc).strip().lower() == "auto":
+            nproc = total_cores
+        else:
+            requested = max(1, int(requested_nproc))
+            nproc = min(requested, total_cores)
+            if requested > total_cores:
+                logger.warning(
+                    "Clamping CREST nproc=%d to global S1 core budget=%d",
+                    requested,
+                    total_cores,
+                )
         search_mode = cfg.get("search_mode")
         ewin = cfg.get("energy_window_kcal")
         interface = CRESTInterface(
@@ -70,12 +96,13 @@ class CensoLiteRuntime:
             search_mode=search_mode,
             energy_window_kcal=float(ewin) if ewin is not None else None,
         )
-        logger.info(
-            "CREST: GFN%d/ALPB(%s) search_mode=%s ewin=%s",
+        logger.debug(
+            "CREST: GFN%d/ALPB(%s) search_mode=%s ewin=%s nproc=%d",
             int(cfg.get("gfn_level", 2)),
             cfg.get("solvent"),
             search_mode,
             ewin,
+            nproc,
         )
         interface.crest_timeout_seconds = int(cfg.get("timeout", 21600))
         ensemble = self.crest_dir / "crest_conformers.xyz"
@@ -207,24 +234,31 @@ class CensoLiteRuntime:
                 tolerance_kcal,
             )
 
-    def run_sp(self, xyz_path: Path, nprocs: Optional[int] = None) -> Optional[float]:
+    def run_sp(
+        self,
+        xyz_path: Path,
+        nprocs: Optional[int] = None,
+        maxcore: Optional[int] = None,
+    ) -> Optional[float]:
         """Run an ORCA B97-3c single-point calculation.
 
         Args:
             xyz_path: Path to the input XYZ file.
             nprocs: Override the number of ORCA cores (for parallel fan-out).
                 If ``None``, uses the config default.
+            maxcore: Per-rank ORCA memory ceiling resolved for the complete
+                concurrent wave. If ``None``, uses the ranking/config default.
         """
         cfg = dict(self.config.get("step1", {}).get("censo_lite", {}).get("ranking", {}) or {})
         resources = dict(self.config.get("resources", {}) or {})
         effective_nprocs = int(nprocs or cfg.get("nproc") or resources.get("nproc", 1))
-        logger.info("B97-3c SP: %s/CPCM(%s) nprocs=%d", cfg.get("method", "B97-3c"), cfg.get("solvent", "acetone"), effective_nprocs)
+        logger.debug("B97-3c SP: %s/CPCM(%s) nprocs=%d", cfg.get("method", "B97-3c"), cfg.get("solvent", "acetone"), effective_nprocs)
         interface = ORCAInterface(
             method=str(cfg.get("method", "B97-3c")),
             basis=str(cfg.get("basis", "")),
             aux_basis=str(cfg.get("aux_basis", "")),
             nprocs=effective_nprocs,
-            maxcore=cfg.get("maxcore"),
+            maxcore=maxcore if maxcore is not None else cfg.get("maxcore"),
             solvent=str(cfg.get("solvent", "acetone")),
             route_extras=str(cfg.get("route_extras", "")),
             config=self.config,
@@ -240,15 +274,18 @@ class CensoLiteRuntime:
         )
         return float(result.energy) if result.converged and result.energy is not None else None
 
-    def run_mrrho(self, xyz_path: Path) -> Optional[float]:
-        """Run xTB SPH+mRRHO and return the pure G(RRHO) correction (Hartree).
+    def run_mrrho(
+        self, xyz_path: Path, nprocs: Optional[int] = None
+    ) -> Optional[XTBThermoResult]:
+        """Run xTB SPH+mRRHO and return its validated energy ledger.
 
         Returns the thermostatistical free-energy correction ``G(T)`` which
         should be added to a DFT electronic energy::
 
-            G_ranked = E_B97-3c + run_mrrho(...)
+            G_ranked = E_B97-3c + result.g_rrho_correction_hartree
 
-        Returns ``None`` if mRRHO is disabled or all retry attempts fail.
+        Returns ``None`` only when mRRHO is disabled. Failed attempts return the
+        final ``XTBThermoResult(success=False)`` so diagnostics are not erased.
         """
         cfg = dict(self.config.get("step1", {}).get("censo_lite", {}).get("xtb_thermo", {}) or {})
         if not bool(cfg.get("enabled", True)):
@@ -256,19 +293,29 @@ class CensoLiteRuntime:
         resources = dict(self.config.get("resources", {}) or {})
         solvent = str(cfg.get("solvent", self.config.get("step1", {}).get("censo_lite", {}).get("crest", {}).get("solvent", "acetone")))
         primary_gfn = int(cfg.get("gfn_level", 1))
-        primary_nproc = int(cfg.get("nproc") or resources.get("nproc", 1))
+        primary_nproc = int(nprocs or cfg.get("cores_per_job") or cfg.get("nproc") or resources.get("nproc", 1))
+        retry_nproc = int(cfg.get("retry_nproc") or 1)
+        primary_scc_iterations = cfg.get("scc_max_iterations")
+        retry_scc_iterations = int(cfg.get("scc_retry_max_iterations") or 1000)
         fallback_enabled = bool(cfg.get("fallback_enabled", False))
         fallback_gfn = int(cfg.get("fallback_gfn_level", primary_gfn))
         fallback_nproc = int(cfg.get("fallback_nproc") or 1)
 
-        attempts: List[Tuple[int, int]] = [(primary_gfn, primary_nproc)]
-        if fallback_enabled and fallback_gfn != primary_gfn:
-            attempts.append((fallback_gfn, fallback_nproc))
+        attempts: List[Tuple[int, int, Optional[int]]] = [
+            (primary_gfn, primary_nproc, primary_scc_iterations)
+        ]
+        retry_attempt = (primary_gfn, retry_nproc, retry_scc_iterations)
+        if retry_attempt not in attempts:
+            attempts.append(retry_attempt)
+        fallback_attempt = (fallback_gfn, fallback_nproc, retry_scc_iterations)
+        if fallback_enabled and fallback_attempt not in attempts:
+            attempts.append(fallback_attempt)
 
         base_dir = self.mrrho_dir / Path(xyz_path).stem
-        for attempt_index, (gfn_level, nproc) in enumerate(attempts):
+        last_result: Optional[XTBThermoResult] = None
+        for attempt_index, (gfn_level, nproc, max_scc_iterations) in enumerate(attempts):
             attempt_dir = base_dir if attempt_index == 0 else base_dir / (
-                f"fallback_gfn{gfn_level}_nproc{nproc}"
+                f"retry_{attempt_index}_gfn{gfn_level}_nproc{nproc}_scc{max_scc_iterations}"
             )
             interface = XTBInterface(
                 gfn_level=gfn_level,
@@ -277,11 +324,23 @@ class CensoLiteRuntime:
                 config=self.config,
             )
             if attempt_index:
-                logger.warning(
-                    "Retrying xTB mRRHO for %s with GFN%d and nproc=%d",
+                self._emit(
+                    "batch_job_retry",
+                    batch=f"{self.molecule_name}:mrrho",
+                    job_id=Path(xyz_path).stem,
+                    attempt=attempt_index + 1,
+                    gfn_level=gfn_level,
+                    nprocs=nproc,
+                    max_scc_iterations=max_scc_iterations,
+                    output=str(attempt_dir),
+                    reason="previous xTB mRRHO attempt failed",
+                )
+                logger.debug(
+                    "Retrying xTB mRRHO for %s with GFN%d, nproc=%d, SCC iterations=%s",
                     Path(xyz_path).stem,
                     gfn_level,
                     nproc,
+                    max_scc_iterations,
                 )
             result = interface.enso_thermo(
                 xyz_file=Path(xyz_path).resolve(),
@@ -293,20 +352,22 @@ class CensoLiteRuntime:
                 imagthr=cfg.get("imagthr", -100.0),
                 solvent=solvent,
                 timeout=cfg.get("timeout"),
+                max_scc_iterations=max_scc_iterations,
             )
+            last_result = result
             if result.success and result.g_rrho_correction_hartree is not None:
-                return float(result.g_rrho_correction_hartree)
+                return result
 
             error_message = result.error or "xTB mRRHO failed without diagnostics"
-            if attempt_index == 0 and self._is_mrrho_retryable_failure(error_message):
+            if attempt_index < len(attempts) - 1 and self._is_mrrho_retryable_failure(error_message):
                 continue
-            logger.warning(
+            logger.debug(
                 "xTB mRRHO failed for %s without retry: %s",
                 Path(xyz_path).stem,
                 error_message[:300],
             )
             break
-        return None
+        return last_result
 
     @staticmethod
     def _is_mrrho_retryable_failure(error_message: str) -> bool:
@@ -324,6 +385,8 @@ class CensoLiteRuntime:
                 "rc=174",
                 "rc=-11",
                 "rc=128",
+                ".sccnotconverged",
+                "self consistent charge iterator did not converge",
                 "longjmp causes uninitialized stack frame",
                 "abnormal termination",
                 "access violation",

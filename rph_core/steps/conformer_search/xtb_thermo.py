@@ -23,9 +23,12 @@ import os
 import subprocess
 import json
 import logging
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List
+
+from rph_core.utils.constants import BOHR_TO_ANGSTROM
 
 logger = logging.getLogger(__name__)
 
@@ -86,15 +89,24 @@ class XTBThermoResult:
         success: Whether the calculation completed successfully.
         error: Error message if the calculation failed, else None.
     """
-    # Primary field: the G(RRHO) correction term (NOT total free energy)
-    g_rrho_correction_hartree: float
+    # Failed jobs carry ``None`` rather than numerical zero so missing
+    # thermochemistry cannot silently become a valid correction.
+    g_rrho_correction_hartree: Optional[float]
+    xtb_electronic_energy_hartree: Optional[float] = None
+    xtb_total_free_energy_hartree: Optional[float] = None
+    energy_ledger_residual_hartree: Optional[float] = None
+    xtb_solvation_energy_hartree: Optional[float] = None
+    temperature_k: Optional[float] = None
+    gfn_level: Optional[int] = None
+    solvent_model: Optional[str] = None
+    explicit_solvation_correction_added: bool = False
     zpve: Optional[float] = None
     h_total: Optional[float] = None
     success: bool = True
     error: Optional[str] = None
 
     @property
-    def g_total(self) -> float:
+    def g_total(self) -> Optional[float]:
         """Backward-compatible alias for *g_rrho_correction_hartree*.
 
         .. deprecated::
@@ -107,8 +119,8 @@ class XTBThermoResult:
 def _xyz_to_coord(xyz_path: Path, coord_path: Path) -> None:
     """Convert an XYZ file to xTB .coord format.
 
-    xTB .coord format uses ``$coord`` / ``$end`` delimiters with
-    coordinates in Å (same as XYZ) and lowercase element symbols.
+    Plain Turbomole ``$coord`` data use Bohr by default. XYZ coordinates are
+    therefore converted from Angstrom before writing lowercase atom symbols.
 
     Args:
         xyz_path: Path to the input XYZ file.
@@ -133,9 +145,10 @@ def _xyz_to_coord(xyz_path: Path, coord_path: Path) -> None:
             if len(parts) < 4:
                 continue
             symbol = parts[0].lower()
-            x = float(parts[1])
-            y = float(parts[2])
-            z = float(parts[3])
+            # Plain Turbomole $coord values are Bohr; XYZ values are Angstrom.
+            x = float(parts[1]) / BOHR_TO_ANGSTROM
+            y = float(parts[2]) / BOHR_TO_ANGSTROM
+            z = float(parts[3]) / BOHR_TO_ANGSTROM
             f.write(f"{x:16.10f}  {y:16.10f}  {z:16.10f}  {symbol}\n")
         f.write("$end\n")
 
@@ -183,6 +196,8 @@ def run_xtb_enso(
     bhess_level: Optional[str] = "normal",
     omp_stacksize: Optional[str] = None,
     omp_max_active_levels: Optional[int] = 1,
+    max_scc_iterations: Optional[int] = None,
+    ledger_tolerance_hartree: float = 1.0e-7,
 ) -> XTBThermoResult:
     """Run xTB single-point Hessian + mRRHO (--bhess --enso) calculation.
 
@@ -215,6 +230,10 @@ def run_xtb_enso(
             any inherited oversized setting instead of forcing a multi-GB
             stack for every xTB thread.
         omp_max_active_levels: OpenMP nesting limit, or ``None`` to inherit.
+        max_scc_iterations: Optional maximum SCC iterations for convergence
+            retries. ``None`` retains the xTB default.
+        ledger_tolerance_hartree: Maximum allowed residual for
+            ``free energy - electronic energy - G(T)``.
 
     Returns:
         XTBThermoResult with parsed thermochemical data on success,
@@ -249,6 +268,8 @@ def run_xtb_enso(
 
     if solvent:
         cmd.extend(["--alpb", solvent])
+    if max_scc_iterations is not None:
+        cmd.extend(["--iterations", str(int(max_scc_iterations))])
 
     # Thread environment
     xtb_env = os.environ.copy()
@@ -262,7 +283,7 @@ def run_xtb_enso(
     if omp_max_active_levels is not None:
         xtb_env["OMP_MAX_ACTIVE_LEVELS"] = str(omp_max_active_levels)
 
-    logger.info(
+    logger.debug(
         "Running xTB SPH+MRRHO: %s in %s",
         " ".join(cmd), output_dir,
     )
@@ -284,7 +305,7 @@ def run_xtb_enso(
         error_msg = f"xTB SPH+MRRHO timed out after {timeout}s"
         logger.error(error_msg)
         return XTBThermoResult(
-            g_rrho_correction_hartree=0.0,
+            g_rrho_correction_hartree=None,
             success=False,
             error=error_msg,
         )
@@ -292,7 +313,7 @@ def run_xtb_enso(
         error_msg = f"xTB binary not found: {xtb_bin}"
         logger.error(error_msg)
         return XTBThermoResult(
-            g_rrho_correction_hartree=0.0,
+            g_rrho_correction_hartree=None,
             success=False,
             error=error_msg,
         )
@@ -303,7 +324,7 @@ def run_xtb_enso(
         error_msg = f"xTB SPH+MRRHO failed (rc={result.returncode}): {context}"
         logger.error(error_msg)
         return XTBThermoResult(
-            g_rrho_correction_hartree=0.0,
+            g_rrho_correction_hartree=None,
             success=False,
             error=error_msg,
         )
@@ -314,7 +335,7 @@ def run_xtb_enso(
         error_msg = f"xTB SPH+MRRHO completed but xtb_enso.json not found in {output_dir}"
         logger.error(error_msg)
         return XTBThermoResult(
-            g_rrho_correction_hartree=0.0,
+            g_rrho_correction_hartree=None,
             success=False,
             error=error_msg,
         )
@@ -326,7 +347,7 @@ def run_xtb_enso(
         error_msg = f"Failed to parse xtb_enso.json: {e}"
         logger.error(error_msg)
         return XTBThermoResult(
-            g_rrho_correction_hartree=0.0,
+            g_rrho_correction_hartree=None,
             success=False,
             error=error_msg,
         )
@@ -335,11 +356,60 @@ def run_xtb_enso(
     # NOT the total free energy.
     try:
         g_rrho_correction_hartree = float(data["G(T)"])
+        xtb_electronic_energy_hartree = float(data["energy"])
+        xtb_total_free_energy_hartree = float(data["free energy"])
     except (KeyError, TypeError, ValueError) as e:
-        error_msg = f"Missing or invalid 'G(T)' in xtb_enso.json: {e}"
+        error_msg = f"Incomplete or invalid xTB energy ledger in xtb_enso.json: {e}"
         logger.error(error_msg)
         return XTBThermoResult(
-            g_rrho_correction_hartree=0.0,
+            g_rrho_correction_hartree=None,
+            success=False,
+            error=error_msg,
+        )
+
+    ledger_residual = (
+        xtb_total_free_energy_hartree
+        - xtb_electronic_energy_hartree
+        - g_rrho_correction_hartree
+    )
+    tolerance = float(ledger_tolerance_hartree)
+    if not math.isfinite(tolerance) or tolerance <= 0.0:
+        raise ValueError("ledger_tolerance_hartree must be greater than zero")
+    if not all(
+        math.isfinite(value)
+        for value in (
+            g_rrho_correction_hartree,
+            xtb_electronic_energy_hartree,
+            xtb_total_free_energy_hartree,
+            ledger_residual,
+        )
+    ):
+        error_msg = "Non-finite value in xTB energy ledger"
+        logger.error(error_msg)
+        return XTBThermoResult(
+            g_rrho_correction_hartree=None,
+            xtb_electronic_energy_hartree=xtb_electronic_energy_hartree,
+            xtb_total_free_energy_hartree=xtb_total_free_energy_hartree,
+            energy_ledger_residual_hartree=ledger_residual,
+            gfn_level=int(gfn_level),
+            solvent_model=f"ALPB({solvent})" if solvent else None,
+            success=False,
+            error=error_msg,
+        )
+    if abs(ledger_residual) > tolerance:
+        error_msg = (
+            "Inconsistent xTB energy ledger: free energy - energy - G(T) = "
+            f"{ledger_residual:.12g} Eh exceeds {tolerance:.3g} Eh"
+        )
+        logger.error(error_msg)
+        return XTBThermoResult(
+            g_rrho_correction_hartree=None,
+            xtb_electronic_energy_hartree=xtb_electronic_energy_hartree,
+            xtb_total_free_energy_hartree=xtb_total_free_energy_hartree,
+            energy_ledger_residual_hartree=ledger_residual,
+            temperature_k=float(data.get("temperature", temperature_k)),
+            gfn_level=int(gfn_level),
+            solvent_model=f"ALPB({solvent})" if solvent else None,
             success=False,
             error=error_msg,
         )
@@ -361,6 +431,15 @@ def run_xtb_enso(
 
     return XTBThermoResult(
         g_rrho_correction_hartree=g_rrho_correction_hartree,
+        xtb_electronic_energy_hartree=xtb_electronic_energy_hartree,
+        xtb_total_free_energy_hartree=xtb_total_free_energy_hartree,
+        energy_ledger_residual_hartree=ledger_residual,
+        # xtb_enso.json does not expose an independent ALPB solvation term.
+        xtb_solvation_energy_hartree=None,
+        temperature_k=float(data.get("temperature", temperature_k)),
+        gfn_level=int(gfn_level),
+        solvent_model=f"ALPB({solvent})" if solvent else None,
+        explicit_solvation_correction_added=False,
         zpve=zpve,
         h_total=h_total,
         success=True,
