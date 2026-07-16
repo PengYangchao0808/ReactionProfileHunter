@@ -40,3 +40,8 @@ class QCJobResult:
     energy_hartree: Optional[float] = None
     error: Optional[str] = None
     frequencies_cm1: Optional[Tuple[float, ...]] = None
+    zero_point_energy_hartree: Optional[float] = None
+    thermal_energy_hartree: Optional[float] = None
+    enthalpy_hartree: Optional[float] = None
+    gibbs_free_energy_hartree: Optional[float] = None
+    gibbs_correction_hartree: Optional[float] = None

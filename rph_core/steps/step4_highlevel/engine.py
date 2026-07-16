@@ -1,14 +1,21 @@
 # pyright: reportMissingImports=false
-"""S4 high-precision OPT/SP stage with per-structure failure isolation."""
+"""S4 high-precision OPT/FREQ/SP stage with per-structure failure isolation."""
 
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List
 
 from rph_core.steps.stage_calculator import StageCalculator
 from rph_core.utils.s4_progress import S4ProgressReporter
+from rph_core.utils.stage_scheduler import (
+    resolve_stage_schedule,
+    run_structure_queue,
+    worker_config,
+    worker_theory,
+)
 
 
 class HighLevelEngine:
@@ -39,12 +46,35 @@ class HighLevelEngine:
         output_dir.mkdir(parents=True, exist_ok=True)
         materialized = list(structures)
         reporter = S4ProgressReporter(output_dir, materialized, event_callback=event_callback)
-        calculator = StageCalculator(
-            self.config,
-            self.stage_config,
-            event_callback=reporter.calculator_event,
+        schedule = resolve_stage_schedule(self.config, "step4")
+        calculator_config = worker_config(self.config, schedule)
+        calculator_theory = worker_theory(self.stage_config, schedule)
+        reporter_lock = threading.RLock()
+
+        def calculator_event(event: str, payload: Dict[str, Any]) -> None:
+            with reporter_lock:
+                reporter.calculator_event(event, payload)
+
+        def run_one(structure: Dict[str, Any]) -> Dict[str, Any]:
+            calculator = StageCalculator(
+                calculator_config,
+                calculator_theory,
+                event_callback=calculator_event,
+            )
+            return self._run_one(
+                structure,
+                output_dir,
+                calculator,
+                reporter,
+                reporter_lock,
+            )
+
+        results = run_structure_queue(
+            materialized,
+            run_one,
+            schedule,
+            thread_name_prefix="rph-s4",
         )
-        results = [self._run_one(structure, output_dir, calculator, reporter) for structure in materialized]
         summary = self._summary(results)
         stage_status = (
             "complete"
@@ -55,10 +85,11 @@ class HighLevelEngine:
         path.write_text(
             json.dumps(
                 {
-                    "schema_version": "s4_high_level_v3",
+                    "schema_version": "s4_high_level_v4",
                     "stage": "S4",
                     "status": stage_status,
                     "theory": self.stage_config,
+                    "scheduling": schedule.manifest_record(),
                     "summary": summary,
                     "structures": results,
                 },
@@ -76,6 +107,7 @@ class HighLevelEngine:
         output_dir: Path,
         calculator: StageCalculator,
         reporter: S4ProgressReporter,
+        reporter_lock: Any = None,
     ) -> Dict[str, Any]:
         structure_id = str(structure["id"])
         source = Path(structure.get("opt_xyz") or structure.get("fallback_xyz") or structure["input_xyz"])
@@ -113,7 +145,9 @@ class HighLevelEngine:
                 [int(pair[0]), int(pair[1])]
                 for pair in structure.get("forming_bonds", [])
             ]
-        reporter.start_structure(structure_id)
+        lock = reporter_lock or threading.RLock()
+        with lock:
+            reporter.start_structure(structure_id)
         try:
             payload.update(calculator.run_structure(structure, target))
             correction = payload.get("ensemble_thermochemistry_correction_hartree")
@@ -137,7 +171,8 @@ class HighLevelEngine:
             payload["error"] = str(exc)
         payload["s4_status"] = payload["status"]
         payload["s4_usable_for_ml"] = bool(payload["usable_for_ml"])
-        reporter.finish_structure(payload)
+        with lock:
+            reporter.finish_structure(payload)
         return payload
 
     @staticmethod
@@ -147,7 +182,8 @@ class HighLevelEngine:
             "total_structures": len(rows),
             "complete": sum(row.get("status") == "complete" for row in rows),
             "ts_frequency_unverified": sum(row.get("status") == "ts_frequency_unverified" for row in rows),
-            "degraded": sum(row.get("status") in {"degraded", "opt_failed_sp_complete"} for row in rows),
+            "minimum_frequency_unverified": sum(row.get("status") == "minimum_frequency_unverified" for row in rows),
+            "degraded": sum(row.get("status") in {"degraded", "opt_failed_sp_complete", "minimum_frequency_unverified"} for row in rows),
             "failed": sum(row.get("status") == "failed" for row in rows),
             "usable_for_ml": sum(bool(row.get("usable_for_ml")) for row in rows),
         }
