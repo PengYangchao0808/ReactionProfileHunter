@@ -17,6 +17,13 @@ from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
 
 from rdkit import Chem
 
+from rph_core.steps.mechanism_classifier.context import (
+    SystemComponent,
+    component_signature_payload,
+    validate_forming_bonds_for_components,
+    validate_system_components,
+)
+
 
 BondPair = Tuple[int, int]
 
@@ -41,10 +48,33 @@ class S0ReactionRecord:
     precursor_type: str = ""
     source_row_hash: str = ""
     raw_row: Dict[str, str] = field(default_factory=dict)
+    components: Tuple[SystemComponent, ...] = field(default_factory=tuple)
+
+    def normalized_components(self) -> Tuple[SystemComponent, ...]:
+        """Return explicit components, wrapping the V4 product when absent."""
+
+        if self.components:
+            return validate_system_components(self.components)
+        product = Chem.MolFromSmiles(self.product_smiles)
+        if product is None:
+            raise ValueError("Could not parse product SMILES while building system components")
+        return (
+            SystemComponent(
+                component_id="substrate_0",
+                role="reactive",
+                canonical_smiles=self.product_smiles,
+                mapped_smiles=self.mapped_product_smiles,
+                charge=0,
+                multiplicity=1,
+                xyz_atom_indices=tuple(range(product.GetNumAtoms())),
+            ),
+        )
 
     def signature_payload(self) -> Dict[str, object]:
         """Return the fields that define the S0 result for checkpointing."""
 
+        components = self.normalized_components()
+        validate_forming_bonds_for_components(self.forming_bonds, components)
         return {
             "rx_id": self.rx_id,
             "product_smiles": self.product_smiles,
@@ -60,6 +90,7 @@ class S0ReactionRecord:
             "source_row_hash": self.source_row_hash,
             "mapping_confidence": self.mapping_confidence,
             "mapping_trusted": self.mapping_trusted,
+            **component_signature_payload(components),
         }
 
 
@@ -103,6 +134,21 @@ def load_s0_reaction_record(csv_path: Path, rx_id: str) -> S0ReactionRecord:
     source_row_hash = hashlib.sha256(
         json.dumps(row, sort_keys=True).encode("utf-8")
     ).hexdigest()
+    product = Chem.MolFromSmiles(product_smiles)
+    if product is None:
+        raise ValueError("Could not parse product SMILES while building system components")
+    components = (
+        SystemComponent(
+            component_id="substrate_0",
+            role="reactive",
+            canonical_smiles=product_smiles,
+            mapped_smiles=mapped_product_smiles,
+            charge=0,
+            multiplicity=1,
+            xyz_atom_indices=tuple(range(product.GetNumAtoms())),
+        ),
+    )
+    validate_forming_bonds_for_components(forming_bonds, components)
     return S0ReactionRecord(
         rx_id=str(row["rx_id"]),
         product_smiles=product_smiles,
@@ -120,6 +166,7 @@ def load_s0_reaction_record(csv_path: Path, rx_id: str) -> S0ReactionRecord:
         precursor_type=_optional_str(row, "precursor_type"),
         source_row_hash=source_row_hash,
         raw_row=dict(row),
+        components=components,
     )
 
 

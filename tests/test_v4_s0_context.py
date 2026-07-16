@@ -98,15 +98,18 @@ def test_write_s0_artifacts_emits_full_p1_context_bundle(tmp_path: Path):
     variant_registry = json.loads((stage_dir / "variant_registry.json").read_text(encoding="utf-8"))
     atom_map_smiles = json.loads((stage_dir / "atom_map_smiles.json").read_text(encoding="utf-8"))
 
-    assert mechanism["schema_version"] == "s0_mechanism_v2"
+    assert mechanism["schema_version"] == "s0_mechanism_v3"
     assert mechanism["forming_bonds"] == [list(pair) for pair in record.forming_bonds]
     assert mechanism["mapped_forming_bonds"] == [list(pair) for pair in record.mapped_forming_bonds]
     assert mechanism["canonical_precursor_smiles"] == record.canonical_precursor_smiles
     assert mechanism["topology"] == "INTRA_TYPE_I"
     assert mechanism["cyclo_mode"] == "[4+3]"
     assert mechanism["variants"] == ["product_major", "product_minor_001"]
+    assert mechanism["component_schema_version"] == "rph_system_components_v1"
+    assert mechanism["reactive_component_ids"] == ["substrate_0"]
+    assert mechanism["additive_component_ids"] == []
 
-    assert reaction_context_json["schema_version"] == "s0_reaction_context_v1"
+    assert reaction_context_json["schema_version"] == "s0_reaction_context_v2"
     assert reaction_context_json["reaction_id"] == "TEST_001"
     assert reaction_context_json["source_row_hash"] == expected_row_hash
     assert reaction_context_json["canonical_product_smiles"] == record.product_smiles
@@ -115,6 +118,7 @@ def test_write_s0_artifacts_emits_full_p1_context_bundle(tmp_path: Path):
     assert reaction_context_json["forming_bonds_product_smiles_idx"] == [list(pair) for pair in record.forming_bonds]
     assert reaction_context_json["mechanism_graph_ref"] == "mechanism_graph.json"
     assert reaction_context_json["branch_plan_ref"] == "dr_branch_plan.json"
+    assert reaction_context_json["components"] == mechanism["components"]
 
     assert mechanism_graph["reaction_id"] == "TEST_001"
     assert mechanism_graph["cyclo_mode"] == "[4+3]"
