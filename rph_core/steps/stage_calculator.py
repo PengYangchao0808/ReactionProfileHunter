@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
+from rph_core.utils.file_io import read_xyz
 from rph_core.utils.qc_jobs import run_frequency, run_optimization, run_single_point
 from rph_core.utils.qc_models import QCJobResult, QCJobSpec
 from rph_core.utils.ts_quality import analyze_ts_quality
@@ -24,6 +26,95 @@ class StageCalculator:
         self.config = config
         self.theory = theory
         self.event_callback = event_callback
+
+    @staticmethod
+    def _bond_constraints_from_seed(
+        input_xyz: Path,
+        forming_bonds: Any,
+    ) -> Tuple[
+        Tuple[Tuple[int, int, Optional[float]], ...],
+        List[Dict[str, Any]],
+    ]:
+        """Freeze forming bonds at their S2 seed distances during DFT warm-up."""
+
+        coordinates, _ = read_xyz(input_xyz)
+        atom_count = len(coordinates)
+        constraints: List[Tuple[int, int, Optional[float]]] = []
+        details: List[Dict[str, Any]] = []
+        for raw_pair in forming_bonds or ():
+            if len(raw_pair) < 2:
+                raise ValueError(f"Invalid forming-bond record: {raw_pair!r}")
+            atom_i, atom_j = int(raw_pair[0]), int(raw_pair[1])
+            if atom_i < 0 or atom_j < 0 or atom_i >= atom_count or atom_j >= atom_count:
+                raise ValueError(
+                    f"Forming bond {(atom_i, atom_j)} is outside XYZ atom range 0..{atom_count - 1}"
+                )
+            if atom_i == atom_j:
+                raise ValueError(f"Forming bond cannot reference one atom twice: {(atom_i, atom_j)}")
+            delta = coordinates[atom_i] - coordinates[atom_j]
+            distance = float(sum(float(value) ** 2 for value in delta) ** 0.5)
+            constraints.append((atom_i, atom_j, distance))
+            details.append(
+                {
+                    "atoms": [atom_i, atom_j],
+                    "target_distance_angstrom": distance,
+                }
+            )
+        return tuple(constraints), details
+
+    @staticmethod
+    def _warmup_applies(structure: Dict[str, Any], warmup_cfg: Dict[str, Any]) -> bool:
+        if not bool(warmup_cfg.get("enabled", False)):
+            return False
+        if str(structure.get("source_stage", "")).upper() != "S2":
+            return False
+        role = str(structure.get("role") or structure.get("kind", "minimum")).lower()
+        roles = {str(value).lower() for value in warmup_cfg.get("roles", ("intermediate", "ts"))}
+        return role in roles and bool(structure.get("forming_bonds"))
+
+    @staticmethod
+    def _warmup_max_cycles(structure: Dict[str, Any], warmup_cfg: Dict[str, Any]) -> int:
+        """Resolve a role-specific warm-up budget while accepting the legacy scalar form."""
+
+        configured = warmup_cfg.get("max_cycles", 8)
+        if isinstance(configured, Mapping):
+            role = str(structure.get("role") or structure.get("kind", "minimum")).lower()
+            configured = configured.get(role, configured.get("default", 8))
+        cycles = int(configured)
+        if cycles <= 0:
+            raise ValueError("S3 warm-up max_cycles must be a positive integer")
+        return cycles
+
+    @staticmethod
+    def _warmup_route_extras(opt_spec: QCJobSpec, warmup_cfg: Dict[str, Any]) -> Tuple[str, str]:
+        """Add an optimization convergence keyword only to the constrained warm-up."""
+
+        convergence = str(warmup_cfg.get("convergence", "normal")).strip().lower()
+        keywords = {
+            "normal": None,
+            "default": None,
+            "loose": "LooseOpt",
+        }
+        if convergence not in keywords:
+            raise ValueError(
+                "S3 warm-up convergence must be one of: normal, default, loose"
+            )
+        tokens = str(opt_spec.route_extras or "").split()
+        keyword = keywords[convergence]
+        if keyword:
+            optimization_convergence_keywords = {
+                "looseopt",
+                "normalopt",
+                "tightopt",
+                "verytightopt",
+            }
+            tokens = [
+                token
+                for token in tokens
+                if token.lower() not in optimization_convergence_keywords
+            ]
+            tokens.append(keyword)
+        return " ".join(tokens), convergence
 
     def run_structure(self, structure: Dict[str, Any], output_dir: Path) -> Dict[str, Any]:
         structure_id = str(structure["id"])
@@ -64,8 +155,67 @@ class StageCalculator:
             scf=opt_cfg.get("scf"),
             timeout=opt_cfg.get("timeout"),
         )
+        warmup_cfg = dict(opt_cfg.get("warmup", {}) or {})
+        warmup_status = "not_requested"
+        warmup_used = False
+        warmup_error = None
+        warmup_output = None
+        warmup_xyz = None
+        warmup_energy_hartree = None
+        warmup_constraints: List[Dict[str, Any]] = []
+        warmup_convergence = None
+        warmup_max_cycles = None
+        optimization_input_xyz = input_xyz
+        if self._warmup_applies(structure, warmup_cfg):
+            if opt_spec.engine.lower() != "orca":
+                warmup_status = "skipped"
+                warmup_error = "S3 constrained warm-up currently requires ORCA"
+            else:
+                bond_constraints, warmup_constraints = self._bond_constraints_from_seed(
+                    input_xyz,
+                    structure.get("forming_bonds"),
+                )
+                warmup_max_cycles = self._warmup_max_cycles(structure, warmup_cfg)
+                warmup_route_extras, warmup_convergence = self._warmup_route_extras(
+                    opt_spec,
+                    warmup_cfg,
+                )
+                warmup_spec = replace(
+                    opt_spec,
+                    task="opt",
+                    route=str(opt_cfg.get("route_minimum", "Opt")),
+                    route_extras=warmup_route_extras,
+                    max_cycles=warmup_max_cycles,
+                    bond_constraints=bond_constraints,
+                    allow_unconverged_geometry=bool(
+                        warmup_cfg.get("accept_partial_geometry", True)
+                    ),
+                )
+                self._emit("warmup_started", structure_id, warmup_spec)
+                warmup = run_optimization(
+                    warmup_spec,
+                    input_xyz,
+                    output_dir / "warmup",
+                    self.config,
+                )
+                self._emit("warmup_finished", structure_id, warmup_spec, warmup)
+                warmup_status = warmup.status
+                warmup_error = warmup.error
+                warmup_output = str(warmup.output_file) if warmup.output_file else None
+                warmup_xyz = str(warmup.output_xyz) if warmup.output_xyz else None
+                warmup_energy_hartree = warmup.energy_hartree
+                if warmup.output_xyz is not None and warmup.status in {"complete", "partial"}:
+                    optimization_input_xyz = warmup.output_xyz
+                    warmup_used = True
+        elif bool(warmup_cfg.get("enabled", False)):
+            warmup_status = "not_applicable"
         self._emit("optimization_started", structure_id, opt_spec)
-        opt = run_optimization(opt_spec, input_xyz, output_dir / "opt", self.config)
+        opt = run_optimization(
+            opt_spec,
+            optimization_input_xyz,
+            output_dir / "opt",
+            self.config,
+        )
         self._emit("optimization_finished", structure_id, opt_spec, opt)
         frequency = None
         frequency_spec = None
@@ -93,7 +243,7 @@ class StageCalculator:
             self._emit("frequency_started", structure_id, frequency_spec)
             frequency = run_frequency(
                 frequency_spec,
-                opt.output_xyz or input_xyz,
+                opt.output_xyz or optimization_input_xyz,
                 output_dir / "freq",
                 self.config,
             )
@@ -105,7 +255,7 @@ class StageCalculator:
                 frequency_spec,
                 QCJobResult(
                     "skipped",
-                    opt.output_xyz or input_xyz,
+                    opt.output_xyz or optimization_input_xyz,
                     error="Skipped because the prerequisite optimization did not converge",
                 ),
             )
@@ -129,7 +279,7 @@ class StageCalculator:
                 if require_exactly_one
                 else bool(significant_imaginary_cm1)
             )
-        sp_input = opt.output_xyz or input_xyz
+        sp_input = opt.output_xyz or optimization_input_xyz
         ts_quality_result = None
         if frequency_required and kind == "ts":
             ts_quality_result = analyze_ts_quality(
@@ -166,6 +316,16 @@ class StageCalculator:
             "id": structure_id,
             "kind": kind,
             "input_xyz": str(input_xyz),
+            "optimization_input_xyz": str(optimization_input_xyz),
+            "warmup_status": warmup_status,
+            "warmup_used": warmup_used,
+            "warmup_xyz": warmup_xyz,
+            "warmup_output": warmup_output,
+            "warmup_energy_hartree": warmup_energy_hartree,
+            "warmup_constraints": warmup_constraints,
+            "warmup_convergence": warmup_convergence,
+            "warmup_max_cycles": warmup_max_cycles,
+            "warmup_error": warmup_error,
             "opt_xyz": str(opt.output_xyz) if opt.output_xyz else None,
             "sp_input_xyz": str(sp_input),
             "opt_output": str(opt.output_file) if opt.output_file else None,
@@ -189,7 +349,8 @@ class StageCalculator:
             "sp_energy_hartree": sp.energy_hartree,
             "status": status,
             "usable_for_ml": (
-                sp.status == "complete"
+                opt.status == "complete"
+                and sp.status == "complete"
                 and (kind != "ts" or ts_frequency_valid is True)
             ),
             "error": "; ".join(

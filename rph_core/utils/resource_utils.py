@@ -88,7 +88,7 @@ def calc_orca_maxcore(mem: str, nproc: int, safety_factor: float = 0.65) -> int:
     total_mb = mem_to_mb(mem)
     maxcore = int(total_mb * safety_factor / nproc)
 
-    logger.info(f"ORCA maxcore 计算: {mem} / {nproc} cores * {safety_factor} = {maxcore} MB/core")
+    logger.debug(f"ORCA maxcore 计算: {mem} / {nproc} cores * {safety_factor} = {maxcore} MB/core")
     return maxcore
 
 
@@ -125,7 +125,7 @@ def find_executable(
     if config_path:
         path = Path(config_path)
         if path.exists() and path.is_file() and os.access(path, os.X_OK):
-            logger.info(f"Found: {program_name} (config): {path}")
+            logger.debug(f"Found: {program_name} (config): {path}")
             return path
         else:
             logger.warning(f"Config path invalid: {config_path}")
@@ -137,14 +137,14 @@ def find_executable(
             if env_path:
                 path = Path(env_path)
                 if path.exists() and path.is_file() and os.access(path, os.X_OK):
-                    logger.info(f"Found: {program_name} (env {env_var}): {path}")
+                    logger.debug(f"Found: {program_name} (env {env_var}): {path}")
                     return path
                 if path.is_dir():
                     names_to_try = binary_names or [program_name]
                     for name in names_to_try:
                         for candidate in (path / name, path / 'bin' / name):
                             if candidate.is_file() and os.access(str(candidate), os.X_OK):
-                                logger.info(f"Found: {program_name} (env {env_var} dir): {candidate}")
+                                logger.debug(f"Found: {program_name} (env {env_var} dir): {candidate}")
                                 return candidate
                 logger.warning(f"Env {env_var}={env_path} points to non-existent or invalid file/dir")
 
@@ -153,7 +153,7 @@ def find_executable(
         which_result = shutil.which(program_name)
         if which_result:
             path = Path(which_result)
-            logger.info(f"Found: {program_name} (PATH): {path}")
+            logger.debug(f"Found: {program_name} (PATH): {path}")
             return path
 
     # 4. 已知安装目录扫描
@@ -166,12 +166,12 @@ def find_executable(
                     # Try: base/name
                     candidate = Path(base) / name
                     if candidate.is_file() and os.access(str(candidate), os.X_OK):
-                        logger.info(f"Found: {program_name} (known_dirs): {candidate}")
+                        logger.debug(f"Found: {program_name} (known_dirs): {candidate}")
                         return candidate
                     # Try: base/bin/name
                     candidate = Path(base) / 'bin' / name
                     if candidate.is_file() and os.access(str(candidate), os.X_OK):
-                        logger.info(f"Found: {program_name} (known_dirs/bin): {candidate}")
+                        logger.debug(f"Found: {program_name} (known_dirs/bin): {candidate}")
                         return candidate
 
     logger.warning(f"Not found: {program_name}. Searched: config={config_path}, env={env_vars}, PATH, known_dirs={known_dirs}")

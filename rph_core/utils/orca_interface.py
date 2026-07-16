@@ -310,7 +310,7 @@ class ORCAInterface:
         if total == 0:
             return
         hit_rate = (self._sp_cache_hits / total) * 100.0
-        self.logger.info(
+        self.logger.debug(
             f"SP cache hit rate: {self._sp_cache_hits}/{total} ({hit_rate:.1f}%)"
         )
 
@@ -513,7 +513,7 @@ class ORCAInterface:
 
         try:
             out_file = self._run_orca(inp_file, output_dir, timeout=timeout)
-            result = self._parse_output(out_file)
+            result = self._parse_output(out_file, require_optimization_convergence=True)
 
             result.coordinates = self._extract_final_orca_coordinates(out_file, xyz_copy)
 
@@ -584,7 +584,7 @@ class ORCAInterface:
 
         try:
             out_file = self._run_orca(inp_file, output_dir, timeout=timeout)
-            result = self._parse_output(out_file)
+            result = self._parse_output(out_file, require_optimization_convergence=True)
             result.coordinates = self._extract_final_orca_coordinates(out_file, xyz_copy)
 
             if normalized_task in {"ts", "ts_freq", "opt_freq"}:
@@ -600,7 +600,12 @@ class ORCAInterface:
                 error_message=str(e)
             )
 
-    def _parse_output(self, out_file: Path) -> QCResult:
+    def _parse_output(
+        self,
+        out_file: Path,
+        *,
+        require_optimization_convergence: bool = False,
+    ) -> QCResult:
         """
         解析 ORCA 输出文件
 
@@ -669,10 +674,18 @@ class ORCAInterface:
         # 成功解析
         return QCResult(
             energy=energy,
-            converged=True,
+            converged=(
+                not require_optimization_convergence
+                or "THE OPTIMIZATION HAS CONVERGED" in content
+            ),
             coordinates=coordinates,
             output_file=out_file,
-            error_message=None
+            error_message=(
+                None
+                if not require_optimization_convergence
+                or "THE OPTIMIZATION HAS CONVERGED" in content
+                else "ORCA terminated normally, but the geometry optimization did not converge"
+            )
         )
 
     def extract_frequencies_from_output(self, out_file: Path) -> Optional[NDArray[np.float64]]:
@@ -868,6 +881,23 @@ class ORCAInterface:
     def _build_orca_runtime_env(self) -> Dict[str, str]:
         env = os.environ.copy()
 
+        # ORCA parallelism is controlled explicitly by %pal.  Inheriting a
+        # larger OpenMP/BLAS thread count makes each MPI rank spawn additional
+        # threads and invalidates the scheduler's core budget.  One math thread
+        # per rank is the safe default and remains configurable for dedicated
+        # benchmarks.
+        resources = dict((self.config or {}).get("resources", {}) or {})
+        math_threads = max(1, int(resources.get("orca_math_threads_per_rank", 1)))
+        for key in (
+            "OMP_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+            "NUMEXPR_NUM_THREADS",
+        ):
+            env[key] = str(math_threads)
+        env["OMP_MAX_ACTIVE_LEVELS"] = "1"
+        env["OMP_THREAD_LIMIT"] = str(math_threads)
+
         if self.orca_binary is None:
             return env
 
@@ -883,7 +913,7 @@ class ORCAInterface:
         mpi_bin_candidates: List[Path] = []
         if mpi_bin_from_config:
             mpi_bin_candidates.append(Path(mpi_bin_from_config))
-            self.logger.info(f"ORCA MPI bin dir from config: {mpi_bin_from_config}")
+            self.logger.debug(f"ORCA MPI bin dir from config: {mpi_bin_from_config}")
         mpi_bin_candidates += [
             orca_dir / "openmpi" / "bin",
             orca_dir / "mpi" / "bin",
@@ -935,7 +965,7 @@ class ORCAInterface:
         mpi_lib_candidates: List[Path] = []
         if mpi_lib_from_config:
             mpi_lib_candidates.append(Path(mpi_lib_from_config))
-            self.logger.info(f"ORCA MPI lib dir from config: {mpi_lib_from_config}")
+            self.logger.debug(f"ORCA MPI lib dir from config: {mpi_lib_from_config}")
         mpi_lib_candidates += [
             orca_dir / "openmpi" / "lib",
             orca_dir / "mpi" / "lib",
@@ -1173,7 +1203,7 @@ class ORCAInterface:
         if cache_key and cache_key in self._sp_cache:
             self._sp_cache_hits += 1
             cached_energy = self._sp_cache[cache_key]
-            self.logger.info(f"SP cache hit: {xyz_file.name}")
+            self.logger.debug(f"SP cache hit: {xyz_file.name}")
             self._log_sp_cache_stats()
             return QCResult(
                 energy=cached_energy,
@@ -1192,9 +1222,9 @@ class ORCAInterface:
             parts = output_dir.parts
             if len(parts) >= 3:
                 display_dir = Path("...") / parts[-2] / parts[-1]
-        self.logger.info(f"开始 ORCA 单点能计算: {xyz_file.name}")
-        self.logger.info(f"  方法: {self.method}/{self.basis}")
-        self.logger.info(f"  输出目录: {display_dir}")
+        self.logger.debug(f"开始 ORCA 单点能计算: {xyz_file.name}")
+        self.logger.debug(f"  方法: {self.method}/{self.basis}")
+        self.logger.debug(f"  输出目录: {display_dir}")
 
         try:
             # 步骤 1: 生成输入文件
@@ -1223,7 +1253,7 @@ class ORCAInterface:
                 result.frequencies = self._extract_frequencies_from_output(out_file)
 
             if result.converged:
-                self.logger.info(f"  ✓ 计算成功: 能量 = {result.energy:.8f} Hartree")
+                self.logger.debug(f"  ✓ 计算成功: 能量 = {result.energy:.8f} Hartree")
                 if cache_key and result.energy is not None:
                     self._sp_cache[cache_key] = result.energy
                     self._log_sp_cache_stats()
@@ -1351,7 +1381,7 @@ class ORCAInterface:
         # 运行 ORCA
         try:
             out_file = self._run_orca(inp_file, output_dir, timeout=timeout)
-            result = self._parse_output(out_file)
+            result = self._parse_output(out_file, require_optimization_convergence=True)
 
             # 提取频率
             freq_block = re.search(r'VIBRATIONAL FREQUENCIES\s*\n((?:\s*[\d\.\-]+\s+[\d\.\-]+\s+[\d\.\-]+(?:\n|$))+)', out_file.read_text(), re.DOTALL)

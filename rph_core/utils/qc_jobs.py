@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from rph_core.utils.file_io import read_xyz, write_xyz
+from rph_core.utils.keyword_translator import KeywordTranslator
 from rph_core.utils.qc_interface import GaussianInterface
 from rph_core.utils.orca_interface import ORCAInterface
 from rph_core.utils.qc_models import QCJobResult, QCJobSpec
@@ -21,12 +22,24 @@ def _resources(config: Dict[str, Any], spec: QCJobSpec) -> tuple[int, str]:
 
 
 def _orca_route_extras(spec: QCJobSpec) -> str:
-    """Return only ORCA keyword extras, excluding the task keyword."""
-    if spec.route_extras.strip():
-        return spec.route_extras.strip()
-    tokens = str(spec.route or "").replace("=", " ").split()
+    """Return normalized ORCA controls, excluding the task keyword."""
+
+    tokens = spec.route_extras.split()
+    tokens.extend(str(spec.route or "").replace("=", " ").split())
+    if spec.grid:
+        tokens.append(str(spec.grid).strip())
+    if spec.scf:
+        tokens.append(str(spec.scf).strip())
     ignored = {"opt", "optts", "ts", "tightscf"}
-    return " ".join(token for token in tokens if token.lower() not in ignored)
+    normalized = []
+    seen = set()
+    for token in tokens:
+        lowered = token.lower()
+        if not token or lowered in ignored or lowered in seen:
+            continue
+        normalized.append(token)
+        seen.add(lowered)
+    return " ".join(normalized)
 
 
 def _frequency_route_extras(spec: QCJobSpec) -> str:
@@ -38,25 +51,44 @@ def _frequency_route_extras(spec: QCJobSpec) -> str:
         hessian_keyword = keyword_by_task[task_name]
     except KeyError as exc:
         raise ValueError(f"Unsupported ORCA frequency task: {spec.task}") from exc
-    extras = spec.route_extras.strip()
-    tokens = extras.split()
+    tokens = _orca_route_extras(spec).split()
     if hessian_keyword.lower() not in {token.lower() for token in tokens}:
         tokens.append(hessian_keyword)
     return " ".join(tokens)
 
 
 def _orca_geom_block(spec: QCJobSpec) -> str:
-    if spec.max_cycles is None:
+    if spec.max_cycles is None and not spec.bond_constraints:
         return ""
-    return f"%geom\n  MaxIter {int(spec.max_cycles)}\nend"
+    lines = ["%geom"]
+    if spec.max_cycles is not None:
+        lines.append(f"  MaxIter {int(spec.max_cycles)}")
+    if spec.bond_constraints:
+        lines.append("  Constraints")
+        for atom_i, atom_j, target in spec.bond_constraints:
+            if int(atom_i) < 0 or int(atom_j) < 0 or int(atom_i) == int(atom_j):
+                raise ValueError(f"Invalid ORCA bond constraint: {(atom_i, atom_j, target)!r}")
+            if target is None:
+                lines.append(f"    {{ B {int(atom_i)} {int(atom_j)} C }}")
+            else:
+                target_value = float(target)
+                if target_value <= 0.0:
+                    raise ValueError(f"Invalid ORCA bond-constraint distance: {target_value}")
+                lines.append(
+                    f"    {{ B {int(atom_i)} {int(atom_j)} {target_value:.8f} C }}"
+                )
+        lines.append("  end")
+    lines.append("end")
+    return "\n".join(lines)
 
 
 def _gaussian_route(spec: QCJobSpec, require_frequency: bool = False) -> str:
-    route = f"{spec.method}/{spec.basis} {spec.route}".strip() if spec.basis else f"{spec.method} {spec.route}".strip()
+    basis = KeywordTranslator.to_gaussian_basis(spec.basis) if spec.basis else ""
+    route = f"{spec.method}/{basis} {spec.route}".strip() if basis else f"{spec.method} {spec.route}".strip()
     if require_frequency and "freq" not in route.lower():
         route += " Freq"
-    if spec.grid and "integral=" not in route.lower():
-        route += f" Integral={spec.grid}"
+    if spec.grid and "int=" not in route.lower():
+        route += f" Int={spec.grid}"
     if spec.scf and "scf=" not in route.lower():
         route += f" SCF={spec.scf}"
     if spec.max_cycles is not None and "maxcycle" not in route.lower():
@@ -134,9 +166,20 @@ def run_optimization(spec: QCJobSpec, input_xyz: Path, output_dir: Path, config:
         else:
             raise ValueError(f"Unsupported optimization engine: {spec.engine}")
         output_file = getattr(result, "output_file", None)
-        output_xyz = _write_coordinates(input_xyz, getattr(result, "coordinates", None), output_dir / "opt.xyz") if getattr(result, "converged", False) else None
+        converged = bool(getattr(result, "converged", False))
+        may_export_geometry = converged or bool(spec.allow_unconverged_geometry)
+        output_xyz = (
+            _write_coordinates(
+                input_xyz,
+                getattr(result, "coordinates", None),
+                output_dir / "opt.xyz",
+            )
+            if may_export_geometry
+            else None
+        )
+        status = "complete" if converged else ("partial" if output_xyz is not None else "failed")
         return QCJobResult(
-            "complete" if getattr(result, "converged", False) else "failed",
+            status,
             input_xyz,
             output_xyz,
             output_file,

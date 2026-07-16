@@ -70,6 +70,9 @@ def plot_scan_profile(
         Path to saved plot, or None if plotting failed
     """
     try:
+        import matplotlib
+
+        matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError:
         logger.warning("matplotlib not available, skipping plot generation")
@@ -95,7 +98,9 @@ def plot_scan_profile(
     scan_steps = params.get("scan_steps", 20)
     direction = "outward" if scan_start > scan_end else "inward"
     
-    distances = compute_scan_distances(scan_start, scan_end, scan_steps, direction)
+    distances = data.get("reaction_coordinate_angstrom")
+    if not distances:
+        distances = compute_scan_distances(scan_start, scan_end, scan_steps, direction)
     
     if len(distances) != len(energies):
         logger.warning(
@@ -105,18 +110,91 @@ def plot_scan_profile(
         distances = np.linspace(distances[0], distances[-1], len(energies)).tolist()
     
     if energy_unit == "kcal":
-        energies = [e * HARTREE_TO_KCAL for e in energies]
-        ylabel = "Energy (kcal/mol)"
+        energies = [(float(e) - float(energies[0])) * HARTREE_TO_KCAL for e in energies]
+        ylabel = "Relative energy to frame 0 (kcal/mol)"
+        display_unit = "kcal/mol"
     else:
         ylabel = "Energy (Hartree)"
+        display_unit = "Hartree"
     
     fig, ax = plt.subplots(figsize=figsize)
     
     ax.plot(distances, energies, "b-o", markersize=4, linewidth=1.5, label="Scan Energy")
     
     markers_added = []
-    
-    if show_peak and energies:
+    selections = data.get("selections", {}) or {}
+
+    ts_selection = selections.get("ts_guess") or {}
+    if ts_selection and energies:
+        ts_idx = int(ts_selection["index"])
+        if 0 <= ts_idx < len(energies):
+            ts_dist = float(distances[ts_idx])
+            ts_energy = float(energies[ts_idx])
+            ax.scatter(
+                [ts_dist],
+                [ts_energy],
+                color="red",
+                s=150,
+                zorder=6,
+                marker="*",
+                label=f"TS guess: frame {ts_idx}, {ts_dist:.2f} Å, {ts_energy:.2f} {display_unit}",
+            )
+            ax.axvline(x=ts_dist, color="red", linestyle="--", alpha=0.5)
+            markers_added.append("ts")
+
+    intermediate_selection = selections.get("intermediate") or {}
+    if intermediate_selection.get("index") is not None and energies:
+        intermediate_idx = int(intermediate_selection["index"])
+        if 0 <= intermediate_idx < len(energies):
+            intermediate_dist = float(distances[intermediate_idx])
+            intermediate_energy = float(energies[intermediate_idx])
+            ax.scatter(
+                [intermediate_dist],
+                [intermediate_energy],
+                color="green",
+                s=110,
+                zorder=6,
+                marker="s",
+                label=(
+                    f"Intermediate guess: frame {intermediate_idx}, "
+                    f"{intermediate_dist:.2f} Å, {intermediate_energy:.2f} {display_unit}"
+                ),
+            )
+            ax.axvline(x=intermediate_dist, color="green", linestyle=":", alpha=0.7)
+            markers_added.append("intermediate")
+
+            endpoint_idx = len(energies) - 1
+            candidate_start_idx = int(
+                ts_selection.get(
+                    "index",
+                    data.get("scan_quality", {}).get("max_energy_index", intermediate_idx),
+                )
+            )
+            ax.axvspan(
+                float(distances[candidate_start_idx]),
+                float(distances[endpoint_idx]),
+                color="green",
+                alpha=0.06,
+                label="Intermediate candidate region",
+            )
+
+    trajectory_quality = data.get("trajectory_quality", {}) or {}
+    if trajectory_quality.get("endpoint_excluded") and energies:
+        endpoint_idx = int(trajectory_quality.get("endpoint_index", len(energies) - 1))
+        if 0 <= endpoint_idx < len(energies):
+            endpoint_dist = float(distances[endpoint_idx])
+            endpoint_energy = float(energies[endpoint_idx])
+            ax.scatter(
+                [endpoint_dist],
+                [endpoint_energy],
+                color="gray",
+                s=80,
+                zorder=5,
+                marker="x",
+                label=f"Excluded endpoint: frame {endpoint_idx}",
+            )
+
+    if show_peak and energies and not ts_selection:
         max_idx = np.argmax(energies)
         max_dist = distances[max_idx]
         max_energy = energies[max_idx]
@@ -148,18 +226,18 @@ def plot_scan_profile(
         title_suffix = ""
     
     direction_label = "outward" if direction == "outward" else "inward"
-    ax.set_xlabel(f"Bond Distance (Å) - {direction_label} scan")
+    ax.set_xlabel(f"Forming-bond scan target (Å) - {direction_label} scan")
     ax.set_ylabel(ylabel)
     ax.set_title(f"S2 Scan Energy Profile{title_suffix}")
     ax.legend()
     ax.grid(True, alpha=0.3)
     
-    ax.invert_xaxis() if direction == "outward" else None
-    
     plt.tight_layout()
     
     if output_path is None:
         output_path = scan_profile_json.with_suffix(".png")
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close()

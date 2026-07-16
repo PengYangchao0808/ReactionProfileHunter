@@ -17,6 +17,14 @@ class HighLevelEngine:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.stage_config = dict((config.get("theory", {}) or {}).get("s4_high_precision", {}) or {})
+        for section in ("optimization", "single_point"):
+            engine = str(
+                (self.stage_config.get(section, {}) or {}).get("engine", "orca")
+            ).strip().lower()
+            if engine != "orca":
+                raise ValueError(
+                    f"V4 S4 {section} requires engine=orca, got {engine!r}"
+                )
 
     def _stage_config(self) -> Dict[str, Any]:
         return dict(self.config)
@@ -37,14 +45,21 @@ class HighLevelEngine:
             event_callback=reporter.calculator_event,
         )
         results = [self._run_one(structure, output_dir, calculator, reporter) for structure in materialized]
+        summary = self._summary(results)
+        stage_status = (
+            "complete"
+            if summary["complete"] == summary["total_structures"]
+            else "incomplete"
+        )
         path = output_dir / "manifest.json"
         path.write_text(
             json.dumps(
                 {
-                    "schema_version": "s4_high_level_v2",
+                    "schema_version": "s4_high_level_v3",
                     "stage": "S4",
+                    "status": stage_status,
                     "theory": self.stage_config,
-                    "summary": self._summary(results),
+                    "summary": summary,
                     "structures": results,
                 },
                 indent=2,
@@ -84,6 +99,10 @@ class HighLevelEngine:
             "pathway_id",
             "parent_structure_id",
             "source_stage",
+            "s1_manifest",
+            "s1_ensemble_thermodynamics",
+            "s1_thermochemistry_status",
+            "ensemble_thermochemistry_correction_hartree",
         ):
             if field in structure:
                 payload[field] = structure[field]
@@ -97,7 +116,23 @@ class HighLevelEngine:
         reporter.start_structure(structure_id)
         try:
             payload.update(calculator.run_structure(structure, target))
-            payload["usable_for_ml"] = bool(payload.get("sp_status") == "complete")
+            correction = payload.get("ensemble_thermochemistry_correction_hartree")
+            if payload.get("sp_energy_hartree") is not None and correction is not None:
+                payload["ensemble_corrected_sp_free_energy_hartree"] = (
+                    float(payload["sp_energy_hartree"]) + float(correction)
+                )
+                payload["ensemble_free_energy_formula"] = (
+                    "E_S4_SP + G_RRHO(reference)_S1 + G_conf_rel_S1"
+                )
+                payload["ensemble_free_energy_status"] = "complete"
+            elif payload.get("sp_energy_hartree") is not None:
+                payload["ensemble_corrected_sp_free_energy_hartree"] = None
+                payload["ensemble_free_energy_status"] = (
+                    "thermochemistry_incomplete"
+                    if payload.get("s1_thermochemistry_status") == "incomplete"
+                    else "not_available"
+                )
+            payload["usable_for_ml"] = bool(payload.get("usable_for_ml", False))
         except (OSError, RuntimeError, ValueError) as exc:
             payload["error"] = str(exc)
         payload["s4_status"] = payload["status"]

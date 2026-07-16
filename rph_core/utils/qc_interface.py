@@ -1179,6 +1179,7 @@ class XTBInterface:
         imagthr: float = -100.0,
         solvent: Optional[str] = None,
         timeout: Optional[int] = None,
+        max_scc_iterations: Optional[int] = None,
     ) -> "XTBThermoResult":
         """Run xTB SPH + mRRHO (ENSO) thermochemistry calculation.
 
@@ -1243,12 +1244,16 @@ class XTBInterface:
                 bhess_level=thermo_cfg.get("bhess_level", "normal"),
                 omp_stacksize=thermo_cfg.get("omp_stacksize"),
                 omp_max_active_levels=thermo_cfg.get("omp_max_active_levels", 1),
+                max_scc_iterations=max_scc_iterations,
+                ledger_tolerance_hartree=float(
+                    thermo_cfg.get("ledger_tolerance_hartree", 1.0e-7)
+                ),
             )
             return result
 
         except Exception as exc:
             logger.warning("ENSO thermo calculation failed: %s", exc)
-            return XTBThermoResult(g_rrho_correction_hartree=0.0, success=False, error=str(exc))
+            return XTBThermoResult(g_rrho_correction_hartree=None, success=False, error=str(exc))
 
     def scan(
         self,

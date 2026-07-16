@@ -1,8 +1,12 @@
 import json
 import logging
+import math
 import shutil
 from pathlib import Path
+from statistics import median
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
 
 from rph_core.utils.file_io import read_xyz, write_xyz
 from rph_core.utils.geometry_tools import GeometryUtils, LogParser
@@ -12,19 +16,15 @@ from rph_core.utils.naming_compat import (
 )
 from rph_core.utils.qc_interface import XTBInterface
 from rph_core.utils.scan_profile_plotter import (
-    find_ts_and_dipole_guess,
+    HARTREE_TO_KCAL,
     compute_scan_distances,
+    plot_scan_profile,
 )
 from rph_core.utils.ui import get_progress_manager
 
 from .bond_stretcher import BondStretcher
 from .geometry_guard import (
-    compare_graph_topology,
     check_scan_trajectory,
-    detect_risky_contacts,
-    generate_keepaway_constraints,
-    TopologyGuardResult,
-    RiskyContactResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,14 +37,11 @@ class PEBScanEngine(LoggerMixin):
     DEFAULT_SCAN_MODE = "concerted"
     DEFAULT_SCAN_FORCE_CONSTANT = 0.5
     DEFAULT_MIN_VALID_POINTS = 5
-    DEFAULT_INTERMEDIATE_MIN_RMSD = 0.15
-
     def __init__(self, config: Dict[str, Any], molecule_name: Optional[str] = None):
         self.config = config
         self.step2_cfg = config.get("step2", {}) if isinstance(config, dict) else {}
         self.molecule_name = molecule_name
         self.bond_stretcher = BondStretcher()
-        self._seed_guard_result: Optional[Dict[str, Any]] = None
         self.logger.info("[S2] PEB scan engine initialized")
 
     def _optimize_intermediate(
@@ -54,6 +51,7 @@ class PEBScanEngine(LoggerMixin):
         forming_bonds: Tuple[Tuple[int, int], ...],
         scan_start_distance: float,
     ) -> Path:
+        """Retain the stretched endpoint only as a diagnostic artifact."""
         return Path(seed)
 
     def _update_ui_status(self, output_dir: Path, status_text: str) -> None:
@@ -166,6 +164,7 @@ class PEBScanEngine(LoggerMixin):
         boundary_retry_delta = float(scan_cfg.get("boundary_retry_delta", 0.3))
         boundary_retry_extra_steps = int(scan_cfg.get("boundary_retry_extra_steps", 6))
         allow_boundary_degradation = bool(scan_cfg.get("allow_boundary_degradation", True))
+        intermediate_cfg = dict(scan_cfg.get("intermediate_selection", {}) or {})
 
         if start <= end:
             raise RuntimeError(f"S2 scan requires scan_start_distance > scan_end_distance, got scan_start={start}, scan_end={end}")
@@ -186,7 +185,145 @@ class PEBScanEngine(LoggerMixin):
             "boundary_retry_extra_steps": boundary_retry_extra_steps,
             "allow_boundary_degradation": allow_boundary_degradation,
             "scan_policy": scan_cfg.get("scan_policy", "policy_c"),
+            "intermediate_selection": {
+                "method": str(intermediate_cfg.get("method", "stable_midpoint")),
+                "endpoint_exclusion_points": int(intermediate_cfg.get("endpoint_exclusion_points", 1)),
+                "stable_quantile": float(intermediate_cfg.get("stable_quantile", 0.5)),
+                "min_candidate_points": int(intermediate_cfg.get("min_candidate_points", 2)),
+                "require_topology_valid": bool(intermediate_cfg.get("require_topology_valid", True)),
+                "allow_degraded_fallback": bool(intermediate_cfg.get("allow_degraded_fallback", False)),
+                "endpoint_jump_warning_ratio": float(intermediate_cfg.get("endpoint_jump_warning_ratio", 5.0)),
+                "endpoint_jump_warning_min_kcal": float(
+                    intermediate_cfg.get("endpoint_jump_warning_min_kcal", 5.0)
+                ),
+            },
         }
+
+    @staticmethod
+    def _quantile_threshold(values: Sequence[float], quantile: float) -> float:
+        if not values:
+            raise RuntimeError("Cannot compute a stability threshold from an empty sequence")
+        ordered = sorted(float(value) for value in values)
+        bounded = min(1.0, max(0.0, float(quantile)))
+        rank = max(0, min(len(ordered) - 1, int(math.ceil(bounded * len(ordered))) - 1))
+        return ordered[rank]
+
+    @classmethod
+    def _select_intermediate_frame(
+        cls,
+        energies: Sequence[float],
+        frame_paths: Sequence[Path],
+        peak_index: int,
+        off_path_indices: Sequence[int],
+        selection_config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Select an existing, stable scan frame between the TS peak and endpoint."""
+        if len(energies) != len(frame_paths):
+            raise RuntimeError(
+                "S2 cannot select intermediate: energy/frame count mismatch "
+                f"({len(energies)} energies, {len(frame_paths)} frames)"
+            )
+        if not 0 <= int(peak_index) < len(energies):
+            raise RuntimeError(f"S2 peak index is outside scan trajectory: {peak_index}")
+
+        endpoint_index = len(energies) - 1
+        endpoint_exclusion = max(1, int(selection_config.get("endpoint_exclusion_points", 1)))
+        candidate_stop = endpoint_index - endpoint_exclusion
+        candidate_indices = list(range(int(peak_index) + 1, candidate_stop + 1))
+        minimum_candidates = max(1, int(selection_config.get("min_candidate_points", 2)))
+        allow_fallback = bool(selection_config.get("allow_degraded_fallback", False))
+        if len(candidate_indices) < minimum_candidates and not allow_fallback:
+            raise RuntimeError(
+                "S2 cannot select intermediate: only "
+                f"{len(candidate_indices)} interior frame(s) after peak {peak_index}; "
+                f"requires {minimum_candidates}"
+            )
+
+        off_path = {int(index) for index in off_path_indices}
+        require_topology = bool(selection_config.get("require_topology_valid", True))
+        valid_indices = [
+            index for index in candidate_indices if not require_topology or index not in off_path
+        ]
+        degraded_fallback = False
+        if not valid_indices:
+            if not allow_fallback or not candidate_indices:
+                raise RuntimeError("S2 cannot select intermediate: no topology-valid interior frames")
+            valid_indices = list(candidate_indices)
+            degraded_fallback = True
+
+        roughness: Dict[int, float] = {}
+        for index in valid_indices:
+            left_delta = abs(float(energies[index]) - float(energies[index - 1]))
+            right_delta = abs(float(energies[index + 1]) - float(energies[index]))
+            roughness[index] = max(left_delta, right_delta) * HARTREE_TO_KCAL
+
+        threshold = cls._quantile_threshold(
+            list(roughness.values()),
+            float(selection_config.get("stable_quantile", 0.5)),
+        )
+        stable_indices = [index for index in valid_indices if roughness[index] <= threshold]
+        midpoint_index = (float(peak_index) + float(endpoint_index)) / 2.0
+        selected_index = min(
+            stable_indices,
+            key=lambda index: (
+                abs(float(index) - midpoint_index),
+                float(energies[index]),
+                roughness[index],
+                index,
+            ),
+        )
+
+        return {
+            "index": int(selected_index),
+            "frame_xyz": str(Path(frame_paths[selected_index])),
+            "rule": "stable_midpoint",
+            "midpoint_index": midpoint_index,
+            "candidate_indices": candidate_indices,
+            "stable_indices": stable_indices,
+            "off_path_indices": sorted(off_path),
+            "roughness_kcal_mol": roughness[selected_index],
+            "stability_threshold_kcal_mol": threshold,
+            "endpoint_index": endpoint_index,
+            "endpoint_exclusion_points": endpoint_exclusion,
+            "degraded_fallback": degraded_fallback,
+        }
+
+    @staticmethod
+    def _forming_bond_distances_by_frame(
+        frame_paths: Sequence[Path],
+        forming_bonds: Sequence[Tuple[int, int]],
+    ) -> List[Optional[List[float]]]:
+        distances: List[Optional[List[float]]] = []
+        for frame_path in frame_paths:
+            try:
+                frame_coords, _ = read_xyz(Path(frame_path))
+                distances.append(
+                    [
+                        float(GeometryUtils.calculate_distance(frame_coords, int(i), int(j)))
+                        for i, j in forming_bonds
+                    ]
+                )
+            except Exception:
+                distances.append(None)
+        return distances
+
+    @staticmethod
+    def _endpoint_jump_detected(
+        energies: Sequence[float],
+        peak_index: int,
+        selection_config: Dict[str, Any],
+    ) -> bool:
+        if len(energies) - int(peak_index) < 4:
+            return False
+        step_changes = [
+            abs(float(energies[index]) - float(energies[index - 1])) * HARTREE_TO_KCAL
+            for index in range(int(peak_index) + 1, len(energies))
+        ]
+        endpoint_change = step_changes[-1]
+        baseline = median(step_changes[:-1])
+        ratio = float(selection_config.get("endpoint_jump_warning_ratio", 5.0))
+        absolute_minimum = float(selection_config.get("endpoint_jump_warning_min_kcal", 5.0))
+        return endpoint_change >= absolute_minimum and endpoint_change > ratio * max(baseline, 1.0e-12)
 
     def _execute_scan(
         self,
@@ -357,39 +494,163 @@ class PEBScanEngine(LoggerMixin):
             else:
                 raise RuntimeError("S2 boundary maximum detected")
 
-        if scan_result is None or getattr(scan_result, "ts_guess_xyz", None) is None:
-            raise RuntimeError("S2 scan did not provide ts_guess geometry")
+        frame_paths = [Path(path) for path in (getattr(scan_result, "geometries", None) or [])]
+        if len(frame_paths) != len(energies):
+            raise RuntimeError(
+                "S2 scan trajectory is incomplete: "
+                f"{len(energies)} energies but {len(frame_paths)} geometry frames"
+            )
+
+        topology_config = self._get_topology_guard_config()
+        trajectory_quality: Dict[str, Any] = {
+            "checked": False,
+            "total_frames": len(frame_paths),
+            "off_path_indices": [],
+            "off_path_count": 0,
+            "frame_issues": [],
+        }
+        if bool(topology_config.get("enabled", True)):
+            trajectory_reference_coords, trajectory_reference_symbols = read_xyz(frame_paths[0])
+            trajectory_quality = check_scan_trajectory(
+                product_coords=np.asarray(trajectory_reference_coords, dtype=float),
+                symbols=list(trajectory_reference_symbols),
+                forming_bonds=bonds,
+                frame_paths=frame_paths,
+                graph_scale=float(topology_config.get("graph_scale", 1.25)),
+            )
+            trajectory_quality["reference_frame"] = str(frame_paths[0])
+        off_path_indices = {
+            int(index) for index in trajectory_quality.get("off_path_indices", [])
+        }
+        if max_idx in off_path_indices:
+            status = "DEGRADED"
+            ts_guess_confidence = "low"
+            degraded_reasons.append("ts_guess_off_path")
+
+        selection_config = dict(params.get("intermediate_selection", {}) or {})
+        selection_error: Optional[str] = None
+        try:
+            intermediate_selection = self._select_intermediate_frame(
+                energies=energies,
+                frame_paths=frame_paths,
+                peak_index=max_idx,
+                off_path_indices=sorted(off_path_indices),
+                selection_config=selection_config,
+            )
+            intermediate_idx: Optional[int] = int(intermediate_selection["index"])
+        except RuntimeError as exc:
+            selection_error = str(exc)
+            intermediate_idx = None
+            intermediate_selection = {
+                "index": None,
+                "rule": "stable_midpoint",
+                "status": "unavailable",
+                "error": selection_error,
+            }
+            status = "FAILED"
+            ts_guess_confidence = "low"
+            degraded_reasons.append("no_topology_valid_intermediate")
+
+        if bool(intermediate_selection.get("degraded_fallback")):
+            status = "DEGRADED"
+            ts_guess_confidence = "low"
+            degraded_reasons.append("intermediate_used_off_path_fallback")
 
         ts_guess_xyz_final = output_dir / "ts_guess.xyz"
-        shutil.copy2(Path(scan_result.ts_guess_xyz), ts_guess_xyz_final)
+        shutil.copy2(frame_paths[max_idx], ts_guess_xyz_final)
 
         dipolar_xyz = output_dir / INTERMEDIATE_XYZ
-        shutil.copy2(Path(intermediate_seed), dipolar_xyz)
-
         reactant_xyz = output_dir / "reactant_complex.xyz"
-        shutil.copy2(dipolar_xyz, reactant_xyz)
+        if intermediate_idx is not None:
+            shutil.copy2(frame_paths[intermediate_idx], dipolar_xyz)
+            shutil.copy2(dipolar_xyz, reactant_xyz)
+
+        reaction_coordinate = compute_scan_distances(
+            float(params["scan_start_distance"]),
+            float(params["scan_end_distance"]),
+            len(energies),
+            direction="outward",
+        )
+        relative_energies = [
+            (float(energy) - float(energies[0])) * HARTREE_TO_KCAL for energy in energies
+        ]
+        endpoint_jump = self._endpoint_jump_detected(energies, max_idx, selection_config)
+        if endpoint_jump:
+            self.logger.warning(
+                "[S2] Endpoint energy discontinuity detected; endpoint frame is excluded from "
+                "intermediate selection"
+            )
+
+        if intermediate_idx is not None:
+            intermediate_selection.update(
+                {
+                    "target_distance_angstrom": float(reaction_coordinate[intermediate_idx]),
+                    "energy_hartree": float(energies[intermediate_idx]),
+                    "relative_energy_kcal_mol": float(relative_energies[intermediate_idx]),
+                    "output_xyz": str(dipolar_xyz),
+                }
+            )
+        ts_selection = {
+            "index": int(max_idx),
+            "frame_xyz": str(frame_paths[max_idx]),
+            "output_xyz": str(ts_guess_xyz_final),
+            "rule": "maximum_energy",
+            "target_distance_angstrom": float(reaction_coordinate[max_idx]),
+            "energy_hartree": float(energies[max_idx]),
+            "relative_energy_kcal_mol": float(relative_energies[max_idx]),
+        }
+        trajectory_quality.update(
+            {
+                "endpoint_index": len(energies) - 1,
+                "endpoint_excluded": True,
+                "endpoint_jump_detected": bool(endpoint_jump),
+            }
+        )
 
         scan_profile_json = output_dir / "scan_profile.json"
-        with open(scan_profile_json, "w") as f:
-            json.dump(
-                {
-                    "generation_method": "retro_scan",
-                    "product_xyz": str(product_file),
-                    "intermediate_xyz": str(dipolar_xyz),
-                    "forming_bonds": [list(pair) for pair in bonds],
-                    "scan_parameters": params,
-                    "scan_quality": {
-                        "max_energy_index": int(max_idx),
-                        "boundary_maximum": bool(boundary_max),
-                        "local_peak_ok": bool(peak_ok),
-                        "status": status,
-                        "ts_guess_confidence": ts_guess_confidence,
-                        "degraded_reasons": degraded_reasons,
-                    },
-                "energies_hartree": energies,
-                },
-                f,
-                indent=2,
+        profile_payload: Dict[str, Any] = {
+            "profile_schema_version": "s2_scan_profile_v2",
+            "generation_method": "retro_scan",
+            "product_xyz": str(product_file),
+            "intermediate_xyz": str(dipolar_xyz) if intermediate_idx is not None else None,
+            "forming_bonds": [list(pair) for pair in bonds],
+            "scan_parameters": params,
+            "scan_quality": {
+                "max_energy_index": int(max_idx),
+                "intermediate_index": intermediate_idx,
+                "boundary_maximum": bool(boundary_max),
+                "local_peak_ok": bool(peak_ok),
+                "status": status,
+                "ts_guess_confidence": ts_guess_confidence,
+                "intermediate_confidence": "high" if status == "COMPLETE" else "low",
+                "degraded_reasons": degraded_reasons,
+            },
+            "reaction_coordinate_angstrom": reaction_coordinate,
+            "forming_bond_distances_angstrom": self._forming_bond_distances_by_frame(
+                frame_paths, bonds
+            ),
+            "energies_hartree": energies,
+            "relative_energies_kcal_mol": relative_energies,
+            "selections": {
+                "ts_guess": ts_selection,
+                "intermediate": intermediate_selection,
+            },
+            "trajectory_quality": trajectory_quality,
+            "scan_plot": None,
+        }
+        scan_profile_json.write_text(json.dumps(profile_payload, indent=2), encoding="utf-8")
+
+        try:
+            plot_path = plot_scan_profile(scan_profile_json)
+            if plot_path is not None:
+                profile_payload["scan_plot"] = str(plot_path)
+                scan_profile_json.write_text(json.dumps(profile_payload, indent=2), encoding="utf-8")
+        except Exception as exc:
+            self.logger.warning("[S2] Failed to render scan profile: %s", exc, exc_info=True)
+
+        if selection_error is not None:
+            raise RuntimeError(
+                f"{selection_error}; S2 scan diagnostics were written to {scan_profile_json}"
             )
 
         return (

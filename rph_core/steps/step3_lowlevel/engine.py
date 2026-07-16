@@ -38,7 +38,7 @@ class LowLevelEngine:
         for structure in materialized:
             manifest.append(self._run_one(structure, output_dir, calculator, reporter))
         path = output_dir / "manifest.json"
-        path.write_text(json.dumps({"schema_version": "s3_low_level_v1", "stage": "S3", "structures": manifest}, indent=2, default=str), encoding="utf-8")
+        path.write_text(json.dumps({"schema_version": "s3_low_level_v2", "stage": "S3", "structures": manifest}, indent=2, default=str), encoding="utf-8")
         return path
 
     def _run_one(
@@ -67,10 +67,14 @@ class LowLevelEngine:
             "pathway_id",
             "parent_structure_id",
             "source_stage",
+            "s1_manifest",
+            "s1_ensemble_thermodynamics",
+            "s1_thermochemistry_status",
+            "ensemble_thermochemistry_correction_hartree",
         ):
             if field in structure:
                 payload[field] = structure[field]
-        if payload["kind"] == "ts" and structure.get("forming_bonds") is not None:
+        if structure.get("forming_bonds") is not None:
             payload["forming_bonds"] = [
                 [int(pair[0]), int(pair[1])]
                 for pair in structure.get("forming_bonds", [])
@@ -86,6 +90,22 @@ class LowLevelEngine:
             )
         try:
             payload.update(calculator.run_structure(structure, target))
+            correction = payload.get("ensemble_thermochemistry_correction_hartree")
+            if payload.get("sp_energy_hartree") is not None and correction is not None:
+                payload["ensemble_corrected_sp_free_energy_hartree"] = (
+                    float(payload["sp_energy_hartree"]) + float(correction)
+                )
+                payload["ensemble_free_energy_formula"] = (
+                    "E_S3_SP + G_RRHO(reference)_S1 + G_conf_rel_S1"
+                )
+                payload["ensemble_free_energy_status"] = "complete"
+            elif payload.get("sp_energy_hartree") is not None:
+                payload["ensemble_corrected_sp_free_energy_hartree"] = None
+                payload["ensemble_free_energy_status"] = (
+                    "thermochemistry_incomplete"
+                    if payload.get("s1_thermochemistry_status") == "incomplete"
+                    else "not_available"
+                )
         except (OSError, RuntimeError, ValueError) as exc:
             payload["error"] = str(exc)
         if reporter is not None:

@@ -27,6 +27,8 @@ class QCJobSpec:
     grid: Optional[str] = None
     scf: Optional[str] = None
     timeout: Optional[int] = None
+    bond_constraints: Tuple[Tuple[int, int, Optional[float]], ...] = ()
+    allow_unconverged_geometry: bool = False
 
 
 @dataclass
