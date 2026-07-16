@@ -1943,7 +1943,6 @@ class GaussianInterface:
                         coords = np.array([[atom['x'], atom['y'], atom['z']] for atom in atoms]) if atoms else np.array([])
                         frequencies = self._parse_frequencies(log_content)
                         chk_file = gjf_file.with_suffix(".chk")
-                        fchk_file = try_formchk(chk_file) if chk_file.exists() else None
                         return QCResult(
                             success=False,
                             converged=False,
@@ -1953,7 +1952,9 @@ class GaussianInterface:
                             output_file=log_file,
                             log_file=log_file,
                             chk_file=chk_file if chk_file.exists() else None,
-                            fchk_file=fchk_file,
+                            # A non-zero Gaussian exit may leave a truncated .chk;
+                            # never pass that file to formchk.
+                            fchk_file=None,
                             qm_output_file=log_file,
                             error_message=error_snippet,
                         )
@@ -1981,7 +1982,9 @@ class GaussianInterface:
             frequencies = self._parse_frequencies(log_content)
 
             chk_file = gjf_file.with_suffix(".chk")
-            fchk_file = try_formchk(chk_file) if chk_file.exists() else None
+            # formchk can segfault on a checkpoint left by abnormal termination.
+            # Preserve the raw .chk for diagnostics but convert only normal jobs.
+            fchk_file = try_formchk(chk_file) if converged and chk_file.exists() else None
 
             error_message = None
             if not converged:

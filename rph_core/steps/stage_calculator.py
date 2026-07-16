@@ -1,4 +1,4 @@
-"""Compose exactly one optimization and one single-point job per structure."""
+"""Compose one optimization, frequency and single-point sequence per structure."""
 
 from __future__ import annotations
 
@@ -131,10 +131,15 @@ class StageCalculator:
         charge = int(opt_cfg.get("charge", 0) if charge_value is None else charge_value)
         multiplicity = int(opt_cfg.get("multiplicity", 1) if multiplicity_value is None else multiplicity_value)
         frequency_cfg = dict(opt_cfg.get("frequency", {}) or {})
-        frequency_required = kind == "ts" and bool(frequency_cfg.get("enabled_for_ts", False))
+        is_ts = kind == "ts"
+        frequency_required = bool(
+            frequency_cfg.get("enabled_for_ts", False)
+            if is_ts
+            else frequency_cfg.get("enabled_for_minima", False)
+        )
         frequency_engine = str(opt_cfg.get("engine", "orca")).lower()
         if frequency_required and frequency_engine not in {"orca", "gaussian"}:
-            raise ValueError("V4 TS frequency validation requires an ORCA or Gaussian optimization engine")
+            raise ValueError("V4 frequency validation requires an ORCA or Gaussian optimization engine")
         opt_spec = QCJobSpec(
             engine=str(opt_cfg.get("engine", "orca")),
             task="opt_ts" if kind == "ts" else "opt",
@@ -266,22 +271,28 @@ class StageCalculator:
             value for value in frequencies_cm1 if value <= imaginary_cutoff_cm1
         )
         require_exactly_one = bool(frequency_cfg.get("require_exactly_one", True))
+        minimum_frequency_valid = None
         if not frequency_required:
             frequency_status = "not_requested"
             ts_frequency_valid = None
         elif frequency is None or frequency.status != "complete" or not frequencies_cm1:
             frequency_status = "failed"
-            ts_frequency_valid = False
+            ts_frequency_valid = False if is_ts else None
+            minimum_frequency_valid = False if not is_ts else None
         else:
             frequency_status = "complete"
-            ts_frequency_valid = (
-                len(significant_imaginary_cm1) == 1
-                if require_exactly_one
-                else bool(significant_imaginary_cm1)
-            )
+            if is_ts:
+                ts_frequency_valid = (
+                    len(significant_imaginary_cm1) == 1
+                    if require_exactly_one
+                    else bool(significant_imaginary_cm1)
+                )
+            else:
+                ts_frequency_valid = None
+                minimum_frequency_valid = len(significant_imaginary_cm1) == 0
         sp_input = opt.output_xyz or optimization_input_xyz
         ts_quality_result = None
-        if frequency_required and kind == "ts":
+        if frequency_required and is_ts:
             ts_quality_result = analyze_ts_quality(
                 frequency_output=Path(frequency.output_file) if frequency and frequency.output_file else None,
                 optimized_xyz=opt.output_xyz,
@@ -308,8 +319,41 @@ class StageCalculator:
         self._emit("single_point_started", structure_id, sp_spec)
         sp = run_single_point(sp_spec, sp_input, output_dir / "sp", self.config)
         self._emit("single_point_finished", structure_id, sp_spec, sp)
+        frequency_energy_hartree = frequency.energy_hartree if frequency else None
+        enthalpy_correction_hartree = (
+            float(frequency.enthalpy_hartree) - float(frequency_energy_hartree)
+            if frequency
+            and frequency.enthalpy_hartree is not None
+            and frequency_energy_hartree is not None
+            else None
+        )
+        thermal_energy_correction_hartree = (
+            float(frequency.thermal_energy_hartree) - float(frequency_energy_hartree)
+            if frequency
+            and frequency.thermal_energy_hartree is not None
+            and frequency_energy_hartree is not None
+            else None
+        )
+        composite_enthalpy_hartree = (
+            float(sp.energy_hartree) + enthalpy_correction_hartree
+            if sp.energy_hartree is not None and enthalpy_correction_hartree is not None
+            else None
+        )
+        composite_gibbs_free_energy_hartree = (
+            float(sp.energy_hartree) + float(frequency.gibbs_correction_hartree)
+            if frequency
+            and sp.energy_hartree is not None
+            and frequency.gibbs_correction_hartree is not None
+            else None
+        )
+        frequency_valid_for_role = (
+            ts_frequency_valid if is_ts else minimum_frequency_valid
+        )
         if opt.status == "complete" and sp.status == "complete":
-            status = "complete" if ts_frequency_valid is not False else "ts_frequency_unverified"
+            if not frequency_required or frequency_valid_for_role is True:
+                status = "complete"
+            else:
+                status = "ts_frequency_unverified" if is_ts else "minimum_frequency_unverified"
         else:
             status = "opt_failed_sp_complete" if sp.status == "complete" else "degraded"
         return {
@@ -334,13 +378,24 @@ class StageCalculator:
             "sp_status": sp.status,
             "frequency_status": frequency_status,
             "frequency_output": str(frequency.output_file) if frequency and frequency.output_file else None,
+            "frequency_energy_hartree": frequency_energy_hartree,
+            "zero_point_energy_hartree": frequency.zero_point_energy_hartree if frequency else None,
+            "thermal_energy_hartree": frequency.thermal_energy_hartree if frequency else None,
+            "enthalpy_hartree": frequency.enthalpy_hartree if frequency else None,
+            "gibbs_free_energy_hartree": frequency.gibbs_free_energy_hartree if frequency else None,
+            "gibbs_correction_hartree": frequency.gibbs_correction_hartree if frequency else None,
+            "thermal_energy_correction_hartree": thermal_energy_correction_hartree,
+            "enthalpy_correction_hartree": enthalpy_correction_hartree,
+            "composite_enthalpy_hartree": composite_enthalpy_hartree,
+            "composite_gibbs_free_energy_hartree": composite_gibbs_free_energy_hartree,
             "frequencies_cm1": list(frequencies_cm1),
             "imaginary_frequencies_cm1": list(imaginary_frequencies_cm1),
             "significant_imaginary_frequencies_cm1": list(significant_imaginary_cm1),
             "imaginary_cutoff_cm1": imaginary_cutoff_cm1 if frequency_required else None,
             "ts_frequency_valid": ts_frequency_valid,
-            "ts_mode_displacement_verified": ts_quality_result["mode_displacement_valid"] if ts_quality_result else (False if frequency_required else None),
-            "frequency_count_valid": ts_quality_result["frequency_count_valid"] if ts_quality_result else ts_frequency_valid,
+            "minimum_frequency_valid": minimum_frequency_valid,
+            "ts_mode_displacement_verified": ts_quality_result["mode_displacement_valid"] if ts_quality_result else (False if frequency_required and is_ts else None),
+            "frequency_count_valid": ts_quality_result["frequency_count_valid"] if ts_quality_result else frequency_valid_for_role,
             "mode_displacement_valid": ts_quality_result["mode_displacement_valid"] if ts_quality_result else None,
             "irc_valid": ts_quality_result["irc_valid"] if ts_quality_result else None,
             "ts_quality_summary": ts_quality_result["quality_summary"] if ts_quality_result else None,
@@ -351,7 +406,7 @@ class StageCalculator:
             "usable_for_ml": (
                 opt.status == "complete"
                 and sp.status == "complete"
-                and (kind != "ts" or ts_frequency_valid is True)
+                and (not frequency_required or frequency_valid_for_role is True)
             ),
             "error": "; ".join(
                 item for item in (opt.error, frequency.error if frequency else None, sp.error) if item

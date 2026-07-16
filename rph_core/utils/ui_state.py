@@ -24,6 +24,7 @@ _STATUS_MAP: dict[str, UiStatus] = {
     "degraded": UiStatus.DEGRADED,
     "opt_failed_sp_complete": UiStatus.DEGRADED,
     "ts_frequency_unverified": UiStatus.DEGRADED,
+    "minimum_frequency_unverified": UiStatus.DEGRADED,
     "cached": UiStatus.CACHED,
     "reused": UiStatus.CACHED,
     "skipped": UiStatus.CACHED,

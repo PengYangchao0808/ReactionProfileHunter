@@ -6,6 +6,7 @@ logic.  All external execution remains behind existing QC interfaces.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -126,6 +127,34 @@ def _frequencies_cm1(result: Any) -> Optional[Tuple[float, ...]]:
         return tuple(float(value) for value in values)
     except (TypeError, ValueError):
         return None
+
+
+def _orca_thermochemistry(output_file: Optional[Path]) -> Dict[str, Optional[float]]:
+    """Extract the final ORCA thermochemistry summary from a FREQ output."""
+
+    fields = {
+        "zero_point_energy_hartree": r"Zero point energy",
+        "thermal_energy_hartree": r"Total thermal energy",
+        "enthalpy_hartree": r"Total Enthalpy",
+        "gibbs_free_energy_hartree": r"Final Gibbs free energy",
+        "gibbs_correction_hartree": r"G-E\(el\)",
+    }
+    values: Dict[str, Optional[float]] = {key: None for key in fields}
+    if output_file is None:
+        return values
+    try:
+        content = Path(output_file).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return values
+    for key, label in fields.items():
+        matches = re.findall(
+            rf"{label}\s*(?:\.\.\.)?\s*([-+]?\d+(?:\.\d+)?(?:[Ee][-+]?\d+)?)\s+Eh",
+            content,
+            flags=re.IGNORECASE,
+        )
+        if matches:
+            values[key] = float(matches[-1])
+    return values
 
 
 def run_optimization(spec: QCJobSpec, input_xyz: Path, output_dir: Path, config: Dict[str, Any]) -> QCJobResult:
@@ -269,21 +298,29 @@ def run_frequency(spec: QCJobSpec, input_xyz: Path, output_dir: Path, config: Di
         else:
             raise ValueError(f"Unsupported V4 frequency engine: {spec.engine}")
         frequencies_cm1 = _frequencies_cm1(result)
+        output_file = getattr(result, "output_file", None)
+        thermochemistry = (
+            _orca_thermochemistry(Path(output_file) if output_file else None)
+            if engine == "orca"
+            else {}
+        )
         if getattr(result, "converged", False) and frequencies_cm1:
             return QCJobResult(
                 "complete",
                 input_xyz,
-                output_file=getattr(result, "output_file", None),
+                output_file=output_file,
                 energy_hartree=getattr(result, "energy", None),
                 frequencies_cm1=frequencies_cm1,
+                **thermochemistry,
             )
         return QCJobResult(
             "failed",
             input_xyz,
-            output_file=getattr(result, "output_file", None),
+            output_file=output_file,
             energy_hartree=getattr(result, "energy", None),
             frequencies_cm1=frequencies_cm1,
-            error=getattr(result, "error_message", None) or "ORCA frequency output contains no parsed frequencies",
+            error=getattr(result, "error_message", None) or "Frequency output contains no parsed frequencies",
+            **thermochemistry,
         )
     except (OSError, RuntimeError, ValueError) as exc:
         return QCJobResult("failed", input_xyz, error=str(exc))
