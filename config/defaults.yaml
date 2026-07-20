@@ -69,12 +69,21 @@ theory:
           intermediate: 8
           ts: 12
         accept_partial_geometry: true
+      # V4.1: retry/rank-reduction machinery removed. A failed OPT/OptTS now
+      # hard-fails the structure (status="failed", SP/FREQ skipped). Improving
+      # the S2 TS guess is the preferred way to improve convergence.
       frequency:
         enabled_for_minima: true
         enabled_for_ts: true
         task: freq
         imaginary_cutoff_cm1: -50.0
         require_exactly_one: true
+        soft_mode_window_cm1: [-50.0, -10.0]
+        soft_mode_review:
+          enabled: true
+          perturbation_scale_bohr: 0.1
+          projection_threshold: 0.3
+          max_perturbation_attempts: 2
     single_point:
       engine: orca
       task: sp
@@ -101,12 +110,19 @@ theory:
       scf: TightSCF
       max_cycles: 200
       timeout: 864000
+      # V4.1: retry/rank-reduction machinery removed (see s3_low_level note).
       frequency:
         enabled_for_minima: true
         enabled_for_ts: true
         task: freq
         imaginary_cutoff_cm1: -50.0
         require_exactly_one: true
+        soft_mode_window_cm1: [-50.0, -10.0]
+        soft_mode_review:
+          enabled: true
+          perturbation_scale_bohr: 0.1
+          projection_threshold: 0.3
+          max_perturbation_attempts: 2
     single_point:
       engine: orca
       task: sp
@@ -209,57 +225,126 @@ step1:
       always_keep_lowest: true
 
 step2:
+  # S2 method: "xtb_path" runs an xTB2 meta-dynamics PATH search from the
+  # pre-distortion frame to the product, refines every PATH frame at B97-3c
+  # SP, and selects TS/INT from the refined profile. The legacy corridor
+  # refinement and NEB-assisted flow have been removed.
+  method: "xtb_path"
+
   scan:
     topology_guard_enabled: true
-    scan_start_distance: 4.0
-    scan_end_distance: 1.5
-    scan_steps: 24
-    retry_on_boundary_maximum: true
-    retry_factor: 1.15
-    intermediate_selection:
-      method: stable_midpoint
-      endpoint_exclusion_points: 1
-      stable_quantile: 0.5
-      min_candidate_points: 2
-      require_topology_valid: true
-      allow_degraded_fallback: false
-      endpoint_jump_warning_ratio: 5.0
-      endpoint_jump_warning_min_kcal: 5.0
+    scan_start_distance: 3.4
+    scan_end_distance: 1.2
+    scan_steps: auto
+    coarse_step_A: 0.20
+    scan_policy: policy_c
+    scan_force_constant: 0.05
+    terminate_after_consecutive_off_path: 2
+    reclassify_isolated_topology_suspects: true
+    isolated_topology_max_energy_jump_kcal: 5.0
+    isolated_topology_max_reaction_core_rmsd_A: 0.15
+    anchor_detection:
+      persistent_drift_points: 2
+      plateau_onset:
+        slope_ratio_to_ts: 0.25
+        slope_change_ratio_to_ts: 0.15
+        absolute_slope_ceiling_kcal_mol_A: 12.0
+        minimum_consecutive_intervals: 2
+        allow_segmented_regression_fallback: true
+    endpoint_extension:
+      enabled: true
+      increment_A: 0.25
+      maximum_coordinate_A: 4.20
+      min_dissociation_side_span_A: 0.50
+      min_valid_post_ts_points: 5
+      max_extensions: 3
+    selection:
+      preferred_energy_source: b973c
+      # Select seeds from extrema on the refined PATH energy profile. xTB PATH
+      # TS estimates are retained as diagnostics only, never as the decision.
+      ts_min_prominence_kcal_mol: 0.15
+      int_min_basin_prominence_kcal_mol: 0.50
+
+  # xTB2 meta-dynamics PATH search parameters. Replaces the former corridor
+  # refinement. The PATH runs from the last topology-valid frame before the
+  # distortion point (anchor "last_valid_before_drift") to the product frame.
+  # PATH frames are then refined at B97-3c SP for the final TS/INT selection.
+  xtb_path:
+    enabled: true
+    gfn_level: 2
+    npoint: 28
+    nrun: 1
+    anopt: 10
+    kpush: 0.003
+    kpull: -0.015
+    ppull: 0.05
+    alp: 1.2
+    timeout: 86400
+
   xtb_settings:
     charge: 0
     multiplicity: 1
     solvent: acetone
     nproc: null
+  energy_refinement:
+    # B97-3c SP refinement now runs on every PATH frame (full coverage).
+    enabled: true
+    engine: orca
+    task: sp
+    method: B97-3c
+    basis: ""
+    aux_basis: ""
+    solvent: acetone
+    solvent_model: CPCM
+    route_extras: ""
+    parallel_jobs: 16
+    cores_per_job: 1
+    memory_per_job: 2GB
+    timeout: 864000
 
 step3:
   enabled: true
   continue_on_structure_failure: true
   scheduling:
     enabled: true
-    max_workers: 2
-    nproc_per_job: 8
-    memory_per_job: 16GB
-    # Work-conserving queue: a free worker immediately starts the next entry.
-    # Expensive TS structures start first to minimize the final single-job tail.
+    # Serial execution: one ORCA job at a time, using the full machine.
+    # Parallel mode (max_workers=2, nproc=8, mem=16GB) saturated the host
+    # at 100% with zero headroom and caused intermittent ORCA failures.
+    max_workers: 1
+    nproc_per_job: 16
+    memory_per_job: 32GB
     priority_roles:
       - ts
       - intermediate
       - precursor
       - product
+    max_concurrent_by_role:
+      ts: 1
+      intermediate: 1
+      precursor: 2
+      product: 2
 
 step4:
   enabled: true
   continue_on_structure_failure: true
   scheduling:
     enabled: true
-    max_workers: 2
-    nproc_per_job: 8
-    memory_per_job: 16GB
+    # Serial execution: same rationale as step3 — avoid ORCA failures under
+    # 100% host saturation. S4 (M062X/wB97M-V) is even heavier than S3, so
+    # per-job resource pressure is higher.
+    max_workers: 1
+    nproc_per_job: 16
+    memory_per_job: 32GB
     priority_roles:
       - ts
       - intermediate
       - precursor
       - product
+    max_concurrent_by_role:
+      ts: 1
+      intermediate: 1
+      precursor: 2
+      product: 2
 
 ui:
   # auto selects the embedded Live dashboard on a capable TTY and classic
@@ -273,6 +358,14 @@ ui:
   top_population_count: 5
   show_output_paths: true
   stalled_job_warning_seconds: 720
+  recovery:
+    enabled: true
+    # PID/heartbeat older than this is considered stale during resume-time
+    # stale-running recovery.
+    stale_heartbeat_seconds: 300
+    # When a structure PID is dead and its outputs are incomplete, mark the
+    # stage interrupted and let the normal stage rerun path re-queue the work.
+    requeue_interrupted_structures: true
   recent_alert_limit: 50
   dashboard:
     refresh_per_second: 4
@@ -291,3 +384,11 @@ run:
   checkpoint:
     enabled: true
   output_root: ./Output
+
+# ORCA failure classification
+orca_failure_classification:
+  enabled: true
+  # Maximum characters of ORCA output to scan for failure patterns.
+  scan_tail_chars: 50000
+  # Lines of context to retain around each evidence match.
+  evidence_context_lines: 1

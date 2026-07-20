@@ -12,6 +12,18 @@
 - Propagated ORCA grid and SCF controls into optimization and frequency routes.
 - Prevented failed S4 optimizations from being marked usable for ML or checkpointed as complete.
 
+## [4.0.1] - 2026-07-20
+
+### Changed
+
+- Simplified S2 to one root-level `scan_profile.png` and retired legacy publication/diagnostic plot variants.
+- Selected S2 TS guesses from refined B97-3c PATH extrema; xTB PATH estimates are diagnostics only.
+- Reframed S2 INT output as an S3 search seed: a pre-TS basin when resolved, otherwise a pre-TS arc-length midpoint.
+
+### Removed
+
+- Retired legacy Kneedle, xTB-TS-priority, post-TS plateau, corridor, and multi-panel plotting logic from the active S2 flow.
+
 ## [4.0.0] - 2026-07-13
 
 ### Added

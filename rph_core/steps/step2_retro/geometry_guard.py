@@ -19,6 +19,7 @@ import logging
 
 from rph_core.utils.molecular_graph import build_bond_graph
 from rph_core.utils.geometry_tools import GeometryUtils
+from rph_core.utils.bond_pairs import canonicalize_bond_pairs
 from rph_core.utils.file_io import read_xyz
 
 logger = logging.getLogger(__name__)
@@ -95,7 +96,7 @@ def compare_graph_topology(
             is_valid=False,
             new_edges=[],
             lost_edges=[],
-            forming_bonds=set((int(b[0]), int(b[1])) for b in forming_bonds),
+            forming_bonds=set(canonicalize_bond_pairs(forming_bonds)),
             graph_scale=graph_scale
         )
     
@@ -112,9 +113,7 @@ def compare_graph_topology(
             if i < j:
                 candidate_edges.add((i, j))
     
-    forming_set: Set[Tuple[int, int]] = set(
-        (int(b[0]), int(b[1])) for b in forming_bonds
-    )
+    forming_set: Set[Tuple[int, int]] = set(canonicalize_bond_pairs(forming_bonds))
     
     # Find new edges (in candidate but not in product)
     new_edges_raw = candidate_edges - product_edges
@@ -372,6 +371,18 @@ def check_scan_trajectory(
                 "reason": "topology_drift",
                 "new_edges": len(guard_result.new_edges),
                 "lost_edges": len(guard_result.lost_edges),
+                "new_edge_details": [
+                    {
+                        "atom_i": int(atom_i),
+                        "atom_j": int(atom_j),
+                        "distance_angstrom": float(distance),
+                    }
+                    for atom_i, atom_j, distance in guard_result.new_edges
+                ],
+                "lost_edge_details": [
+                    {"atom_i": int(atom_i), "atom_j": int(atom_j)}
+                    for atom_i, atom_j in guard_result.lost_edges
+                ],
             })
 
         # 2. RMSD Surge Check (V5.1 Off-Path)
