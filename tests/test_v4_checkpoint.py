@@ -139,6 +139,76 @@ def test_scoped_checkpoint_explains_signature_difference(tmp_path: Path):
     },)
 
 
+def test_contract_migration_allows_strict_recompute_after_interrupted_upgrade(tmp_path: Path):
+    checkpoint = V4Checkpoint(tmp_path)
+    manifest = tmp_path / "S1_ConfSearch" / "precursor" / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}", encoding="utf-8")
+    recorded_payload = {
+        "stage": "s1",
+        "manifest_schema": "s1_censo_light_ranking_v3",
+        "protocol_version": "censo_light_ranking_v3",
+        "smiles": "CC",
+    }
+    current_payload = {
+        "stage": "s1",
+        "manifest_schema": "s1_censo_light_ranking_v4",
+        "protocol_version": "censo_light_ranking_v4",
+        "smiles": "[CH3:1][CH3:2]",
+    }
+    checkpoint.mark_scope(
+        "precursor_s1",
+        "s1",
+        checkpoint.signature(recorded_payload),
+        manifest,
+        signature_payload=recorded_payload,
+    )
+    orchestrator = object.__new__(V4Orchestrator)
+    orchestrator.resume_policy = "strict"
+    orchestrator.start_from = None
+    # Simulate the user's interrupted run: upgraded S0 is already persisted,
+    # so this new process has no in-memory knowledge of the earlier recompute.
+    orchestrator._recomputed_stages = set()
+
+    assert orchestrator._checkpoint_reusable(
+        checkpoint,
+        "s1",
+        checkpoint.signature(current_payload),
+        manifest,
+        scope="precursor_s1",
+        signature_payload=current_payload,
+    ) is False
+
+
+def test_changed_s0_smiles_recomputes_s1_after_interrupted_run(tmp_path: Path):
+    checkpoint = V4Checkpoint(tmp_path)
+    manifest = tmp_path / "S1_ConfSearch" / "precursor" / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}", encoding="utf-8")
+    recorded_payload = {"stage": "s1", "smiles": "CC"}
+    current_payload = {"stage": "s1", "smiles": "[CH3:1][CH3:2]"}
+    checkpoint.mark_scope(
+        "precursor_s1",
+        "s1",
+        checkpoint.signature(recorded_payload),
+        manifest,
+        signature_payload=recorded_payload,
+    )
+    orchestrator = object.__new__(V4Orchestrator)
+    orchestrator.resume_policy = "strict"
+    orchestrator.start_from = None
+    orchestrator._recomputed_stages = set()
+
+    assert orchestrator._checkpoint_reusable(
+        checkpoint,
+        "s1",
+        checkpoint.signature(current_payload),
+        manifest,
+        scope="precursor_s1",
+        signature_payload=current_payload,
+    ) is False
+
+
 def test_start_from_s3_accepts_signature_mismatch_for_all_required_upstream_stages(
     tmp_path: Path,
 ):
@@ -232,7 +302,7 @@ def test_incomplete_s4_checkpoint_is_not_reused(tmp_path: Path):
     manifest = tmp_path / "S4_HighLevel" / "manifest.json"
     manifest.parent.mkdir(parents=True)
     manifest.write_text('{"status": "incomplete"}', encoding="utf-8")
-    payload = {"signature_schema": "s4_signature_v3", "stage": "s4"}
+    payload = {"signature_schema": "s4_signature_v4", "stage": "s4"}
     signature = checkpoint.signature(payload)
     checkpoint.mark(
         "s4",

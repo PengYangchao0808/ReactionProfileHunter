@@ -5,6 +5,7 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -23,6 +24,8 @@ from rph_core.steps.conformer_search.deduplicator import (
 )
 from rph_core.steps.conformer_search.ensemble_thermo import calculate_ensemble_thermodynamics
 from rph_core.steps.mechanism_classifier.s0_record import S0ReactionRecord
+from rph_core.steps.refinement import RefinementEngine
+from rph_core.steps.refinement.manifest_io import write_refinement_manifest
 from rph_core.steps.conformer_search.torsion_signature import TorsionSignature, build_signature, signatures_equivalent
 from rph_core.steps.conformer_search.xtb_thermo import XTBThermoResult, _xyz_to_coord
 from rph_core.utils.constants import BOHR_TO_ANGSTROM
@@ -52,6 +55,16 @@ def test_censo_lite_engine_writes_selected_xyz(monkeypatch: pytest.MonkeyPatch, 
         def embed(self, _smiles: str) -> Path:
             path = self.molecule_dir / "initial.xyz"
             path.write_text("1\ninitial\nH 0.0 0.0 0.0\n", encoding="utf-8")
+            (self.molecule_dir / "initial_atom_mapping.json").write_text(
+                json.dumps({
+                    "schema_version": "s1_atom_mapping_v1",
+                    "mapping_source": "rdkit_generation_sidecar",
+                    "confidence": "high",
+                    "product_smiles_idx_space": "geometry_product_smiles_idx",
+                    "atoms": [{"smiles_idx": 0, "xyz_idx": 0, "element": "H", "type": "hydrogen"}],
+                }),
+                encoding="utf-8",
+            )
             return path
 
         def crest_search(self, input_xyz: Path) -> Path:
@@ -139,7 +152,7 @@ def test_censo_lite_engine_writes_selected_xyz(monkeypatch: pytest.MonkeyPatch, 
     assert finished_steps == started_steps
     assert any(event == "batch_job_started" for event, _payload in ui_events)
     assert any(event == "batch_job_finished" for event, _payload in ui_events)
-    assert manifest["schema_version"] == "s1_censo_light_ranking_v3"
+    assert manifest["schema_version"] == "s1_censo_light_ranking_v4"
     assert manifest["protocol"]["complete_censo_light"] is False
     assert manifest["protocol"]["requires_downstream_optimization"] is True
     assert manifest["thermodynamic_rank1"] == manifest["selected"]
@@ -166,11 +179,11 @@ def test_censo_lite_engine_writes_selected_xyz(monkeypatch: pytest.MonkeyPatch, 
 def test_v4_orchestrator_runs_precursor_s1_before_variants(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     record = S0ReactionRecord(
         rx_id="RXN_P3",
-        product_smiles="C=C",
+        product_smiles="C1CCC1",
         reaction_type="4+3",
-        mapped_product_smiles="[CH2:1]=[CH2:2]",
-        mapped_forming_bonds=((1, 2), (1, 2)),
-        forming_bonds=((0, 1), (0, 1)),
+        mapped_product_smiles="[CH2:1]1[CH2:2][CH2:3][CH2:4]1",
+        mapped_forming_bonds=((1, 2), (3, 4)),
+        forming_bonds=((0, 1), (2, 3)),
         mapping_confidence=None,
         mapping_trusted=True,
         source_csv=tmp_path / "dataset.csv",
@@ -184,6 +197,14 @@ def test_v4_orchestrator_runs_precursor_s1_before_variants(monkeypatch: pytest.M
     def fake_write_s0(work_dir: Path, record: S0ReactionRecord) -> Path:
         stage_dir = Path(work_dir) / "S0_Mechanism"
         stage_dir.mkdir(parents=True, exist_ok=True)
+        mapping_dir = stage_dir / "atom_mappings"
+        mapping_dir.mkdir(parents=True, exist_ok=True)
+        (mapping_dir / "product_major.json").write_text(json.dumps({
+            "schema_version": "s0_atom_map_smiles_v2",
+            "product_smiles_idx_space": "geometry_product_smiles_idx",
+            "forming_bonds_map_space": [[1, 2], [3, 4]],
+            "map_to_product_smiles": {"1": 0, "2": 1, "3": 2, "4": 3},
+        }), encoding="utf-8")
         manifest = stage_dir / "mechanism.json"
         manifest.write_text(
             json.dumps({
@@ -208,10 +229,24 @@ def test_v4_orchestrator_runs_precursor_s1_before_variants(monkeypatch: pytest.M
             candidate_dir = molecule_dir / "candidates"
             candidate_dir.mkdir(parents=True, exist_ok=True)
             xyz = candidate_dir / "conf_0001.xyz"
-            xyz.write_text(f"1\n{smiles}\nH 0.0 0.0 0.0\n", encoding="utf-8")
+            xyz.write_text(
+                f"4\n{smiles}\nC 0 0 0\nC 1 0 0\nC 1 1 0\nC 0 1 0\n",
+                encoding="utf-8",
+            )
+            (molecule_dir / "atom_mapping.json").write_text(json.dumps({
+                "schema_version": "s1_atom_mapping_v1",
+                "mapping_source": "rdkit_generation_sidecar",
+                "confidence": "high",
+                "product_smiles_idx_space": "geometry_product_smiles_idx",
+                "atoms": [
+                    {"smiles_idx": i, "xyz_idx": i, "element": "C", "type": "organic_heavy"}
+                    for i in range(4)
+                ],
+            }), encoding="utf-8")
             manifest = molecule_dir / "manifest.json"
             payload = {
                 "selected": f"{self.molecule_name}_conf_0001",
+                "atom_mapping_ref": "atom_mapping.json",
                 "candidates": [
                     {
                         "id": f"{self.molecule_name}_conf_0001",
@@ -227,44 +262,38 @@ def test_v4_orchestrator_runs_precursor_s1_before_variants(monkeypatch: pytest.M
             self.molecule_name = molecule_name or "unknown"
 
         def run(self, product_xyz: Path, output_dir: Path, forming_bonds, scan_config=None):
-            del forming_bonds, scan_config
+            del scan_config
             output_dir = Path(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
             ts_seed = output_dir / "ts_guess.xyz"
             intermediate_seed = output_dir / "intermediate_seed.xyz"
             profile = output_dir / "scan_profile.json"
-            ts_seed.write_text(f"1\n{product_xyz}\nH 0.0 0.0 0.0\n", encoding="utf-8")
-            intermediate_seed.write_text(f"1\n{product_xyz}\nH 1.0 0.0 0.0\n", encoding="utf-8")
+            contents = Path(product_xyz).read_text(encoding="utf-8")
+            ts_seed.write_text(contents, encoding="utf-8")
+            intermediate_seed.write_text(contents, encoding="utf-8")
             profile.write_text("{}", encoding="utf-8")
-            return ts_seed, intermediate_seed, intermediate_seed, ((0, 1), (0, 1)), profile, "COMPLETE", "high", ()
+            return ts_seed, intermediate_seed, intermediate_seed, tuple(forming_bonds), profile, "COMPLETE", "high", ()
 
-    class FakeLowLevelEngine:
-        def __init__(self, _config: object):
-            pass
-
+    class FakeRefinementEngine(RefinementEngine):
         def run(self, structures, output_dir: Path) -> Path:
             rows = list(structures)
             s3_structures.extend(rows)
             output_dir = Path(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
-            manifest = output_dir / "manifest.json"
-            manifest.write_text(
-                json.dumps(
-                    {
-                        "schema_version": "s3_low_level_v1",
-                        "stage": "S3",
-                        "structures": rows,
-                    },
-                    indent=2,
-                ),
-                encoding="utf-8",
+            return write_refinement_manifest(
+                output_dir / "manifest.json",
+                stage=self.profile.stage,
+                fidelity=self.profile.fidelity,
+                profile_id=self.profile.profile_id,
+                structures=rows,
+                run_id=self.run_id,
+                extra={"summary": {"complete": len(rows)}},
             )
-            return manifest
 
     monkeypatch.setattr(v4_orchestrator.V4Orchestrator, "_write_s0_from_record", staticmethod(fake_write_s0))
     monkeypatch.setattr(v4_orchestrator, "CensoLiteEngine", FakeCensoLiteEngine)
     monkeypatch.setattr(v4_orchestrator, "PEBScanner", FakePEBScanner)
-    monkeypatch.setattr(v4_orchestrator, "LowLevelEngine", FakeLowLevelEngine)
+    monkeypatch.setattr(v4_orchestrator, "RefinementEngine", FakeRefinementEngine)
 
     orchestrator = object.__new__(v4_orchestrator.V4Orchestrator)
     orchestrator.config = {
@@ -410,7 +439,7 @@ def test_ensemble_thermodynamics_physical_invariants():
         -0.00198720425864083 * 298.15 * 0.6931471805599453
     )
     with pytest.raises(ValueError, match="finite integer"):
-        calculate_ensemble_thermodynamics([-100.0], 298.15, [1.5])
+        calculate_ensemble_thermodynamics([-100.0], 298.15, cast(list[int], [1.5]))
 
 
 def test_dedup_tracks_merge_provenance_without_inventing_degeneracy(tmp_path: Path):
@@ -471,9 +500,9 @@ def test_mrrho_defer_preserves_candidates_but_suppresses_partition_function(
             )
         )
 
-    def fake_mrrho(path: Path, nprocs=None):
+    def fake_mrrho(xyz_path: Path, nprocs: int | None = None):
         del nprocs
-        if path.stem.endswith("0002"):
+        if xyz_path.stem.endswith("0002"):
             return XTBThermoResult(
                 g_rrho_correction_hartree=None,
                 success=False,
@@ -502,6 +531,17 @@ def test_mrrho_defer_preserves_candidates_but_suppresses_partition_function(
     assert thermo["failed_conformer_ids"] == ["conf_0002"]
     assert all(row.metadata["boltzmann_population"] is None for row in annotated)
     assert all(row.metadata["relative_free_energy_kcal"] is None for row in annotated)
+
+    (engine.engine.molecule_dir / "initial_atom_mapping.json").write_text(
+        json.dumps({
+            "schema_version": "s1_atom_mapping_v1",
+            "mapping_source": "rdkit_generation_sidecar",
+            "confidence": "high",
+            "product_smiles_idx_space": "geometry_product_smiles_idx",
+            "atoms": [{"smiles_idx": 0, "xyz_idx": 0, "element": "H", "type": "hydrogen"}],
+        }),
+        encoding="utf-8",
+    )
 
     result = engine._write_manifest(
         annotated,
@@ -618,14 +658,14 @@ def test_b97_legacy_tail_is_ignored_in_throughput_mode(tmp_path: Path):
     peak_cores = 0
     assigned: dict[str, int] = {}
 
-    def fake_run_sp(path: Path, nprocs=None, maxcore=None):
+    def fake_run_sp(xyz_path: Path, nprocs: int | None = None, maxcore: int | None = None):
         nonlocal active_cores, peak_cores
         del maxcore
         cores = int(nprocs or 1)
         with lock:
             active_cores += cores
             peak_cores = max(peak_cores, active_cores)
-            assigned[path.stem] = cores
+            assigned[xyz_path.stem] = cores
         time.sleep(0.05)
         with lock:
             active_cores -= cores
@@ -677,14 +717,14 @@ def test_b97_profiled_final_wave_uses_exact_benchmarked_layout(tmp_path: Path):
     peak_cores = 0
     assigned: dict[str, int] = {}
 
-    def fake_run_sp(path: Path, nprocs=None, maxcore=None):
+    def fake_run_sp(xyz_path: Path, nprocs: int | None = None, maxcore: int | None = None):
         nonlocal active_cores, peak_cores
         del maxcore
         cores = int(nprocs or 1)
         with lock:
             active_cores += cores
             peak_cores = max(peak_cores, active_cores)
-            assigned[path.stem] = cores
+            assigned[xyz_path.stem] = cores
         time.sleep(0.05)
         with lock:
             active_cores -= cores
@@ -732,13 +772,13 @@ def test_b97_small_batch_without_profile_keeps_one_core_per_job(tmp_path: Path):
     peak_cores = 0
     assigned: dict[str, tuple[int, int | None]] = {}
 
-    def fake_run_sp(path: Path, nprocs=None, maxcore=None):
+    def fake_run_sp(xyz_path: Path, nprocs: int | None = None, maxcore: int | None = None):
         nonlocal active_cores, peak_cores
         cores = int(nprocs or 1)
         with lock:
             active_cores += cores
             peak_cores = max(peak_cores, active_cores)
-            assigned[path.stem] = (cores, maxcore)
+            assigned[xyz_path.stem] = (cores, maxcore)
         time.sleep(0.05)
         with lock:
             active_cores -= cores
@@ -787,17 +827,17 @@ def test_b97_final_wave_waits_for_bulk_barrier(tmp_path: Path):
     final_started_during_bulk = False
     assigned: dict[str, int] = {}
 
-    def fake_run_sp(path: Path, nprocs=None, maxcore=None):
+    def fake_run_sp(xyz_path: Path, nprocs: int | None = None, maxcore: int | None = None):
         nonlocal active_bulk, final_started_during_bulk
         del maxcore
-        index = int(path.stem.rsplit("_", 1)[-1])
+        index = int(xyz_path.stem.rsplit("_", 1)[-1])
         cores = int(nprocs or 1)
         with lock:
             if index < 16:
                 active_bulk += 1
             elif active_bulk:
                 final_started_during_bulk = True
-            assigned[path.stem] = cores
+            assigned[xyz_path.stem] = cores
         time.sleep(0.03)
         with lock:
             if index < 16:
@@ -901,17 +941,24 @@ def test_mrrho_profiled_final_wave_uses_core_budget_without_oversubscription(tmp
     peak_cores = 0
     assigned: dict[str, int] = {}
 
-    def fake_run_mrrho(path: Path, nprocs=None):
+    def fake_run_mrrho(xyz_path: Path, nprocs: int | None = None):
         nonlocal active_cores, peak_cores
         cores = int(nprocs or 1)
         with lock:
             active_cores += cores
             peak_cores = max(peak_cores, active_cores)
-            assigned[path.stem] = cores
+            assigned[xyz_path.stem] = cores
         time.sleep(0.05)
         with lock:
             active_cores -= cores
-        return 0.1
+        return XTBThermoResult(
+            g_rrho_correction_hartree=0.1,
+            xtb_electronic_energy_hartree=-10.0,
+            xtb_total_free_energy_hartree=-9.9,
+            energy_ledger_residual_hartree=0.0,
+            gfn_level=2,
+            solvent_model="ALPB(acetone)",
+        )
 
     engine.engine.run_mrrho = fake_run_mrrho
     corrected, scoring_mode, status = engine._apply_mrrho_uniform(records, thermo_cfg)

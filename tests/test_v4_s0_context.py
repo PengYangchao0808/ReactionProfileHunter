@@ -98,7 +98,7 @@ def test_write_s0_artifacts_emits_full_p1_context_bundle(tmp_path: Path):
     variant_registry = json.loads((stage_dir / "variant_registry.json").read_text(encoding="utf-8"))
     atom_map_smiles = json.loads((stage_dir / "atom_map_smiles.json").read_text(encoding="utf-8"))
 
-    assert mechanism["schema_version"] == "s0_mechanism_v2"
+    assert mechanism["schema_version"] == "s0_mechanism_v3"
     assert mechanism["forming_bonds"] == [list(pair) for pair in record.forming_bonds]
     assert mechanism["mapped_forming_bonds"] == [list(pair) for pair in record.mapped_forming_bonds]
     assert mechanism["canonical_precursor_smiles"] == record.canonical_precursor_smiles
@@ -122,12 +122,12 @@ def test_write_s0_artifacts_emits_full_p1_context_bundle(tmp_path: Path):
     assert mechanism_graph["source_data"]["resolver_provenance"] == record.raw_row["resolver_provenance"]
 
     variant_ids = [variant["variant_id"] for variant in variant_registry["variants"]]
-    assert variant_registry["schema_version"] == "s0_variant_registry_v1"
+    assert variant_registry["schema_version"] == "s0_variant_registry_v2"
     assert variant_ids == ["product_major", "product_minor_001"]
     assert variant_registry["variants"][0]["branch_id"] == "BR_MAJOR"
     assert variant_registry["variants"][1]["branch_id"] == "BR_DR_001"
 
-    assert atom_map_smiles["schema_version"] == "s0_atom_map_smiles_v1"
+    assert atom_map_smiles["schema_version"] == "s0_atom_map_smiles_v2"
     assert atom_map_smiles["product_smiles_idx_space"] == "geometry_product_smiles_idx"
     assert atom_map_smiles["forming_bonds_map_space"] == [list(pair) for pair in record.mapped_forming_bonds]
     for map_pair, product_pair in zip(record.mapped_forming_bonds, record.forming_bonds):

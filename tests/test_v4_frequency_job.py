@@ -54,7 +54,12 @@ def test_frequency_job_parses_output_when_interface_result_has_no_frequencies(mo
                 "ORCA TERMINATED NORMALLY\n"
                 "VIBRATIONAL FREQUENCIES\n"
                 "  0:   -250.0000 cm**-1\n"
-                "  1:    125.0000 cm**-1\n",
+                "  1:    125.0000 cm**-1\n"
+                "Zero point energy ... 0.12340000 Eh\n"
+                "Total thermal energy -1.01230000 Eh\n"
+                "Total Enthalpy ... -1.01130000 Eh\n"
+                "Final Gibbs free energy ... -1.04560000 Eh\n"
+                "G-E(el) ... -0.04560000 Eh\n",
                 encoding="utf-8",
             )
             return SimpleNamespace(
@@ -78,3 +83,8 @@ def test_frequency_job_parses_output_when_interface_result_has_no_frequencies(mo
 
     assert result.status == "complete"
     assert result.frequencies_cm1 == (-250.0, 125.0)
+    assert result.zero_point_energy_hartree == 0.1234
+    assert result.thermal_energy_hartree == -1.0123
+    assert result.enthalpy_hartree == -1.0113
+    assert result.gibbs_free_energy_hartree == -1.0456
+    assert result.gibbs_correction_hartree == -0.0456

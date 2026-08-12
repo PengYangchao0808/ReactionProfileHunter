@@ -17,7 +17,16 @@ def test_reaxys_record_maps_forming_bonds_to_product_heavy_atom_indices():
 
     assert record.reaction_type == "4+3"
     assert record.mapped_forming_bonds == ((5, 11), (7, 8))
-    assert record.forming_bonds == ((18, 11), (15, 14))
+    assert record.forming_bonds == ((2, 14), (18, 17))
+
+
+def test_rx2_uses_exact_mapped_geometry_order_for_c7_c8_bond():
+    record = load_s0_reaction_record(DATASET, "2")
+
+    assert record.mapped_forming_bonds == ((1, 11), (3, 8))
+    assert record.forming_bonds == ((2, 3), (7, 6))
+    # The second pair is CYLView C8-C7 (1-based), never C7-C22.
+    assert tuple(index + 1 for index in record.forming_bonds[1]) == (8, 7)
     assert record.mapping_trusted is True
 
 
@@ -49,7 +58,7 @@ def test_csv_cli_passes_authoritative_s0_record_to_orchestrator(monkeypatch, tmp
 
     assert captured["reaction_type"] == "4+3"
     assert captured["stop_after"] == "s3"
-    assert captured["s0_record"].forming_bonds == ((18, 11), (15, 14))
+    assert captured["s0_record"].forming_bonds == ((2, 14), (18, 17))
 
 
 def test_record_driven_s0_is_written_before_s1_and_preserved_at_s1_stop(monkeypatch, tmp_path):
@@ -85,6 +94,6 @@ def test_record_driven_s0_is_written_before_s1_and_preserved_at_s1_stop(monkeypa
 
     s0 = __import__("json").loads((tmp_path / "run" / "S0_Mechanism" / "mechanism.json").read_text())
     assert s0["source"] == "trusted_reaction_record"
-    assert s0["forming_bonds"] == [[18, 11], [15, 14]]
+    assert s0["forming_bonds"] == [[2, 14], [18, 17]]
     assert "s0_manifest" in result
     assert result["completed_through"] == "s1"

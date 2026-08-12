@@ -133,6 +133,67 @@ def test_narrow_dashboard_omits_wide_validation_column() -> None:
     assert "Validation" not in text
 
 
+def test_s2_dashboard_prefers_active_b973c_batch_over_completed_xtb_scan() -> None:
+    now = time.time()
+    reducer = DashboardStateReducer()
+    reducer.apply("s2_started", {"stage": "S2", "timestamp": now})
+    reducer.apply(
+        "structure_started",
+        {"stage": "S2", "structure_id": "product_major", "timestamp": now},
+    )
+    reducer.apply(
+        "batch_finished",
+        {
+            "stage": "S2",
+            "batch": "product_major:xtb:00_coarse",
+            "label": "xTB coarse scan",
+            "total": 25,
+            "done": 25,
+            "status": "complete",
+        },
+    )
+    reducer.apply(
+        "batch_started",
+        {
+            "stage": "S2",
+            "batch": "product_major:b973c_sp",
+            "label": "ORCA B97-3c SP refinement",
+            "total": 38,
+            "started_at": now - 20,
+        },
+    )
+    reducer.apply(
+        "batch_job_started",
+        {
+            "stage": "S2",
+            "batch": "product_major:b973c_sp",
+            "job_id": "product_major:p_012",
+            "engine": "orca",
+            "method": "B97-3c",
+            "started_at": now - 10,
+        },
+    )
+    reducer.apply(
+        "batch_progress",
+        {
+            "stage": "S2",
+            "batch": "product_major:b973c_sp",
+            "label": "ORCA B97-3c SP refinement",
+            "total": 38,
+            "done": 5,
+            "failed": 0,
+            "current": "p_011",
+            "status": "running",
+        },
+    )
+
+    text = _render_text(reducer, width=140)
+    assert "ORCA B97-3c SP refinement" in text
+    assert "5/38" in text
+    assert "product_major:p_012" in text
+    assert "0/25" not in text
+
+
 def test_live_dashboard_lifecycle_is_idempotent(monkeypatch) -> None:
     calls: list[str] = []
 
@@ -164,6 +225,37 @@ def test_live_dashboard_lifecycle_is_idempotent(monkeypatch) -> None:
     assert calls.count("start") == 1
     assert calls.count("stop") == 1
     assert "update" in calls
+
+
+def test_live_dashboard_does_not_redraw_on_each_idle_poll(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class FakeLive:
+        def __init__(self, _renderable, **_kwargs):
+            pass
+
+        def start(self, refresh=True):
+            pass
+
+        def update(self, _renderable, refresh=True):
+            calls.append("update")
+
+        def stop(self):
+            pass
+
+    class FakeConsole:
+        width = 120
+        is_terminal = True
+
+    monkeypatch.setattr("rph_core.utils.live_dashboard.Live", FakeLive)
+    manager = LiveDashboardManager(FakeConsole(), refresh_per_second=20)
+    assert manager.start() is True
+    time.sleep(0.28)
+    updates_before_finish = calls.count("update")
+    manager.close()
+    # The refresh loop may poll at 20 Hz, but an unchanged dashboard must not
+    # repeatedly erase and repaint the terminal between elapsed-time ticks.
+    assert updates_before_finish == 0
 
 
 def test_classic_qc_mode_suppresses_successful_task_transition_rows() -> None:

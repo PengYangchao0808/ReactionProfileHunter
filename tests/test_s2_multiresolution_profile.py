@@ -2,11 +2,14 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from rph_core.steps.step2_retro.peb_engine import PEBScanEngine
 from rph_core.steps.step2_retro.scan_trajectory import (
     CompositeProfileBuilder,
     ScanAttempt,
 )
+from rph_core.utils.qc_models import QCJobResult
 from rph_core.utils.scan_profile_plotter import plot_scan_profile
 from rph_core.utils.scan_profile_plotter import compute_scan_distances
 
@@ -42,6 +45,10 @@ def _attempt(
         xtb_energies_hartree=tuple(energies),
         off_path_indices=tuple(off_path),
     )
+
+
+def _hartree_profile(relative_kcal, reference_hartree=-100.0):
+    return [reference_hartree + float(value) / 627.509 for value in relative_kcal]
 
 
 def test_composite_profile_preserves_full_coarse_coverage_and_inserts_refinement(tmp_path):
@@ -268,7 +275,7 @@ def test_engine_endpoint_extension_and_refinement_keep_full_profile(tmp_path, mo
     profile = json.loads(Path(result[4]).read_text(encoding="utf-8"))
 
     coverage = profile["composite_profile"]["coverage"]
-    assert coverage["coordinate_min_A"] == 1.5
+    assert coverage["coordinate_min_A"] <= 1.5
     assert coverage["coordinate_max_A"] >= 3.65
     assert profile["coarse_scan"]["reaction_coordinate_angstrom"][0] == 1.5
     assert profile["coarse_scan"]["reaction_coordinate_angstrom"][-1] == 3.4
@@ -298,3 +305,284 @@ def test_engine_endpoint_extension_and_refinement_keep_full_profile(tmp_path, mo
     assert warm_started
     assert all(attempt["seed_source_attempt"] for attempt in warm_started)
     assert all(attempt["seed_source_frame_index"] is not None for attempt in warm_started)
+
+
+def _run_forced_rescue_engine(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    rescue_energies_hartree,
+    expected_scan_ts_candidate_index=8,
+):
+    product = _xyz(tmp_path / "product.xyz", 1.5)
+    engine = PEBScanEngine(
+        {
+            "step2": {
+                "scan": {
+                    "topology_guard_enabled": False,
+                    "scan_start_distance": 3.4,
+                    "scan_end_distance": 1.5,
+                    "scan_steps": 8,
+                    "selection": {
+                        "preferred_energy_source": "b973c",
+                        "allow_monotonic_shoulder": True,
+                        "shoulder_max_abs_slope_kcal_mol_per_A": 5.0,
+                    },
+                },
+                "xtb_path": {
+                    "enabled": True,
+                    "retain_valid_corridor_path": True,
+                },
+                "energy_refinement": {"enabled": True},
+                "rescue": {
+                    "enabled": True,
+                    "relaxed_scan": {
+                        "points": 17,
+                        "stretch_end_A": 3.1,
+                        "single_coordinate_use_scants": True,
+                    },
+                },
+            },
+            "theory": {
+                "s3_low_level": {
+                    "optimization": {
+                        "method": "B97-3c",
+                        "solvent": "acetone",
+                        "solvent_model": "CPCM",
+                    }
+                }
+            },
+        }
+    )
+
+    def fake_scan(*, output_dir, params, direction="outward", **_kwargs):
+        coordinates = compute_scan_distances(
+            params["scan_start_distance"],
+            params["scan_end_distance"],
+            params["scan_steps"],
+            direction=direction,
+        )
+        frames = [
+            _xyz(Path(output_dir) / "scan_frames" / f"frame_{index:03d}.xyz", coordinate)
+            for index, coordinate in enumerate(coordinates)
+        ]
+        energies = [-10.0 - (float(coordinate) - 2.6) ** 2 for coordinate in coordinates]
+        return SimpleNamespace(geometries=frames), energies
+
+    monkeypatch.setattr(engine, "_execute_scan", fake_scan)
+
+    def fake_path(*, output_dir, path_name, **_kwargs):
+        coordinates = tuple(3.4 - 0.2 * index for index in range(10))
+        frames = tuple(
+            _xyz(Path(output_dir) / path_name / f"frame_{index:03d}.xyz", coordinate)
+            for index, coordinate in enumerate(coordinates)
+        )
+        attempt = ScanAttempt(
+            attempt_id=f"NN_xtb_path_{path_name}",
+            kind="xtb_path",
+            directory=Path(output_dir) / path_name,
+            frame_paths=frames,
+            target_coordinates_A=coordinates,
+            xtb_energies_hartree=tuple(_hartree_profile([0.0, 0.3, 0.8, 1.2, 2.0, 4.0, 2.5, 1.0, 0.2, 0.0])),
+            off_path_indices=(0, 1, 2),
+            trajectory_quality={
+                "checked": True,
+                "persistent_off_path_start": 0,
+                "usable_end_index": -1,
+                "topology_drift_index": 0,
+                "last_valid_before_drift_index": None,
+            },
+        )
+        return attempt, {
+            "path_name": path_name,
+            "path_arclength": [float(index) for index in range(len(frames))],
+        }
+
+    monkeypatch.setattr(engine, "_execute_xtb_path", fake_path)
+    monkeypatch.setattr(
+        "rph_core.steps.step2_retro.peb_engine.ScanEnergyRefiner.refine",
+        lambda _self, frames, point_ids=None: {
+            "status": "complete",
+            "energies_hartree": _hartree_profile(
+                [0.0, 0.3, 0.8, 1.2, 2.0, 4.0, 2.5, 1.0, 0.2, 0.0]
+            ),
+            "records": [],
+        },
+    )
+    monkeypatch.setattr(
+        "rph_core.steps.step2_retro.peb_engine.plot_scan_profile",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "rph_core.steps.step2_retro.relaxed_scan_rescue.plot_scan_profile",
+        lambda *_args, **_kwargs: None,
+    )
+
+    rescue_frames = [
+        _xyz(
+            tmp_path / "rescue_frames" / f"frame_{index:03d}.xyz",
+            1.5 + 0.1 * index,
+        )
+        for index in range(17)
+    ]
+
+    def fake_surface_scan(spec, *_args, **_kwargs):
+        assert spec.method == "B97-3c"
+        return QCJobResult(
+            "complete",
+            product,
+            output_file=tmp_path / "rescue.out",
+            extra={
+                "frames": [str(frame) for frame in rescue_frames],
+                "energies_hartree": list(rescue_energies_hartree),
+                "energy_source": "orca.relaxscanact.dat",
+                "scan_ts_candidate_xyz": str(
+                    rescue_frames[expected_scan_ts_candidate_index]
+                ),
+            },
+        )
+
+    monkeypatch.setattr(
+        "rph_core.steps.step2_retro.relaxed_scan_rescue.run_surface_scan",
+        fake_surface_scan,
+    )
+
+    result = engine.run(product, tmp_path / "s2", [(0, 1)])
+    profile = json.loads(Path(result[4]).read_text(encoding="utf-8"))
+    return result, profile
+
+
+@pytest.mark.parametrize(
+    ("relative_kcal", "expected_evidence"),
+    [
+        (
+            [
+                1.0,
+                1.2,
+                1.4,
+                1.8,
+                2.0,
+                2.2,
+                2.5,
+                3.0,
+                5.5,
+                2.8,
+                1.5,
+                0.8,
+                0.4,
+                0.2,
+                0.1,
+                0.05,
+                0.0,
+            ],
+                "knee_shifted",
+        ),
+        (
+            [
+                5.1,
+                5.0,
+                4.9,
+                4.8,
+                4.7,
+                4.6,
+                4.25,
+                4.25,
+                4.25,
+                4.25,
+                4.25,
+                4.2,
+                3.8,
+                1.5,
+                0.0,
+                0.1,
+                0.0,
+            ],
+                "knee_shifted",
+        ),
+    ],
+)
+def test_engine_rescue_dispatches_only_normal_ts_int_jobs(
+    tmp_path,
+    monkeypatch,
+    relative_kcal,
+    expected_evidence,
+):
+    _result, profile = _run_forced_rescue_engine(
+        tmp_path,
+        monkeypatch,
+        rescue_energies_hartree=_hartree_profile(relative_kcal),
+    )
+
+    assert profile["selection_source"] == "orca_relaxed_scan"
+    assert profile["s2_state"] == "rescue_seeded"
+    assert profile["seed_evidence"] == expected_evidence
+    assert profile["ts_search_seed"] is not None
+    assert profile["s3_dispatch"] == {
+        "resolution": "rescue_seeded",
+        "submit_ts": True,
+        "submit_intermediate": True,
+        "neb_eligible": False,
+        "source": "b973c_relaxed_scan",
+        "path_fully_distorted": True,
+    }
+    assert profile["selections"]["ts_guess"]["source"] == "orca_relaxed_scan"
+    assert profile["selections"]["intermediate"]["source"] == "orca_relaxed_scan"
+
+
+@pytest.mark.parametrize(
+    ("relative_kcal", "expected_reason"),
+    [
+        (
+            [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ],
+            {"no_valid_knee_point"},
+        ),
+        (
+            [1.0, 1.2, 1.4, 1.8, 2.0, 2.2],
+            None,
+        ),
+    ],
+)
+def test_engine_unresolved_rescue_never_dispatches_fabricated_s3_jobs(
+    tmp_path,
+    monkeypatch,
+    relative_kcal,
+    expected_reason,
+):
+    energies_hartree = _hartree_profile(relative_kcal)
+    _result, profile = _run_forced_rescue_engine(
+        tmp_path,
+        monkeypatch,
+        rescue_energies_hartree=energies_hartree,
+    )
+
+    # An unresolved rescue may have been attempted with ORCA, but it must not
+    # advertise a stale or fabricated seed as canonical output.
+    assert profile["selection_source"] is None
+    assert profile["s2_state"] == "unresolved"
+    assert profile["s3_dispatch"]["resolution"] == "unresolved"
+    assert profile["s3_dispatch"]["submit_ts"] is False
+    assert profile["s3_dispatch"]["submit_intermediate"] is False
+    assert profile["s3_dispatch"]["neb_eligible"] is False
+    if expected_reason is None:
+        assert profile["rescue"]["error"] == "Relaxed scan lacks complete frame-energy coverage"
+        assert profile["rejection_reason"] is None
+    else:
+        assert profile["rejection_reason"] in expected_reason

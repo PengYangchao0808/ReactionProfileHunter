@@ -7,8 +7,10 @@ from typing import Any
 
 import pytest
 
-from rph_core.steps.step3_lowlevel import engine as lowlevel_module
-from rph_core.steps.step3_lowlevel.engine import LowLevelEngine
+import rph_core.steps.refinement.engine as refinement_engine_module
+from rph_core.steps.refinement.manifest_io import REFINEMENT_MANIFEST_V1
+from rph_core.steps.step3_lowlevel import LowLevelEngine
+from rph_core.utils.config_loader import load_config
 from rph_core.utils.provenance import (
     Provenance,
     build_provenance,
@@ -18,6 +20,7 @@ from rph_core.utils.provenance import (
     sha256_of_json,
     verify_provenance_chain,
 )
+from rph_core.utils.qc_models import QCJobResult
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> Path:
@@ -53,7 +56,7 @@ def test_canonicalize_forming_bonds_for_hash() -> None:
 def test_provenance_to_dict_roundtrip() -> None:
     provenance = Provenance(
         run_id="run-123",
-        schema_version="s3_low_level_v3",
+        schema_version=REFINEMENT_MANIFEST_V1,
         protocol_version=None,
         parent_stage_manifest_hashes={"s2": "abc"},
         atom_mapping_sha256="def",
@@ -173,29 +176,44 @@ def test_s3_manifest_includes_provenance_field_with_parent_s2_hash(
     xyz.write_text("1\nseed\nH 0.0 0.0 0.0\n", encoding="utf-8")
     s2_manifest = _write_json(tmp_path / "S2_PEB" / "manifest.json", {"stage": "S2"})
 
-    class FakeCalculator:
-        def __init__(self, _config: object, _theory: object, event_callback=None):
-            self.event_callback = event_callback
+    def fake_opt(spec, input_xyz, output_dir, config, subprocess_callback=None):
+        del spec, config, subprocess_callback
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        out_xyz = output_dir / "opt.xyz"
+        out_xyz.write_text(Path(input_xyz).read_text(encoding="utf-8"), encoding="utf-8")
+        return QCJobResult(
+            status="complete",
+            input_xyz=Path(input_xyz),
+            output_xyz=out_xyz,
+            output_file=output_dir / "opt.out",
+            energy_hartree=-1.0,
+        )
 
-        def run_structure(self, structure: dict[str, Any], _output_dir: Path) -> dict[str, Any]:
-            return {
-                "id": structure["id"],
-                "kind": structure["kind"],
-                "input_xyz": structure["input_xyz"],
-                "opt_status": "complete",
-                "frequency_status": "complete",
-                "sp_status": "complete",
-                "status": "complete",
-                "usable_for_ml": True,
-            }
+    def fake_frequency(spec, input_xyz, output_dir, config, subprocess_callback=None):
+        del spec, config, subprocess_callback
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        out_file = output_dir / "freq.out"
+        out_file.write_text("mock freq\n", encoding="utf-8")
+        return QCJobResult(
+            status="complete",
+            input_xyz=Path(input_xyz),
+            output_file=out_file,
+            energy_hartree=-0.9,
+            frequencies_cm1=(25.0, 125.0, 325.0),
+        )
 
-    monkeypatch.setattr(lowlevel_module.stage_calculator_module, "StageCalculator", FakeCalculator)
+    monkeypatch.setattr(refinement_engine_module, "run_optimization", fake_opt)
+    monkeypatch.setattr(refinement_engine_module, "run_frequency", fake_frequency)
+
+    config = load_config()
     manifest_path = LowLevelEngine(
-        {"theory": {"s3_low_level": {"optimization": {"engine": "orca"}, "single_point": {"engine": "orca"}}}},
+        config,
         run_id="33333333-3333-4333-8333-333333333333",
         parent_manifest_paths={"s2": s2_manifest},
     ).run(
-        [{"id": "product", "kind": "minimum", "input_xyz": str(xyz)}],
+        [{"id": "product", "role": "product", "kind": "minimum", "input_xyz": str(xyz)}],
         tmp_path / "S3_LowLevel",
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

@@ -299,12 +299,33 @@ def test_s2_manifest_archives_new_selection_metadata(tmp_path):
                 "scan_plot": str(plot),
                 "scan_quality": {"intermediate_confidence": "high"},
                 "selections": {
-                    "ts_guess": {"index": 19, "rule": "maximum_positive_gradient"},
+                    "ts_guess": {
+                        "index": 19,
+                        "rule": "reactant_side_backoff_from_refined_curve_local_maximum",
+                        "energy_peak_index": 17,
+                        "seed_index": 19,
+                        "seed_backoff_applied_A": 0.20,
+                    },
                     "intermediate": {
                         "index": 21,
                         "rule": "local_platform_center",
                     },
                 },
+                "selection_source": "orca_relaxed_scan",
+                "s2_state": "rescue_seeded",
+                "seed_evidence": "monotonic_shoulder",
+                "ts_search_seed": {
+                    "frame_index": 19,
+                    "xyz": str(ts_guess),
+                    "confidence": "medium",
+                },
+                "int_search_seed": {
+                    "frame_index": 21,
+                    "xyz": str(intermediate),
+                    "shared_with_ts": False,
+                },
+                "has_independent_int": True,
+                "rejection_reason": None,
             }
         ),
         encoding="utf-8",
@@ -322,12 +343,30 @@ def test_s2_manifest_archives_new_selection_metadata(tmp_path):
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    assert manifest["schema_version"] == "s2_peb_manifest_v9"
+    assert manifest["schema_version"] == "s2_peb_manifest_v11"
     assert manifest["ts_guess_index"] == 19
+    assert manifest["ts_energy_peak_index"] == 17
+    assert manifest["ts_seed_index"] == 19
+    assert manifest["ts_seed_reactant_backoff_A"] == pytest.approx(0.20)
     assert manifest["intermediate_index"] == 21
     assert manifest["intermediate_selection_method"] == (
         "local_platform_center"
     )
+    assert manifest["selection_source"] == "orca_relaxed_scan"
+    assert manifest["s2_state"] == "rescue_seeded"
+    assert manifest["seed_evidence"] == "monotonic_shoulder"
+    assert manifest["ts_search_seed"] == {
+        "frame_index": 19,
+        "xyz": str(ts_guess),
+        "confidence": "medium",
+    }
+    assert manifest["int_search_seed"] == {
+        "frame_index": 21,
+        "xyz": str(intermediate),
+        "shared_with_ts": False,
+    }
+    assert manifest["has_independent_int"] is True
+    assert manifest["rejection_reason"] is None
 
 
 def _flat_anchors(plateau_index: int, boundary_index: int, last_valid_index: int):

@@ -1,10 +1,14 @@
 """P6 TS quality closure tests."""
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from pathlib import Path
 
-from rph_core.steps import stage_calculator as stage_module
-from rph_core.steps.stage_calculator import StageCalculator
+import rph_core.steps.refinement.engine as engine_module
+from rph_core.steps.fidelity_profile import FidelityProfile
+from rph_core.steps.refinement import RefinementEngine
+from rph_core.utils.config_loader import load_config
 from rph_core.utils.qc_models import QCJobResult
 from rph_core.utils.ts_quality import analyze_ts_quality
 
@@ -152,7 +156,7 @@ def test_mode_displacement_checked_with_orca_geometry(tmp_path: Path):
     assert result["quality_summary"] == "frequency_valid_mode_aligned"
 
 
-def test_stage_calculator_returns_ts_quality_fields(monkeypatch, tmp_path: Path):
+def test_refinement_engine_returns_ts_classification_fields(monkeypatch, tmp_path: Path):
     input_xyz = tmp_path / "ts.xyz"
     input_xyz.write_text(
         "2\nts\n"
@@ -173,57 +177,65 @@ def test_stage_calculator_returns_ts_quality_fields(monkeypatch, tmp_path: Path)
         encoding="utf-8",
     )
 
-    def fake_opt(spec, input_path, output_dir, config):
+    def fake_opt(spec, input_path, output_dir, config, subprocess_callback=None):
+        del spec, config, subprocess_callback
         return QCJobResult(
             "complete",
-            input_path,
-            input_path,
-            output_dir / "opt.out",
-            -1.0,
+            Path(input_path),
+            output_xyz=Path(input_path),
+            output_file=Path(output_dir) / "opt.out",
+            energy_hartree=-1.0,
         )
 
-    def fake_frequency(spec, input_path, output_dir, config):
+    def fake_frequency(spec, input_path, output_dir, config, subprocess_callback=None):
+        del spec, output_dir, config, subprocess_callback
         return QCJobResult(
             "complete",
-            input_path,
+            Path(input_path),
             output_file=freq_out,
             frequencies_cm1=(-321.4, 120.0, 311.2),
         )
 
-    def fake_sp(spec, input_path, output_dir, config):
-        return QCJobResult("complete", input_path, None, output_dir / "sp.out", -1.1)
+    def fake_sp(spec, input_path, output_dir, config, subprocess_callback=None):
+        del spec, config, subprocess_callback
+        return QCJobResult(
+            "complete",
+            Path(input_path),
+            output_file=Path(output_dir) / "sp.out",
+            energy_hartree=-1.1,
+        )
 
-    monkeypatch.setattr(stage_module, "run_optimization", fake_opt)
-    monkeypatch.setattr(stage_module, "run_frequency", fake_frequency)
-    monkeypatch.setattr(stage_module, "run_single_point", fake_sp)
-
-    theory = {
-        "optimization": {
-            "engine": "orca",
-            "method": "B97-3c",
-            "frequency": {
-                "enabled_for_ts": True,
-                "task": "freq",
-                "imaginary_cutoff_cm1": -50.0,
-                "require_exactly_one": True,
-            },
+    monkeypatch.setattr(engine_module, "run_optimization", fake_opt)
+    monkeypatch.setattr(engine_module, "run_frequency", fake_frequency)
+    monkeypatch.setattr(engine_module, "run_single_point", fake_sp)
+    monkeypatch.setattr(
+        engine_module.identity_module,
+        "classify_ts",
+        lambda **kwargs: {
+            "hessian_index": 1,
+            "curvature_class": "strict",
+            "mode_identity": "target",
+            "stationary_point_class": "valid_target_ts",
+            "alignment_score": 0.9,
         },
-        "single_point": {"engine": "orca", "method": "r2SCAN-3c"},
-    }
-
-    result = StageCalculator({}, theory).run_structure(
-        {
-            "id": "ts",
-            "kind": "ts",
-            "input_xyz": str(input_xyz),
-            "forming_bonds": [(0, 1)],
-        },
+    )
+    config = load_config()
+    profile = replace(FidelityProfile.from_config(config, "S3"), irc_enabled=False)
+    manifest_path = RefinementEngine(config, profile).run(
+        [
+            {
+                "id": "ts",
+                "role": "ts",
+                "kind": "ts",
+                "input_xyz": str(input_xyz),
+                "forming_bonds": [(0, 1)],
+            }
+        ],
         tmp_path / "stage",
     )
+    result = json.loads(manifest_path.read_text(encoding="utf-8"))["structures"][0]
 
-    assert result["ts_frequency_valid"] is True
-    assert result["frequency_count_valid"] is True
-    assert result["mode_displacement_valid"] is True
-    assert result["irc_valid"] is None
-    assert result["ts_mode_displacement_verified"] is True
-    assert result["ts_quality_summary"] == "frequency_valid_mode_aligned"
+    assert result["frequency_status"] == "complete"
+    assert result["imaginary_frequencies_cm1"] == [-321.4]
+    assert result["ts_classification"]["stationary_point_class"] == "valid_target_ts"
+    assert result["ts_classification"]["alignment_score"] > 0.0
