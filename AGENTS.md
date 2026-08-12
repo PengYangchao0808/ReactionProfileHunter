@@ -22,7 +22,7 @@ V3 orchestration, `QCTaskRunner`, Berny/QST2/IRC rescue and S2 pre-optimization 
 | S1 torsion deduplication | `rph_core/steps/conformer_search/torsion_signature.py`, `deduplicator.py` |
 | S0 SMARTS mechanism validation | `rph_core/steps/step2_retro/smarts_matcher.py` |
 | S2 PEB | `rph_core/steps/step2_retro/peb_scanner.py` |
-| S3/S4 stage policy | `rph_core/steps/step3_lowlevel/`, `step4_highlevel/`, `stage_calculator.py` |
+| S3/S4 stage policy | `rph_core/steps/refinement/` (unified engine); `step3_lowlevel/` and `step4_highlevel/` are backward-compat aliases |
 | QC job mapping | `rph_core/utils/qc_models.py`, `qc_jobs.py` |
 | Low-level QC interfaces | `rph_core/utils/orca_interface.py`, `qc_interface.py` |
 | UI state / status adapters | `rph_core/utils/ui_state.py`, `rph_core/utils/ui_adapter.py` |
@@ -74,10 +74,21 @@ pipeline.result.json
 
 `forming_bonds` are authoritative in the S0 manifest and use 0-based XYZ indices. Each S3/S4 structure record must retain input, optimized geometry when available, output files, energies, status and `usable_for_ml`.
 
+## V4 Pipeline Hardening (P0-P2 batches)
+
+- `rph_core/steps/step2_retro/peb_engine.py` — unified refinement corridor planning for shared TS/INT local windows.
+- `rph_core/utils/orca_failure_classifier.py` — ORCA failure parsing/classification for manifest error reporting.
+- `rph_core/utils/superseded_archive.py` — archive stale stage outputs before replacement.
+- `rph_core/utils/stale_recovery.py` — detect interrupted/stale runs from heartbeat artifacts before resume.
+- `rph_core/utils/attempt_recorder.py` — structured attempt/audit records for QC retries and degradations.
+- `rph_core/steps/refinement/engine.py` — unified S3/S4 `RefinementEngine` (3-pass DAG, soft-mode review, canonical selection).
+- `rph_core/utils/provenance.py` — parent-manifest, atom-mapping and run-chain provenance utilities.
+- `rph_core/utils/run_id.py` — per-run identity propagated into manifests, status snapshots and UI filtering.
+
 ## Verification commands
 
 ```bash
-python -m py_compile rph_core/v4_orchestrator.py rph_core/steps/stage_calculator.py
+python -m py_compile rph_core/v4_orchestrator.py rph_core/steps/refinement/engine.py
 python scripts/ci/check_imports.py rph_core
 pytest -q tests/test_v4_protocol_contract.py tests/test_v4_checkpoint.py tests/test_v4_stage_calculator.py tests/test_v4_ui.py
 ```

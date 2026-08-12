@@ -1,0 +1,104 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "S2/S3 几何种子与 ORCA relaxed-scan rescue 问题报告",
+    "description": "基于 release/4.0.0 工作树与 s0_s2_batch 运行结果的技术复盘。",
+    "generatedAt": "2026-08-02T00:00:00+08:00",
+    "sources": [
+      {"id": "energy_profile_sql", "label": "报告图表的可复现数据变换", "path": "docs/reports/s2_s3_rescue_issue_report/rx7_orca_relaxed_scan_energy_profile.sql", "query": {"engine": "sqlite", "description": "由 ORCA 能量账本转录、归一化的 17 点数据。"}},
+      {"id": "orca_ledger", "label": "rx7/product_major ORCA B97-3c 能量账本", "path": "RPH_Test_Results/s0_s2_batch/rx_id_7/S2_PEB/product_major/rescue/b973c_relaxed_scan/selected_surface_scan_67649704.relaxscanact.dat", "query": {"engine": "file", "description": "17 个优化 scan 点的实际 ORCA 能量。"}},
+      {"id": "peb_profile", "label": "rx7/product_major S2 PEB 路径诊断", "path": "RPH_Test_Results/s0_s2_batch/rx_id_7/S2_PEB/product_major/scan_profile.json", "query": {"engine": "file", "description": "xTB PATH 帧、拓扑有效区间及候选诊断。"}},
+      {"id": "orca_impl", "label": "ORCA scan 公共接口", "path": "rph_core/utils/orca_interface.py", "query": {"engine": "file", "description": "run_surface_scan 与 relaxscanact 能量账本解析。"}},
+      {"id": "rescue_impl", "label": "S2 rescue 策略", "path": "rph_core/steps/step2_retro/relaxed_scan_rescue.py", "query": {"engine": "file", "description": "全路径畸变条件下的 S2 B97-3c rescue。"}},
+      {"id": "config", "label": "全局 QC 配置", "path": "config/defaults.yaml", "query": {"engine": "file", "description": "S3 B97-3c 理论层级和全局 resources.nproc。"}}
+    ],
+    "charts": [
+      {
+        "id": "energy_profile_chart",
+        "title": "ORCA B97-3c 同步双键 relaxed scan：没有内部势垒",
+        "subtitle": "17 个优化扫描点；能量相对最拉伸端，PRODUCT 至拉伸端单调升高 61.45 kcal mol⁻¹。",
+        "type": "line",
+        "dataset": "energy_profile",
+        "sourceId": "energy_profile_sql",
+        "encodings": {
+          "x": {"field": "mean_bond_A", "type": "quantitative", "label": "两根形成键的平均长度 (Å)"},
+          "y": {"field": "relative_energy_kcal_mol", "type": "quantitative", "label": "相对能量 (kcal mol⁻¹)"},
+          "tooltip": [
+            {"field": "point", "type": "ordinal", "label": "扫描点"},
+            {"field": "mean_bond_A", "type": "quantitative", "label": "平均键长 (Å)"},
+            {"field": "relative_energy_kcal_mol", "type": "quantitative", "label": "相对能量 (kcal mol⁻¹)"}
+          ]
+        }
+      }
+    ],
+    "blocks": [
+      {
+        "id": "summary",
+        "type": "markdown",
+        "body": "# S2/S3 几何种子与 ORCA relaxed-scan rescue 问题报告\n\n**范围。** 本报告复盘 `release/4.0.0` 工作树与 `RPH_Test_Results/s0_s2_batch` 中 rx6、rx7、rx8 的 S0–S2/S3 验证。运行观察主要来自 2026-07-30；代码和账本复核完成于 2026-08-02。\n\n**结论先行。** rx7/product_major 的 ORCA B97-3c rescue 已完成 17 个弛豫扫描点，但正确地没有产生 TS/INT 初猜：从 PRODUCT 同步拉长两根形成键时，能量单调升高约 61.45 kcal mol⁻¹，既无内部峰，也无预 TS 盆地。此前显示的“能量覆盖不完整”是解析缺陷，并非 ORCA 没有算完；该缺陷已修复。更深层的问题是 xTB PATH 高能段有拓扑漂移，且成键坐标强烈异步，所以同步一维拉伸不会经过可信的 TS 区域。"
+      },
+      {
+        "id": "policy",
+        "type": "markdown",
+        "body": "## 一、最终 S2/S3 职责边界\n\n1. **S2 是种子质量控制层。** 只要 PEB 存在无明显拓扑畸变的反应走廊，统一输出 TS 与 INT search seed 给 S3；TS/INT seed 可相同，不额外拆分状态。\n2. **仅全路径畸变触发 S2 rescue。** 判据为 `persistent_off_path_start == 0` 且 `usable_end_index` 缺失或为 `-1`。\n3. **S3 坍塌不回流 S2。** 本轮目标是不要把不成熟 S2 seed 送入 S3；不讨论 S3 的 NEB 救援。\n4. **rescue 执行属于公共 ORCA 层。** 通过 `qc_jobs.py` 和 `orca_interface.py` 运行；方法、溶剂、并行与超时继承全局配置，不能写成 S2 私有参数。"
+      },
+      {
+        "id": "implementation_issues",
+        "type": "markdown",
+        "sourceId": "orca_impl",
+        "body": "## 二、已证实的实现问题与修复\n\n| 问题 | 影响 | 状态 |\n|---|---|---|\n| 旧逻辑只从主输出抓取 `FINAL SINGLE POINT ENERGY`，未优先读取 `*.relaxscanact.dat`。 | 17 帧都存在时仍误判为能量覆盖不完整，阻断 profile、seed 判定和结果显示。 | **已修复**：优先读取优化点能量账本，主输出仅回退。 |\n| S2 rescue 自行使用单核。 | B97-3c scan 明显慢于常规 S3，且违反全局资源职责。 | **已修复**：公共 `SurfaceScanSpec` 继承全局 `resources.nproc=16` 与 S3 B97-3c 理论配置。 |\n| rescue 初始没有完整 UI 事件链。 | 用户无法从终端确认 rescue 是否启动、使用何种坐标/资源或运行到何处。 | **已修复**：报告 scan 名称、坐标、点数、核心数、开始/结束事件。 |\n| 固定同步双键拉伸不是 rx7/product_major 的有效坐标。 | 不可能从该 scan 选出可信 TS/INT。 | **待重设计**：需要异步坐标策略。 |"
+      },
+      {"id": "orca_result", "type": "markdown", "sourceId": "orca_ledger", "body": "## 三、rx7/product_major 的 ORCA rescue 是什么结果\n\n扫描从 PRODUCT 附近的两根形成键（1.533/1.542 Å）开始，利用 `Simul_Scan` 同步拉长至 3.400/3.400 Å。第 15 点相对第 16 点仍低 0.817 kcal mol⁻¹，因此不能作为局部峰。此任务给出的是明确的负结果：沿当前坐标没有可由峰顶和两侧帧构造的 TS/INT 初猜。\n\n所以修复后的正确 S2 结论应为 `unresolved`，理由是“单调 scan、无 TS/INT”，而不是旧的 `Relaxed scan lacks complete frame-energy coverage`。"},
+      {"id": "orca_chart", "type": "chart", "chartId": "energy_profile_chart", "sourceId": "energy_profile_sql"},
+      {
+        "id": "geometry",
+        "type": "markdown",
+        "sourceId": "peb_profile",
+        "body": "## 四、xTB PATH 与 ORCA rescue 几何不一致的证据\n\nS0 目标形成键为 `(2,3)` 和 `(7,6)`。xTB full-endpoint PATH 的高能 frame 26 两键为 3.360/2.415 Å，异步差 0.945 Å；但它同时错误地形成 `0–9`（PRODUCT：3.136 Å；该帧：1.549 Å）并拉断 `8–9`（PRODUCT：1.341 Å；该帧：1.728 Å）。full PATH 的 frame 0–26 均为 off-path，只有 frame 27–37 的近 PRODUCT 小段可用。\n\nORCA rescue 强制 `q1≈q2`，不会访问 `(3.36, 2.42)` 这类异步区域；最接近 xTB 候选的 ORCA 帧与该候选的骨架 RMSD 约为 1.52 Å。由此不能把 xTB 高能帧当作真 TS 的参考，也不能期望同步 scan 复现它。"
+      },
+      {
+        "id": "reruns",
+        "type": "markdown",
+        "body": "## 五、此前失败任务与最小重算集合\n\n- **rx6 / `product_major_ts`、`product_minor_001_ts`：** S2 v10 为 `path_seeded`、`rescue=not_required`。按最终规则不重跑 ORCA rescue；只检查其常规 S3 OptTS/Opt。\n- **rx7 / `product_minor_001_int`：** 重新跑 S2 后，只有再次满足“全路径畸变”时才 rescue；若存在任何干净走廊，应直接给出 TS/INT seed。旧进程或旧解析产生的输出不能当作新链路验收。\n- **rx7 / `product_major`：** 在账本解析修复后重跑/恢复 S2 判定，用于验证 manifest、UI 和 rescue profile。不要期待重复同一条同步 scan 产生不同的化学结论。\n- **rx8 / `product_major_ts`：** 先按最终判据重建 S2 manifest；仅全路径畸变时 scan，否则直接交 S3。\n\n因此不应把全部 `unresolved` 批量 rescue；最小集合是先验证 rx7/product_major，再对重新分类为全路径畸变的 structure 执行 rescue。"
+      },
+      {
+        "id": "next_steps",
+        "type": "markdown",
+        "body": "## 六、后续开发与测试计划\n\n**P0：闭环当前修复。** 用新解析重跑 rx7/product_major，确认 manifest 保存 17 个能量、产生 `rescue/scan_profile.json` 和 PNG，UI 给出最后的单调 `unresolved` 原因。\n\n**P1：固定简洁状态机。** 回归测试必须覆盖：干净 PATH（含 TS/INT 同帧）统一 `path_seeded`、不 rescue；仅全路径畸变触发 rescue；S3 失败不回流 S2。\n\n**P1：把 rescue 升级为坐标策略。** 双形成键应采用异步二维局部 scan，或固定另一键长度的一维 slice。公共 ORCA 层提供受约束点/网格原语，S2 只选择坐标、范围和筛选规则。`Simul_Scan` 只是一条对角线，不能替代二维网格。\n\n**P2：增加化学有效性验收。** 只有存在内部正势垒、峰两侧可区分帧、目标拓扑保持、非目标键未异常成断键的候选，才可作为 S3 seed。畸变 xTB 帧仅用于诊断异步性，不能作为 ORCA endpoint 或 TS 标签。\n\n当前代码验证已通过：`py_compile`、指定 pytest 集合（51 passed）、`check_imports.py rph_core` 和 `git diff --check`。"
+      },
+      {
+        "id": "final",
+        "type": "markdown",
+        "body": "## 七、最终判断\n\n执行层问题——公共 ORCA 注册、全局资源继承、UI 进度与 `.relaxscanact.dat` 解析——已经被定位并修复。未解决的不是“scan 点数不够”或“ORCA 太慢”，而是 rx7/product_major 的同步拉伸线不经过可信 TS 区域。下一轮必须把“链路能否正确报告单调 unresolved”和“新异步坐标是否有化学意义”分开验收。"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-02T00:00:00+08:00",
+    "status": "ready",
+    "datasets": {
+      "energy_profile": [
+        {"point": 0, "mean_bond_A": 1.537, "relative_energy_kcal_mol": -61.454},
+        {"point": 1, "mean_bond_A": 1.654, "relative_energy_kcal_mol": -56.229},
+        {"point": 2, "mean_bond_A": 1.771, "relative_energy_kcal_mol": -44.942},
+        {"point": 3, "mean_bond_A": 1.888, "relative_energy_kcal_mol": -32.526},
+        {"point": 4, "mean_bond_A": 2.004, "relative_energy_kcal_mol": -21.989},
+        {"point": 5, "mean_bond_A": 2.121, "relative_energy_kcal_mol": -14.421},
+        {"point": 6, "mean_bond_A": 2.238, "relative_energy_kcal_mol": -9.223},
+        {"point": 7, "mean_bond_A": 2.354, "relative_energy_kcal_mol": -6.070},
+        {"point": 8, "mean_bond_A": 2.471, "relative_energy_kcal_mol": -4.213},
+        {"point": 9, "mean_bond_A": 2.588, "relative_energy_kcal_mol": -3.040},
+        {"point": 10, "mean_bond_A": 2.704, "relative_energy_kcal_mol": -2.418},
+        {"point": 11, "mean_bond_A": 2.821, "relative_energy_kcal_mol": -2.091},
+        {"point": 12, "mean_bond_A": 2.938, "relative_energy_kcal_mol": -1.846},
+        {"point": 13, "mean_bond_A": 3.054, "relative_energy_kcal_mol": -1.705},
+        {"point": 14, "mean_bond_A": 3.171, "relative_energy_kcal_mol": -1.403},
+        {"point": 15, "mean_bond_A": 3.284, "relative_energy_kcal_mol": -0.817},
+        {"point": 16, "mean_bond_A": 3.400, "relative_energy_kcal_mol": 0.000}
+      ]
+    }
+  }
+}

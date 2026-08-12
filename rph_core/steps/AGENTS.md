@@ -9,9 +9,11 @@ V4 step implementations: S0 mechanism → S1 CENSO-LITE conformer search → S2 
 | S0 mechanism | `mechanism_classifier/` | `s0_record.py` → `load_s0_reaction_record()` | Trusted dataset CSV input |
 | S1 CENSO-LITE | `conformer_search/` | `censo_lite.py` → `CensoLiteEngine.run()` | CREST/GFN2 + B97-3c SP + xTB mRRHO |
 | S2 PEB | `step2_retro/` | `peb_scanner.py` → `RetroScanner.run()` | xTB PEB backward scan |
-| S3 low-level | `step3_lowlevel/` | `engine.py` → `LowLevelEngine.run()` | ORCA B97-3c OPT/OptTS → r2SCAN-3c SP |
-| S4 high-level | `step4_highlevel/` | `engine.py` → `HighLevelEngine.run()` | ORCA M062X OPT/OptTS/FREQ → ORCA wB97M-V SP |
-| Shared engine | — | `stage_calculator.py` → `StageCalculator` | OPT/Freq/SP dispatch for S3 + S4 |
+| S3 low-level | `step3_lowlevel/` | `__init__.py` → `LowLevelEngine` (alias, impl in `refinement/engine.py`) | ORCA B97-3c OPT/OptTS → r2SCAN-3c SP |
+| S4 high-level | `step4_highlevel/` | `__init__.py` → `HighLevelEngine` (alias, impl in `refinement/engine.py`) | ORCA M062X OPT/OptTS/FREQ → ORCA wB97M-V SP |
+| Shared engine | `refinement/` | `engine.py` → `RefinementEngine` (3-pass DAG) | Unified S3/S4: `FidelityProfile`-driven OPT/Freq/SP dispatch |
+
+> `LowLevelEngine` and `HighLevelEngine` are empty subclasses of `RefinementEngine` for backward compatibility. The 3-pass DAG (preflight → primary → rescue → canonical) lives in `rph_core/steps/refinement/`. All stage differences (methods, bases, rescue flags) come from `FidelityProfile` parameters, not `if stage == "S3"/"S4"` branches.
 
 ## V4 OUTPUT CONTRACT
 ```

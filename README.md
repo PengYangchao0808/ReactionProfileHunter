@@ -6,7 +6,7 @@
 
 **Product-driven DFT reaction mechanism pipeline (S0-S4)**
 
-[![Version](https://img.shields.io/badge/version-4.0.0-blue.svg)](https://github.com/PengYangchao0808/ReactionProfileHunter)
+[![Version](https://img.shields.io/badge/version-4.0.1-blue.svg)](https://github.com/PengYangchao0808/ReactionProfileHunter)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Code Style](https://img.shields.io/badge/code%20style-agents%20ready-success.svg)](AGENTS.md)
@@ -102,14 +102,14 @@ ReactionProfileHunter/
 │   ├── v4_orchestrator.py # V4 pipeline orchestration + CLI (V4Orchestrator)
 │   ├── __main__.py        # python -m rph_core entry point
 │   ├── v4_watch.py        # WSL live status viewer
-│   ├── scheduling/        # Batch scheduling & task orchestration
 │   ├── steps/             # S0-S4 implementations
 │   │   ├── conformer_search/  # S1 CENSO-LITE engine
 │   │   ├── mechanism_classifier/  # S0 mechanism validation
 │   │   ├── step2_retro/       # S2 PEB scanner
-│   │   ├── step3_lowlevel/    # S3 low-level QC (B97-3c / r2SCAN-3c)
-│   │   ├── step4_highlevel/   # S4 high-precision QC (M062X / wB97M-V)
-│   │   └── stage_calculator.py  # Shared OPT+SP+FRFQ dispatch for S3/S4
+│   │   ├── refinement/        # Unified S3/S4 RefinementEngine (3-pass DAG)
+│   │   ├── step3_lowlevel/    # S3 backward-compat alias (LowLevelEngine)
+│   │   ├── step4_highlevel/   # S4 backward-compat alias (HighLevelEngine)
+│   │   └── fidelity_profile.py  # FidelityProfile — S3/S4 stage policy
 │   └── utils/             # QC/IO/checkpoint infrastructure
 │       ├── qc_interface.py     # All QC calls route here
 │       ├── v4_checkpoint.py    # V4 manifest-based checkpoint
@@ -117,11 +117,9 @@ ReactionProfileHunter/
 │       └── qc_models.py        # QC data models
 ├── bin/                  # CLI wrappers (sys.path + main())
 │   ├── rph_run           # V4 primary entry point
-│   ├── rph_watch         # WSL live status viewer
-│   └── rph               # Short alias
+│   └── rph_watch         # WSL live status viewer
 ├── config/               # Runtime configuration (single source of truth)
-│   ├── defaults.yaml     # All config keys
-│   └── templates/        # Gaussian .gjf/.com templates
+│   └── defaults.yaml     # All config keys
 ├── tests/                # pytest test suite (~82 files)
 │   ├── conftest.py       # Adds repo root to sys.path
 │   └── fixtures/         # Static test data
@@ -261,7 +259,6 @@ if result.get("success"):
 | Method | Command | Notes |
 |--------|---------|-------|
 | CLI script | `bin/rph_run --csv <file> --rx-id <id> --output <dir>` | Adds repo root to sys.path |
-| Short alias | `bin/rph --csv <file> --rx-id <id> --output <dir>` | Identical to rph_run |
 | Python module | `python -m rph_core --csv <file> --rx-id <id> --output <dir>` | Same flags, relies on Python path |
 | Programmatic | `V4Orchestrator().run()` | Full control, returns dict |
 
@@ -532,7 +529,6 @@ step2:
 ### Config file locations
 
 - Main config: `config/defaults.yaml`
-- Templates: `config/templates/`
 
 ---
 
@@ -564,7 +560,7 @@ python scripts/ci/check_imports.py rph_core
 ### Notes
 - `tests/conftest.py` adds the repo root to `sys.path`, so tests can run without editable install.
 - Integration tests use mocked QC calculations and do not require real ORCA binaries.
-- V3 tests have been archived to `tests/deprecated_v3/`.
+- V3 tests have been removed; the full suite runs in-place under `tests/`.
 - See [AGENTS.md](AGENTS.md) for verification commands.
 
 ---
@@ -627,6 +623,27 @@ rm -f Output/RXN_000001/pipeline.state
 bin/rph_run --csv data/trusted_reactions.csv --rx-id RXN_000001 --output ./Output/RXN_000001
 ```
 
+### 6. S2 ORCA GFN2-xTB scan aborts with "otool_xtb not available"
+
+ORCA's GFN-xTB implementation is a wrapper around the external `xtb` binary,
+and ORCA only looks for it **inside the ORCA binary directory** (never PATH).
+If `otool_xtb`/`xtb` are missing there, the scan fails with:
+
+```
+WARNING: otool_xtb not available. Trying xtb instead ... failed!
+  ===> : Please provide the xtb executables in the same path as where the orca binaries are located.
+```
+
+Fix — make `xtb` discoverable next to the ORCA executable (replace paths as
+needed):
+
+```bash
+ln -s /opt/software/xtb/bin/xtb /opt/software/orca/xtb
+```
+
+Then re-run with `--refresh-stages s2`. The S2 GFN2-xTB scan uses ALPB
+solvation (CPCM/SMD is rejected by ORCA's xTB implementation).
+
 ### Logs
 
 V4 logs to `rph_v4.log` in the output directory:
@@ -658,8 +675,7 @@ bin/rph_run --csv data/trusted_reactions.csv --rx-id RXN_000001 --output ./Outpu
 | [`rph_core/steps/AGENTS.md`](rph_core/steps/AGENTS.md) | Step architecture & output contracts |
 | [`rph_core/steps/conformer_search/AGENTS.md`](rph_core/steps/conformer_search/AGENTS.md) | CENSO-LITE conformer search |
 | [`rph_core/steps/step2_retro/AGENTS.md`](rph_core/steps/step2_retro/AGENTS.md) | PEB scanner |
-| [`rph_core/steps/step3_lowlevel/AGENTS.md`](rph_core/steps/step3_lowlevel/AGENTS.md) | S3 low-level QC |
-| [`rph_core/steps/step4_highlevel/AGENTS.md`](rph_core/steps/step4_highlevel/AGENTS.md) | S4 high-precision QC |
+| [`rph_core/steps/refinement/AGENTS.md`](rph_core/steps/refinement/AGENTS.md) | Unified S3/S4 RefinementEngine |
 | [`rph_core/utils/AGENTS.md`](rph_core/utils/AGENTS.md) | QC/IO/checkpoint infra reference |
 | [`config/AGENTS.md`](config/AGENTS.md) | Config structure notes |
 | [`tests/AGENTS.md`](tests/AGENTS.md) | Test organization and conventions |
@@ -680,7 +696,7 @@ If you use ReactionProfileHunter in research, please cite:
   author = {Peng Yangchao},
   year = {2026},
   url = {https://github.com/PengYangchao0808/ReactionProfileHunter},
-  version = {4.0.0}
+  version = {4.0.1}
 }
 ```
 

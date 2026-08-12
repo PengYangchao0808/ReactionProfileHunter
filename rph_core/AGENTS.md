@@ -13,10 +13,10 @@ Core package: `v4_orchestrator.py` wires S0→S4; `steps/` holds per-step busine
 | S0 mechanism graph/models | `steps/mechanism_classifier/models.py`, `graph_builder.py`, `dr_completion.py` | `MechanismGraph`, `DRBranchPlan` (V3-era, not yet wired into V4 orchestrator — see P1 in master plan) |
 | S1 CENSO-LITE | `steps/conformer_search/censo_lite.py`, `censo_lite_runtime.py` | CREST/GFN2 + B97-3c SP + xTB mRRHO; no DFT OPT/FREQ |
 | S1 torsion dedup | `steps/conformer_search/torsion_signature.py`, `deduplicator.py` | Torsion-aware conformer deduplication |
-| S2 PEB | `steps/step2_retro/peb_scanner.py` → `retro_scanner.py` | xTB PEB backward scan from S1 selected product |
-| S3 low-level | `steps/step3_lowlevel/engine.py` | ORCA B97-3c OPT/OptTS → r2SCAN-3c SP |
-| S4 high-level | `steps/step4_highlevel/engine.py` | ORCA M062X OPT/OptTS/FREQ → ORCA wB97M-V SP |
-| Shared stage engine | `steps/stage_calculator.py` | OPT/Freq/SP dispatch for both S3 and S4 |
+| S2 PEB | `steps/step2_retro/peb_scanner.py` → `peb_engine.py` | `PEBScanner` is a 10-LOC facade over `PEBScanEngine` (4,341 LOC); xTB PEB backward scan from S1 selected product |
+| S3/S4 unified engine | `steps/refinement/engine.py` | `RefinementEngine` (4,389 LOC) — 3-pass DAG (preflight → primary → rescue → canonical); no `if stage == "S3"/"S4"` branches |
+| S3/S4 stage policy | `steps/fidelity_profile.py` | `FidelityProfile` dataclass — single source of all S3 vs S4 differences; built via `FidelityProfile.from_config(config, stage)` |
+| S3/S4 backward-compat aliases | `steps/step3_lowlevel/__init__.py`, `steps/step4_highlevel/__init__.py` | 58-LOC empty subclasses (`LowLevelEngine`/`HighLevelEngine`); orchestrator imports them only into `_BACKWARD_COMPAT_STAGE_ENGINES` for downstream consumers |
 | QC job routing | `utils/qc_jobs.py`, `qc_models.py` | `run_optimization()`, `run_frequency()`, `run_single_point()` |
 | QC interfaces | `utils/orca_interface.py`, `qc_interface.py` | ORCA + Gaussian + xTB + CREST runners |
 | Checkpoint/resume | `utils/v4_checkpoint.py` | `V4Checkpoint` — hash-validated stage resume via `pipeline.state` |
@@ -27,8 +27,8 @@ Core package: `v4_orchestrator.py` wires S0→S4; `steps/` holds per-step busine
 
 ## V4 CONFIG CONTRACT
 All methods, paths, resources and timeouts belong in `config/defaults.yaml`. Key sections:
-- `theory.s3_low_level` — ORCA B97-3c OPT/Freq + r2SCAN-3c SP (with CPCM acetone)
-- `theory.s4_high_precision` — ORCA M062X OPT/Freq + ORCA wB97M-V SP (with CPCM acetone)
+- `theory.s3_low_level` / `theory.s4_high_precision` — legacy per-stage theory keys (still read by `FidelityProfile` dual-write during Phase 1)
+- `refinement.common` / `refinement.s3` / `refinement.s4` — additive V4 unified-engine profiles (the forward path)
 - `step1.protocol: censo_lite` (only allowed protocol)
 - `step1.censo_lite` — CREST, ranking, xTB thermo, deduplication parameters
 - `step2.scan` — PEB backward scan parameters
@@ -70,11 +70,20 @@ pipeline.result.json
 - Treating S4 as feature extraction — it is high-precision QC only.
 - Creating `COND_xxx/` condition directories inside S1–S4.
 
-## DEPRECATED V3 CODE (see docs/ARCHIVE_V3.md)
-The following V3 modules remain on disk but are **not called by the V4 orchestrator**. They are preserved transitively (some V4 modules import from them) and will be removed in later P-phases:
-- `utils/qc_task_runner.py`, `utils/oscillation_detector.py`, `utils/checkpoint_manager.py`
-- `steps/anchor/`, `steps/conformer_search/engine.py` (V3 138KB engine, not `censo_lite.py`)
-- `steps/step3_opt/`, `steps/dr_aggregator.py`, `steps/condition_thermo.py`
-- `lewis_acid/`, `scheduling/v3_scheduler.py`
+## V3 REMOVAL STATUS
 
-Do not extend or depend on these modules for V4 work.
+V3 modules are **deleted from disk**, not merely deprecated. The list below is historical context only — none of these paths exist in the current tree.
+
+**Authoritative enforcement** (live, runs in CI):
+- `tests/test_v4_no_legacy_runtime.py` — `FORBIDDEN_MODULES` (25 paths) + `FORBIDDEN_CONFIG_KEYS` (`gau_xtb`, `neutral_precursor`, `path_search`, `preoptimization`). Importing any forbidden module or adding any forbidden config key fails CI.
+- `scripts/ci/check_imports.py` — bans `from ...utils` / `from ....utils` multi-dot relative imports.
+
+**Frozen history** (do not edit, do not trust for current state):
+- `docs/ARCHIVE_V3.md` — V3 archive snapshot; §5 "quarantined modules on disk" overstates what remains.
+- `docs/V4_CLEANUP_LOG.md` — concise list of actually-removed surfaces; reflects current disk state.
+
+**Removed V3 paths** (all gone from disk): `utils/qc_task_runner.py`, `utils/checkpoint_manager.py`, `utils/oscillation_detector.py`, `utils/gau_xtb_interface.py`, `steps/stage_calculator.py`, `steps/anchor/`, `steps/step3_opt/`, `steps/conformer_search/{engine,funnel,candidates,state_manager}.py`, `steps/conformer_search/pipeline/`, `steps/step2_retro/{kinematic_stretcher,retro_scanner}.py`, `scheduling/`, `lewis_acid/`, `tests/deprecated_v3/`.
+
+**Repurposed survivors**: `steps/conformer_search/protocols.py` is now a V4-only contract (`SUPPORTED_PROTOCOLS = {"censo_lite"}`), not V3 multi-protocol machinery.
+
+**IRC scope rule**: The V3 implicit Berny→QST2→IRC fallback chain is banned. A scoped `RescueMethod.IRC_MIDPOINT_RECOVERY` survives in `steps/refinement/` for recovering a dipolar intermediate, gated by `defaults.yaml` keys `irc_midpoint_recovery` / `irc_max_iter` / `irc_direction`, and runs only after `valid_target_ts` validation — never as INT rescue, never with `UseHess`.

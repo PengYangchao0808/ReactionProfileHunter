@@ -8,8 +8,11 @@ last-valid frame before drift to the product. Every PATH frame is
 refined at ORCA B97-3c SP, and TS/INT are selected from the refined
 profile (PATH TS estimate first, Kneedle fallback).
 
-Only the canonical PEB+PATH flow is supported. The NEB-assisted flow
-and the corridor refinement have been removed entirely.
+Only the canonical PEB+PATH flow is supported. Its sole escalation is the
+single-ended ORCA B97-3c relaxed-scan rescue, and it is used only when
+topology drift persists from the first PATH frame so no usable path segment
+exists. The historical NEB-assisted flow and corridor refinement remain
+removed.
 
 ## WHERE TO LOOK
 
@@ -50,7 +53,10 @@ TS/INT seed selection from refined profile
 plot_scan_profile (xTB coarse overlay + B97-3c PATH curve)
    |
    v
-ts_guess.xyz, intermediate.xyz, scan_profile.json -> S3
+full-path-distortion gate -> S3 TS/INT seeds | B97-3c relaxed-scan rescue
+   |
+   v
+qualified ts_guess.xyz / intermediate.xyz, scan_profile.json -> S3
 ```
 
 ## NODE SELECTION CONTRACT
@@ -66,13 +72,17 @@ ts_guess.xyz, intermediate.xyz, scan_profile.json -> S3
 ## OUTPUTS
 
 - `ts_guess.xyz` - TS guess frame for S3 OptTS
-- `intermediate.xyz` - optional INT guess frame for S3 MIN optimization
+- `intermediate.xyz` - INT search seed for S3 MIN optimization; it may share
+  the TS frame and never claims a stationary point
 - `xtb_path/` - xTB PATH run directory with `xtbpath_NNN.xyz` and per-frame SP logs
 - `energy_refinement/` - B97-3c SP cache (SHA256-keyed)
-- `scan_profile.json` - schema `s2_scan_profile_v9`; contains coarse scan summary,
+- `scan_profile.json` - schema `s2_scan_profile_v10`; contains coarse scan summary,
   PATH metadata (barriers, estimated TS), all PATH frames with xTB and B97-3c
   energies, anchor payload, and selection records
 - `scan_profile.png` - the sole root-level S2 energy-profile figure
+- `rescue/scan_profile.json` and `rescue/scan_profile.png` - B97-3c
+  relaxed-scan profile and figure, written only for a full-path-distortion
+  rescue and rendered through the same S2 plotting entrypoint
 
 ## CONVENTIONS
 
@@ -89,6 +99,8 @@ ts_guess.xyz, intermediate.xyz, scan_profile.json -> S3
 
 - Reintroducing the corridor refinement or independent TS/INT windows.
 - Reintroducing NEB-assisted flow (`S2NEBCoordinator`, `IntermediateBasinFinder`).
+- Treating a TS/INT seed as proof of a stationary point, or using S2 seed
+  labels to decide an S3 endpoint/NEB workflow.
 - Running B97-3c SP only on a subset of PATH frames (must be full coverage).
 - Treating the absolute highest-energy point as the TS guess.
 - Direct QC subprocess calls or hard-coded scientific parameters.
