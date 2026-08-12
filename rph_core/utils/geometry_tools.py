@@ -293,6 +293,42 @@ class GeometryUtils:
         return float(rmsd)
 
 
+def kabsch_rmsd(coords1: np.ndarray, coords2: np.ndarray) -> float:
+    """
+    Kabsch-aligned RMSD between two coordinate sets.
+
+    Translates centroids to origin, finds optimal rotation via SVD,
+    and returns the RMSD of the aligned structures.
+
+    Uses the standard Kabsch algorithm with points stored as rows
+    (N×3 convention).  Cross-covariance H = X.T @ Y (3×3), then
+    R = U @ Vt from SVD(H).
+
+    Args:
+        coords1: Reference coordinates (N, 3).
+        coords2: Target coordinates (N, 3).
+
+    Returns:
+        RMSD in Å after optimal rotation and translation.
+    """
+    if coords1.shape != coords2.shape:
+        raise ValueError(f"Shape mismatch: {coords1.shape} vs {coords2.shape}")
+
+    c1 = coords1 - coords1.mean(axis=0)
+    c2 = coords2 - coords2.mean(axis=0)
+
+    cov = c1.T @ c2
+    u, _, vt = np.linalg.svd(cov)
+    rot = u @ vt
+    if np.linalg.det(rot) < 0:
+        vt[-1, :] *= -1
+        rot = u @ vt
+
+    aligned = c2 @ rot.T
+    diff = c1 - aligned
+    return float(np.sqrt(np.mean(np.sum(diff ** 2, axis=1))))
+
+
 class BondOperations:
     """
     键操作类（通用工具）

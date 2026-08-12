@@ -206,6 +206,15 @@ class MethodRegistry:
             self_contained=True,
             gradients_supported=True,
         ),
+        "GFN2-XTB": MethodProfile(
+            family="semiempirical_xtb",
+            base_method="GFN2-xTB",
+            scf_default=SCFSpec(accel="none", aux_j=None),
+            correlation_default=CorrelationSpec(model="none", aux_c=None),
+            dispersion_default=DispersionSpec(mode="forbidden", keyword=None),
+            self_contained=True,
+            gradients_supported=True,
+        ),
         "DLPNO-CCSD(T)": MethodProfile(
             family="post_hf_dlpno",
             base_method="DLPNO-CCSD(T)",

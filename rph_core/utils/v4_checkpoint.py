@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
+
+from rph_core.utils.json_io import write_json_atomic
+from rph_core.utils.run_id import RUN_ID_FIELD, is_valid_run_id
+
+
+logger = logging.getLogger(__name__)
 
 
 STATE_SCHEMA_V1 = "rph_v4_s0_s4_v1"
@@ -54,10 +62,11 @@ class V4Checkpoint:
         self.work_dir = Path(work_dir)
         self.path = self.work_dir / self.filename
         self.legacy_variant_path = self.work_dir / ".rph" / "checkpoint.json"
+        self.run_id: Optional[str] = None
 
     @staticmethod
     def _empty_state() -> Dict[str, Any]:
-        return {"schema_version": STATE_SCHEMA_V2, "stages": {}}
+        return {"schema_version": STATE_SCHEMA_V2, RUN_ID_FIELD: None, "stages": {}}
 
     def load(self) -> Dict[str, Any]:
         changed = False
@@ -78,11 +87,26 @@ class V4Checkpoint:
                     f"Unsupported RPH V4 pipeline state schema: {schema!r}"
                 )
 
+        if RUN_ID_FIELD not in data:
+            data[RUN_ID_FIELD] = None
+            changed = True
+        elif data.get(RUN_ID_FIELD) not in (None, "legacy") and not is_valid_run_id(
+            data.get(RUN_ID_FIELD)
+        ):
+            logger.warning(
+                "Invalid checkpoint run_id %r in %s; normalizing to None",
+                data.get(RUN_ID_FIELD),
+                self.path,
+            )
+            data[RUN_ID_FIELD] = None
+            changed = True
+
         if not data.get("legacy_variant_checkpoint_imported"):
             changed = self._import_legacy_variant_state(data) or changed
             data["legacy_variant_checkpoint_imported"] = True
             changed = True
 
+        self.run_id = data.get(RUN_ID_FIELD)
         if changed:
             self.save(data)
         return data
@@ -150,11 +174,8 @@ class V4Checkpoint:
     def save(self, data: Dict[str, Any]) -> None:
         self.work_dir.mkdir(parents=True, exist_ok=True)
         data["schema_version"] = STATE_SCHEMA_V2
-        temporary = self.path.with_name(f"{self.path.name}.tmp")
-        temporary.write_text(
-            json.dumps(data, indent=2, default=str), encoding="utf-8"
-        )
-        temporary.replace(self.path)
+        data[RUN_ID_FIELD] = self.run_id
+        write_json_atomic(self.path, data)
 
     def write_config_snapshot(self, config: Mapping[str, Any]) -> Path:
         """Write the immutable configuration used to start a result directory."""
@@ -163,20 +184,33 @@ class V4Checkpoint:
         if path.exists():
             return path
         self.work_dir.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f"{path.name}.tmp")
-        temporary.write_text(
-            json.dumps(
-                {
-                    "schema_version": "rph_v4_run_config_v1",
-                    "config": dict(config),
-                },
-                indent=2,
-                default=str,
-            ),
-            encoding="utf-8",
+        write_json_atomic(
+            path,
+            {
+                "schema_version": "rph_v4_run_config_v1",
+                "config": dict(config),
+            },
         )
-        temporary.replace(path)
         return path
+
+    def set_run_id(self, run_id: str) -> None:
+        if not is_valid_run_id(run_id):
+            raise ValueError(f"Invalid run_id: {run_id!r}")
+        state = self.load()
+        if state.get(RUN_ID_FIELD) == run_id:
+            self.run_id = run_id
+            return
+        if state.get(RUN_ID_FIELD) in (None, "legacy") and (
+            state.get("reaction_id") or state.get("stages")
+        ):
+            logger.warning(
+                "Resuming across runs (old run_id=%s, new run_id=%s)",
+                state.get(RUN_ID_FIELD),
+                run_id,
+            )
+        state[RUN_ID_FIELD] = run_id
+        self.run_id = run_id
+        self.save(state)
 
     def set_reaction_id(self, reaction_id: str) -> None:
         state = self.load()
@@ -275,6 +309,11 @@ class V4Checkpoint:
             stage, signature, manifest, scope=self._normalized_scope(scope, stage)
         ).reusable
 
+    def has_stage(self, stage_name: str) -> bool:
+        state = self.load()
+        stages = state.get("stages", {}) or {}
+        return stage_name in stages
+
     @staticmethod
     def payload_differences(
         recorded: Any, current: Any
@@ -306,6 +345,29 @@ class V4Checkpoint:
         start = self.stage_order.index(stage)
         for downstream in self.stage_order[start:]:
             stages.pop(downstream, None)
+        self.save(state)
+
+    def mark_recovered(self, stage_name: str, *, status: str) -> None:
+        state = self.load()
+        stages = state.setdefault("stages", {})
+        entry = stages.get(stage_name)
+        if not isinstance(entry, dict):
+            logger.warning(
+                "Cannot mark recovered stage %s in %s because no checkpoint entry exists",
+                stage_name,
+                self.path,
+            )
+            return
+        if (
+            entry.get("status") == status
+            and entry.get("recovery_status") == status
+            and isinstance(entry.get("recovered_at"), str)
+            and entry.get("recovered_at")
+        ):
+            return
+        entry["status"] = status
+        entry["recovery_status"] = status
+        entry["recovered_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self.save(state)
 
     def mark(
@@ -393,8 +455,9 @@ class V4Checkpoint:
             "status": "failed",
             "error": error,
         }
-        if signature_payload is not None:
-            value["signature_payload"] = dict(signature_payload)
+        payload = self._signature_payload_with_run_id(signature_payload)
+        if payload is not None:
+            value["signature_payload"] = payload
         if normalized_scope is None:
             stage_record.update(value)
         else:
@@ -421,8 +484,8 @@ class V4Checkpoint:
             stages.pop(downstream, None)
         self.save(state)
 
-    @staticmethod
     def _entry(
+        self,
         signature: str,
         manifest: Path,
         status: str,
@@ -433,9 +496,20 @@ class V4Checkpoint:
             "manifest": str(Path(manifest).resolve()),
             "status": status,
         }
-        if signature_payload is not None:
-            value["signature_payload"] = dict(signature_payload)
+        payload = self._signature_payload_with_run_id(signature_payload)
+        if payload is not None:
+            value["signature_payload"] = payload
         return value
+
+    def _signature_payload_with_run_id(
+        self,
+        signature_payload: Optional[Mapping[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if signature_payload is None and self.run_id is None:
+            return None
+        payload = dict(signature_payload or {})
+        payload[RUN_ID_FIELD] = self.run_id
+        return payload
 
     def _get_entry(
         self, state: Mapping[str, Any], stage: str, scope: Optional[str]

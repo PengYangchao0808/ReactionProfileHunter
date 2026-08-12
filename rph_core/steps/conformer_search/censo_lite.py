@@ -40,12 +40,16 @@ from rph_core.steps.conformer_search.censo_lite_runtime import CensoLiteRuntime,
 from rph_core.steps.conformer_search.deduplicator import DedupCandidate, TorsionAwareDeduplicator
 from rph_core.steps.conformer_search.ensemble_thermo import calculate_ensemble_thermodynamics
 from rph_core.steps.conformer_search.torsion_signature import signatures_equivalent
+from rph_core.utils.atom_mapping import bind_atom_mapping_to_xyz
 from rph_core.utils.constants import HARTREE_TO_KCAL
+from rph_core.utils.json_io import write_json_atomic
+from rph_core.utils.provenance import build_provenance, sha256_of_file
 from rph_core.utils.resource_utils import mem_to_mb
+from rph_core.utils.run_id import RUN_ID_FIELD
 
 logger = logging.getLogger(__name__)
 
-S1_MANIFEST_SCHEMA_VERSION = "s1_censo_light_ranking_v3"
+S1_MANIFEST_SCHEMA_VERSION = "s1_censo_light_ranking_v4"
 
 
 @dataclass(frozen=True)
@@ -69,6 +73,9 @@ class CensoLiteEngine:
         work_dir: Path,
         molecule_name: str,
         event_callback: Callable[[str, Dict[str, Any]], None] | None = None,
+        run_id: Optional[str] = None,
+        s0_mechanism_json_path: Path | None = None,
+        forming_bonds: Sequence[Sequence[int]] | None = None,
     ):
         self.config = copy.deepcopy(config)
         step1 = self.config.setdefault("step1", {})
@@ -85,6 +92,11 @@ class CensoLiteEngine:
         self.deduplicator = TorsionAwareDeduplicator(lite.get("deduplication", {}))
         self.lite_config = lite
         self._event_callback = event_callback
+        self.run_id = run_id
+        self.s0_mechanism_json_path = (
+            Path(s0_mechanism_json_path) if s0_mechanism_json_path is not None else None
+        )
+        self.forming_bonds = forming_bonds
         if event_callback is not None and hasattr(self.engine, "set_event_callback"):
             self.engine.set_event_callback(lambda event, payload: self._emit(event, **payload))
 
@@ -798,9 +810,12 @@ class CensoLiteEngine:
                     and getattr(thermo_result, "success", False)
                     and getattr(thermo_result, "g_rrho_correction_hartree", None) is not None
                 )
+                thermo_correction = getattr(
+                    thermo_result, "g_rrho_correction_hartree", None
+                )
                 correction = (
-                    float(thermo_result.g_rrho_correction_hartree)
-                    if success
+                    float(thermo_correction)
+                    if success and thermo_correction is not None
                     else None
                 )
                 ledger = {
@@ -1322,7 +1337,7 @@ class CensoLiteEngine:
         )
         if thermochemistry_status != "complete":
             minimum = min(record.score for record in records)
-            annotated: List[DedupCandidate] = []
+            annotated_records: List[DedupCandidate] = []
             for record in records:
                 metadata = dict(record.metadata)
                 metadata.update(
@@ -1336,10 +1351,10 @@ class CensoLiteEngine:
                         "boltzmann_population": None,
                     }
                 )
-                annotated.append(
+                annotated_records.append(
                     DedupCandidate(record.path, record.score, record.signature, metadata)
                 )
-            return annotated, {
+            return annotated_records, {
                 "status": thermochemistry_status,
                 "temperature_k": temperature,
                 "ensemble_member_count": len(records),
@@ -1500,6 +1515,7 @@ class CensoLiteEngine:
         manifest = {
             "schema_version": self.manifest_schema_version,
             "stage": "S1",
+            RUN_ID_FIELD: self.run_id,
             "protocol_id": "censo_light_inspired",
             "protocol": {
                 "family": "CENSO-light-inspired",
@@ -1544,10 +1560,32 @@ class CensoLiteEngine:
             "representative_candidates": representative_ids,
             "selected": selected_id,
             "selected_xyz": "selected.xyz",
+            "atom_mapping_ref": "atom_mapping.json",
+            "atom_mapping_status": "verified",
             "deprecated_fields": ["selected", "representative_candidates"],
         }
+        selected_candidate = manifest_candidates[0]
+        selected_src = self.work_dir / str(selected_candidate["xyz"])
+        selected_dst = output_dir / "selected.xyz"
+        _ = shutil.copy2(selected_src, selected_dst)
+        mapping_path = bind_atom_mapping_to_xyz(
+            output_dir / "initial_atom_mapping.json",
+            selected_dst,
+            output_dir / "atom_mapping.json",
+        )
+        mapping_payload = json.loads(mapping_path.read_text(encoding="utf-8"))
+        manifest["provenance"] = build_provenance(
+            run_id=self.run_id,
+            schema_version=str(manifest["schema_version"]),
+            protocol_version=None,
+            parent_manifest_paths={"s0": self.s0_mechanism_json_path},
+            atom_mapping_payload=mapping_payload,
+            forming_bonds=self.forming_bonds,
+            variant_manifest_path=None,
+            extra={"selected_xyz_hash": sha256_of_file(selected_dst)},
+        ).to_dict()
         manifest_path = output_dir / "manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+        write_json_atomic(manifest_path, manifest)
         top_population = [
             {
                 "id": row.get("id"),
@@ -1575,8 +1613,9 @@ class CensoLiteEngine:
             ),
             thermochemistry_complete=thermo_payload.get("thermochemistry_complete"),
         )
-        selected_candidate = manifest_candidates[0]
-        selected_src = self.work_dir / str(selected_candidate["xyz"])
-        selected_dst = output_dir / "selected.xyz"
-        _ = shutil.copy2(selected_src, selected_dst)
-        return {"manifest": manifest_path, "selected_xyz": selected_dst, "data": manifest}
+        return {
+            "manifest": manifest_path,
+            "selected_xyz": selected_dst,
+            "atom_mapping": mapping_path,
+            "data": manifest,
+        }

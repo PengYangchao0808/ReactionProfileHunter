@@ -64,6 +64,9 @@ class UiStep:
     method: str = ""
     output: str = ""
     error: str = ""
+    s2_state: str = ""
+    seed_evidence: str = ""
+    selection_source: str = ""
     detail: dict[str, Any] = field(default_factory=dict)
 
 
@@ -90,6 +93,7 @@ class UiStructure:
     source: str
     status: UiStatus
     current_task: str | None
+    current_step: str = ""
     tasks: dict[str, UiTask] = field(default_factory=dict)
     usable_for_ml: bool = False
     error: str | None = None
@@ -99,6 +103,9 @@ class UiStructure:
     ts_quality_summary: str = ""
     ml_reason: str = ""
     fallback_source: str = ""
+    s2_state: str = ""
+    seed_evidence: str = ""
+    selection_source: str = ""
 
 
 def _coerce_float(value: Any) -> float | None:
@@ -158,6 +165,9 @@ def adapt_step(step_id: str, data: dict[str, Any]) -> UiStep:
         method=str(payload.get("method") or ""),
         output=str(payload.get("output") or ""),
         error=str(payload.get("error") or ""),
+        s2_state=str(payload.get("s2_state") or ""),
+        seed_evidence=str(payload.get("seed_evidence") or ""),
+        selection_source=str(payload.get("selection_source") or ""),
         detail={key: value for key, value in payload.items() if key not in known},
     )
 
@@ -215,6 +225,32 @@ def adapt_s4_structures(raw_status: dict[str, Any]) -> list[UiStructure]:
     if isinstance(structures, dict):
         return [adapt_one(structure_id, data) for structure_id, data in structures.items()]
     return []
+
+
+def _current_step_from_steps(steps: Any, fallback_task: str | None) -> str:
+    """Resolve the active S*.x step from the manifest steps[] array."""
+    if isinstance(steps, (list, tuple)):
+        pending: list[str] = []
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            status = str(step.get("status") or "")
+            code = str(step.get("code") or "")
+            if not code:
+                continue
+            if status in {"complete", "skipped", "not_run"}:
+                continue
+            pending.append(code)
+        if pending:
+            return pending[0]
+    if fallback_task:
+        return {
+            "warmup": "S3.1",
+            "optimization": "S3.2",
+            "frequency": "S3.3",
+            "single_point": "S3.6",
+        }.get(str(fallback_task).lower(), "")
+    return ""
 
 
 def adapt_one(structure_id: str, data: dict[str, Any]) -> UiStructure:
@@ -279,6 +315,10 @@ def adapt_one(structure_id: str, data: dict[str, Any]) -> UiStructure:
         ),
         status=normalize_status(payload.get("status")),
         current_task=str(payload.get("current_task")) if payload.get("current_task") else None,
+        current_step=_current_step_from_steps(
+            payload.get("steps"),
+            str(payload.get("current_task")) if payload.get("current_task") else None,
+        ),
         tasks=tasks,
         usable_for_ml=bool(payload.get("usable_for_ml", False)),
         error=str(payload.get("error")) if payload.get("error") not in (None, "") else None,
@@ -301,4 +341,7 @@ def adapt_one(structure_id: str, data: dict[str, Any]) -> UiStructure:
             or ""
         ),
         fallback_source=str(payload.get("fallback_source") or payload.get("fallback_xyz") or ""),
+        s2_state=str(payload.get("s2_state") or ""),
+        seed_evidence=str(payload.get("seed_evidence") or ""),
+        selection_source=str(payload.get("selection_source") or ""),
     )

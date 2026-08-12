@@ -11,16 +11,33 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
+
+from rph_core.utils.run_id import RUN_ID_FIELD
 
 
 logger = logging.getLogger(__name__)
 
 
+def _now() -> float:
+    return time.time()
+
+
 def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _heartbeat_interval_seconds(config: Optional[Dict[str, Any]]) -> float:
+    ui_cfg = dict((config or {}).get("ui", {}) or {})
+    try:
+        return max(0.01, float(ui_cfg.get("heartbeat_seconds", 30)))
+    except (TypeError, ValueError):
+        return 30.0
 
 
 class S4ProgressReporter:
@@ -33,34 +50,54 @@ class S4ProgressReporter:
         output_dir: Path,
         structures: Iterable[Dict[str, Any]],
         event_callback: Callable[[str, dict[str, Any]], None] | None = None,
+        run_id: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
     ):
         self.output_dir = Path(output_dir)
         self.status_path = self.output_dir / "status.json"
         self.events_path = self.output_dir / "events.jsonl"
         self.log_path = self.output_dir / "s4.log"
         self._event_callback = event_callback
+        self.run_id = run_id
+        self._lock = threading.RLock()
+        self._pid = os.getpid()
+        self.heartbeat_interval_seconds = _heartbeat_interval_seconds(config)
+        self._structures_by_id: Dict[str, Dict[str, Any]] = {}
+
         structure_rows: List[Dict[str, Any]] = []
         for structure in structures:
-            structure_rows.append(
-                {
-                    "id": str(structure["id"]),
-                    "kind": str(structure.get("kind", "minimum")),
-                    "input_source": "S3_OPT" if structure.get("opt_xyz") else "S3_fallback",
-                    "geometry_source": "S3_OPT" if structure.get("opt_xyz") else "S3_input_fallback",
-                    "fallback_source": structure.get("fallback_xyz"),
-                    "source_s3": dict(structure.get("source_s3") or {}),
-                    "status": "pending",
-                    "current_task": None,
-                    "tasks": {},
-                    "usable_for_ml": False,
-                    "error": None,
-                }
-            )
+            row = {
+                "id": str(structure["id"]),
+                "kind": str(structure.get("kind", "minimum")),
+                "input_source": "S3_OPT" if structure.get("opt_xyz") else "S3_fallback",
+                "geometry_source": "S3_OPT" if structure.get("opt_xyz") else "S3_input_fallback",
+                "fallback_source": structure.get("fallback_xyz"),
+                "source_s3": dict(structure.get("source_s3") or {}),
+                "status": "pending",
+                "current_task": None,
+                "tasks": {},
+                "usable_for_ml": False,
+                "error": None,
+                "started_at": None,
+                "finished_at": None,
+                "pid": None,
+                "sandbox_path": None,
+                "last_output_update": None,
+                "heartbeat_at": None,
+            }
+            structure_rows.append(row)
+            self._structures_by_id[row["id"]] = row
+
         now = _timestamp()
+        heartbeat_now = _now()
         self.state: Dict[str, Any] = {
             "schema_version": self.schema_version,
             "stage": "S4",
+            RUN_ID_FIELD: self.run_id,
             "status": "running",
+            "pid": self._pid,
+            "heartbeat_at": heartbeat_now,
+            "heartbeat_interval_seconds": self.heartbeat_interval_seconds,
             "started_at": now,
             "updated_at": now,
             "finished_at": None,
@@ -72,45 +109,50 @@ class S4ProgressReporter:
         self.emit("stage_started", total_structures=len(structure_rows))
 
     def start_structure(self, structure_id: str) -> None:
-        row = self._structure(structure_id)
-        if row is None:
-            return
-        row["status"] = "running"
-        row["error"] = None
-        self._touch()
+        with self._lock:
+            row = self._structure_unlocked(structure_id)
+            if row is None:
+                return
+            row["status"] = "running"
+            row["error"] = None
+            row["started_at"] = row.get("started_at") or _timestamp()
+            row["finished_at"] = None
+            self._touch_structure_unlocked(row, refresh_output=False)
         self.emit("structure_started", structure_id=structure_id, kind=row["kind"])
 
     def finish_structure(self, payload: Dict[str, Any]) -> None:
         structure_id = str(payload["id"])
-        row = self._structure(structure_id)
-        if row is None:
-            return
-        row["status"] = str(payload.get("status", "failed"))
-        row["current_task"] = None
-        row["usable_for_ml"] = bool(payload.get("usable_for_ml", False))
-        row["error"] = payload.get("error")
-        row["sp_energy_hartree"] = payload.get("sp_energy_hartree")
-        row["ts_frequency_valid"] = payload.get("ts_frequency_valid")
-        row["minimum_frequency_valid"] = payload.get("minimum_frequency_valid")
-        row["gibbs_free_energy_hartree"] = payload.get("gibbs_free_energy_hartree")
-        row["composite_gibbs_free_energy_hartree"] = payload.get(
-            "composite_gibbs_free_energy_hartree"
-        )
-        row["ts_mode_displacement_verified"] = payload.get("ts_mode_displacement_verified")
-        row["frequency_count_valid"] = payload.get("frequency_count_valid")
-        row["mode_displacement_valid"] = payload.get("mode_displacement_valid")
-        row["irc_valid"] = payload.get("irc_valid")
-        row["ts_quality_summary"] = payload.get("ts_quality_summary")
-        row["imaginary_frequencies_cm1"] = payload.get("imaginary_frequencies_cm1") or payload.get(
-            "imaginary_frequencies"
-        )
-        row["ml_exclusion_reason"] = payload.get("ml_exclusion_reason") or (
-            payload.get("error") if not row["usable_for_ml"] else None
-        )
-        row["geometry_source"] = (
-            "S4_OPT" if payload.get("opt_xyz") else row.get("geometry_source")
-        )
-        self._touch()
+        with self._lock:
+            row = self._structure_unlocked(structure_id)
+            if row is None:
+                return
+            row["status"] = str(payload.get("status", "failed"))
+            row["current_task"] = None
+            row["usable_for_ml"] = bool(payload.get("usable_for_ml", False))
+            row["error"] = payload.get("error")
+            row["sp_energy_hartree"] = payload.get("sp_energy_hartree")
+            row["ts_frequency_valid"] = payload.get("ts_frequency_valid")
+            row["minimum_frequency_valid"] = payload.get("minimum_frequency_valid")
+            row["gibbs_free_energy_hartree"] = payload.get("gibbs_free_energy_hartree")
+            row["composite_gibbs_free_energy_hartree"] = payload.get(
+                "composite_gibbs_free_energy_hartree"
+            )
+            row["ts_mode_displacement_verified"] = payload.get("ts_mode_displacement_verified")
+            row["frequency_count_valid"] = payload.get("frequency_count_valid")
+            row["mode_displacement_valid"] = payload.get("mode_displacement_valid")
+            row["irc_valid"] = payload.get("irc_valid")
+            row["ts_quality_summary"] = payload.get("ts_quality_summary")
+            row["imaginary_frequencies_cm1"] = payload.get("imaginary_frequencies_cm1") or payload.get(
+                "imaginary_frequencies"
+            )
+            row["ml_exclusion_reason"] = payload.get("ml_exclusion_reason") or (
+                payload.get("error") if not row["usable_for_ml"] else None
+            )
+            row["geometry_source"] = (
+                "S4_OPT" if payload.get("opt_xyz") else row.get("geometry_source")
+            )
+            row["finished_at"] = _timestamp()
+            self._touch_structure_unlocked(row)
         self.emit(
             "structure_finished",
             structure_id=structure_id,
@@ -130,57 +172,86 @@ class S4ProgressReporter:
         )
 
     def fail_structure(self, structure_id: str, error: str) -> None:
-        row = self._structure(structure_id)
-        if row is None:
-            return
-        row["status"] = "failed"
-        row["current_task"] = None
-        row["error"] = error
-        self._touch()
+        with self._lock:
+            row = self._structure_unlocked(structure_id)
+            if row is None:
+                return
+            row["status"] = "failed"
+            row["current_task"] = None
+            row["error"] = error
+            row["finished_at"] = _timestamp()
+            self._touch_structure_unlocked(row)
         self.emit("structure_failed", structure_id=structure_id, error=error)
 
     def calculator_event(self, event: str, payload: Dict[str, Any]) -> None:
         """Receive lifecycle callbacks from :class:`StageCalculator`."""
 
         structure_id = str(payload.get("structure_id", ""))
-        row = self._structure(structure_id)
-        if row is None:
-            return
-        task, _, action = event.rpartition("_")
-        if action not in {"started", "finished", "skipped"}:
-            self.emit(event, **payload)
-            return
-        task_state = dict(row["tasks"].get(task, {}))
-        task_state.update(
-            {
-                "status": "running" if action == "started" else str(payload.get("status", "skipped")),
-                "engine": payload.get("engine"),
-                "method": payload.get("method"),
-                "solvent": payload.get("solvent"),
-                "solvent_model": payload.get("solvent_model"),
-                "output": payload.get("output"),
-                "energy_hartree": payload.get("energy_hartree"),
-                "error": payload.get("error"),
-            }
-        )
-        if action == "started":
-            task_state["started_at"] = task_state.get("started_at") or _timestamp()
-            task_state["finished_at"] = None
-        else:
-            task_state["finished_at"] = _timestamp()
-        row["tasks"][task] = task_state
-        row["current_task"] = task if action == "started" else None
-        self._touch()
+        with self._lock:
+            row = self._structure_unlocked(structure_id)
+            if row is None:
+                return
+            task, _, action = event.rpartition("_")
+            if action not in {"started", "finished", "skipped"}:
+                self._touch_structure_unlocked(row)
+                self.emit(event, **payload)
+                return
+            task_state = dict(row["tasks"].get(task, {}))
+            task_state.update(
+                {
+                    "status": "running" if action == "started" else str(payload.get("status", "skipped")),
+                    "engine": payload.get("engine"),
+                    "method": payload.get("method"),
+                    "solvent": payload.get("solvent"),
+                    "solvent_model": payload.get("solvent_model"),
+                    "output": payload.get("output"),
+                    "energy_hartree": payload.get("energy_hartree"),
+                    "error": payload.get("error"),
+                }
+            )
+            if action == "started":
+                task_state["started_at"] = task_state.get("started_at") or _timestamp()
+                task_state["finished_at"] = None
+                row["status"] = "running"
+                row["started_at"] = row.get("started_at") or _timestamp()
+            else:
+                task_state["finished_at"] = _timestamp()
+            row["tasks"][task] = task_state
+            row["current_task"] = task if action == "started" else None
+            self._touch_structure_unlocked(row)
         self.emit(event, **payload)
+
+    def report_structure_subprocess(
+        self,
+        structure_id: str,
+        *,
+        pid: int | None,
+        sandbox_path: str | None,
+    ) -> None:
+        with self._lock:
+            row = self._structure_unlocked(structure_id)
+            if row is None:
+                return
+            row["pid"] = pid
+            row["sandbox_path"] = sandbox_path
+            self._touch_structure_unlocked(row)
+
+    def touch_structure_heartbeat(self, structure_id: str) -> None:
+        with self._lock:
+            row = self._structure_unlocked(structure_id)
+            if row is None:
+                return
+            self._touch_structure_unlocked(row)
 
     def finish_stage(self, manifest_path: Path, results: Iterable[Dict[str, Any]]) -> None:
         materialized = list(results)
         failed = sum(1 for item in materialized if str(item.get("status")) == "failed")
         noncomplete = sum(1 for item in materialized if str(item.get("status")) != "complete")
-        self.state["status"] = "completed" if noncomplete == 0 else "completed_with_failures"
-        self.state["finished_at"] = _timestamp()
-        self.state["manifest"] = str(Path(manifest_path))
-        self._touch()
+        with self._lock:
+            self.state["status"] = "completed" if noncomplete == 0 else "completed_with_failures"
+            self.state["finished_at"] = _timestamp()
+            self.state["manifest"] = str(Path(manifest_path))
+            self._touch_unlocked()
         self.emit(
             "stage_finished",
             status=self.state["status"],
@@ -197,6 +268,7 @@ class S4ProgressReporter:
             "schema_version": self.schema_version,
             "timestamp": _timestamp(),
             "stage": "S4",
+            RUN_ID_FIELD: self.run_id,
             "event": event,
             **payload,
         }
@@ -223,9 +295,22 @@ class S4ProgressReporter:
                 logger.warning("Ignoring S4 UI callback failure for %s: %s", event, exc)
 
     def _touch(self) -> None:
+        with self._lock:
+            self._touch_unlocked()
+
+    def _touch_unlocked(self) -> None:
         self.state["updated_at"] = _timestamp()
+        self.state["heartbeat_at"] = _now()
         self._refresh_summary()
         self._write_snapshot()
+
+    def _touch_structure_unlocked(self, row: Dict[str, Any], *, refresh_output: bool = True) -> None:
+        row["heartbeat_at"] = _now()
+        if refresh_output:
+            latest_output_update = self._latest_output_update(row.get("sandbox_path"))
+            if latest_output_update is not None or row.get("last_output_update") is None:
+                row["last_output_update"] = latest_output_update
+        self._touch_unlocked()
 
     def _refresh_summary(self) -> None:
         rows = list(self.state["structures"])
@@ -252,12 +337,33 @@ class S4ProgressReporter:
         except OSError as exc:
             logger.warning("Could not write S4 status snapshot: %s", exc)
 
-    def _structure(self, structure_id: str) -> Optional[Dict[str, Any]]:
-        for row in self.state["structures"]:
-            if row["id"] == structure_id:
-                return row
+    def _structure_unlocked(self, structure_id: str) -> Optional[Dict[str, Any]]:
+        row = self._structures_by_id.get(structure_id)
+        if row is not None:
+            return row
         logger.warning("Ignoring S4 progress event for unknown structure %s", structure_id)
         return None
+
+    @staticmethod
+    def _latest_output_update(sandbox_path: Any) -> Optional[float]:
+        if sandbox_path in (None, ""):
+            return None
+        try:
+            root = Path(str(sandbox_path))
+        except (TypeError, ValueError):
+            return None
+        if not root.exists():
+            return None
+        latest: Optional[float] = None
+        try:
+            for candidate in root.rglob("*.out"):
+                if not candidate.is_file():
+                    continue
+                candidate_mtime = candidate.stat().st_mtime
+                latest = candidate_mtime if latest is None else max(latest, candidate_mtime)
+        except OSError:
+            return latest
+        return latest
 
     @staticmethod
     def _human_line(record: Dict[str, Any]) -> str:

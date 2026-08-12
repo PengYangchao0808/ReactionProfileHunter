@@ -9,6 +9,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from rph_core.utils.run_id import RUN_ID_FIELD
+
 
 _TERMINAL_EVENTS = {"structure_finished", "structure_failed"}
 
@@ -20,6 +22,7 @@ class DashboardState:
     stages: dict[str, dict[str, Any]] = field(default_factory=dict)
     active_stage: str | None = None
     reaction_id: str = ""
+    run_id: str = ""
     condition_signature: str = ""
     resources: dict[str, Any] = field(default_factory=dict)
     log_path: str = ""
@@ -126,6 +129,8 @@ class DashboardStateReducer:
         self._state.reaction_id = str(
             payload.get("reaction_id") or payload.get("rx_id") or self._state.reaction_id
         )
+        if not self._state.run_id and payload.get(RUN_ID_FIELD) not in (None, ""):
+            self._state.run_id = str(payload.get(RUN_ID_FIELD))
         self._state.condition_signature = str(
             payload.get("condition_signature") or self._state.condition_signature
         )
@@ -147,7 +152,7 @@ class DashboardStateReducer:
         step_id = str(payload.get("step") or payload.get("step_id") or "step")
         variant = str(payload.get("variant") or "")
         key = f"{variant}:{step_id}" if variant else step_id
-        row = dict(stage["steps"].get(key) or {})
+        row: dict[str, Any] = dict(stage["steps"].get(key) or {})
         row.update(payload)
         row["key"] = key
         if event in {"step_started", "step_heartbeat"}:
@@ -166,8 +171,8 @@ class DashboardStateReducer:
     @staticmethod
     def _apply_batch(stage: dict[str, Any], event: str, payload: dict[str, Any]) -> None:
         batch_id = str(payload.get("batch") or payload.get("batch_id") or "batch")
-        row = dict(stage["batches"].get(batch_id) or {"active_jobs": {}})
-        active = dict(row.get("active_jobs") or {})
+        row: dict[str, Any] = dict(stage["batches"].get(batch_id) or {"active_jobs": {}})
+        active: dict[str, Any] = dict(row.get("active_jobs") or {})
         row.update(payload)
         row["active_jobs"] = active
         if event == "batch_started":
@@ -184,9 +189,9 @@ class DashboardStateReducer:
     def _apply_batch_job(stage: dict[str, Any], event: str, payload: dict[str, Any]) -> None:
         batch_id = str(payload.get("batch") or "batch")
         job_id = str(payload.get("job_id") or payload.get("current") or "job")
-        batch = dict(stage["batches"].get(batch_id) or {"label": batch_id})
-        active = dict(batch.get("active_jobs") or {})
-        row = dict(active.get(job_id) or {})
+        batch: dict[str, Any] = dict(stage["batches"].get(batch_id) or {"label": batch_id})
+        active: dict[str, dict[str, Any]] = dict(batch.get("active_jobs") or {})
+        row: dict[str, Any] = dict(active.get(job_id) or {})
         row.update(payload)
         row["id"] = job_id
         if event in {"batch_job_started", "batch_job_heartbeat", "batch_job_retry"}:
@@ -203,8 +208,10 @@ class DashboardStateReducer:
         structure_id = str(payload.get("structure_id") or payload.get("id") or "").strip()
         if not structure_id:
             return
-        row = dict(stage["structures"].get(structure_id) or {"tasks": {}, "status": "pending"})
-        tasks = copy.deepcopy(row.get("tasks") or {})
+        row: dict[str, Any] = dict(
+            stage["structures"].get(structure_id) or {"tasks": {}, "status": "pending"}
+        )
+        tasks: dict[str, dict[str, Any]] = copy.deepcopy(row.get("tasks") or {})
         row.update(payload)
         row["tasks"] = tasks
         row["id"] = structure_id
@@ -213,7 +220,7 @@ class DashboardStateReducer:
         if action in {"started", "finished", "skipped"} and task_name in {
             "optimization", "frequency", "single_point"
         }:
-            task = dict(tasks.get(task_name) or {})
+            task: dict[str, Any] = dict(tasks.get(task_name) or {})
             task.update(payload)
             task["status"] = "running" if action == "started" else str(
                 payload.get("status") or ("skipped" if action == "skipped" else "complete")

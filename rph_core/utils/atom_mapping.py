@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from rdkit import Chem
+
 from rph_core.utils.file_io import read_xyz
 from rph_core.utils.path_compat import normalize_path
 
@@ -37,6 +39,9 @@ __all__ = [
     "build_product_smiles_to_xyz",
     "resolve_peb_forming_bonds",
     "write_peb_mapping",
+    "write_smiles_to_xyz_mapping",
+    "bind_atom_mapping_to_xyz",
+    "verify_atom_mapping_table",
 ]
 
 
@@ -95,6 +100,111 @@ def _normalize_element_symbol(value: object) -> str:
     if len(element) == 1:
         return element.upper()
     return element[0].upper() + element[1:].lower()
+
+
+def _xyz_elements(path: Path) -> List[str]:
+    try:
+        _coordinates, elements = read_xyz(normalize_path(path))
+    except (FileNotFoundError, OSError, ValueError, IndexError) as exc:
+        raise PebResolutionError(f"Failed to read XYZ atom order from {path}: {exc}") from exc
+    return [_normalize_element_symbol(element) for element in elements]
+
+
+def verify_atom_mapping_table(payload: Dict[str, object], xyz_path: Path) -> None:
+    """Fail fast unless a mapping table exactly matches an XYZ atom sequence."""
+
+    atoms = payload.get("atoms")
+    if not isinstance(atoms, list) or not atoms:
+        raise PebResolutionError("Atom mapping sidecar has no atoms table")
+    xyz_elements = _xyz_elements(xyz_path)
+    if len(atoms) != len(xyz_elements):
+        raise PebResolutionError(
+            f"Atom mapping/XYZ atom-count mismatch: mapping={len(atoms)} xyz={len(xyz_elements)}"
+        )
+    seen: set[int] = set()
+    for row_index, row in enumerate(atoms):
+        if not isinstance(row, dict):
+            raise PebResolutionError(f"atoms[{row_index}] must be an object")
+        try:
+            xyz_idx = int(row.get("xyz_idx"))
+        except (TypeError, ValueError) as exc:
+            raise PebResolutionError(f"atoms[{row_index}] has invalid xyz_idx") from exc
+        if xyz_idx in seen or xyz_idx != row_index:
+            raise PebResolutionError("Atom mapping XYZ indices must be unique and contiguous")
+        seen.add(xyz_idx)
+        expected = _normalize_element_symbol(row.get("element"))
+        if expected != xyz_elements[xyz_idx]:
+            raise PebResolutionError(
+                f"Atom order drift at XYZ idx {xyz_idx}: mapping={expected} xyz={xyz_elements[xyz_idx]}"
+            )
+
+
+def write_smiles_to_xyz_mapping(smiles: str, xyz_path: Path, output_path: Path) -> Path:
+    """Write the generation-time SMILES/QC atom table used by all later stages."""
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        raise PebResolutionError(f"Cannot build atom mapping for invalid SMILES: {smiles}")
+    mol = Chem.AddHs(mol)
+    hydrogen_ordinals: Dict[int, int] = {}
+    atoms: List[Dict[str, object]] = []
+    for atom in mol.GetAtoms():
+        idx = atom.GetIdx()
+        map_number = atom.GetAtomMapNum() or None
+        if atom.GetAtomicNum() == 1:
+            heavy_neighbors = [neighbor for neighbor in atom.GetNeighbors() if neighbor.GetAtomicNum() != 1]
+            parent = heavy_neighbors[0].GetIdx() if heavy_neighbors else -1
+            ordinal = hydrogen_ordinals.get(parent, 0) + 1
+            hydrogen_ordinals[parent] = ordinal
+            stable_id = f"H:parent:{parent}:{ordinal}"
+            atom_type = "hydrogen"
+        else:
+            stable_id = f"map:{map_number}" if map_number else f"product_local:{idx}"
+            atom_type = "organic_heavy"
+        atoms.append(
+            {
+                "stable_id": stable_id,
+                "map_number": map_number,
+                "smiles_idx": idx,
+                "xyz_idx": idx,
+                "element": atom.GetSymbol(),
+                "type": atom_type,
+            }
+        )
+    payload: Dict[str, object] = {
+        "schema_version": "s1_atom_mapping_v1",
+        "mapping_source": "rdkit_generation_sidecar",
+        "mapping_status": "verified",
+        "confidence": "high",
+        "reference_smiles": smiles,
+        "product_smiles_idx_space": EXPECTED_PRODUCT_SMILES_IDX_SPACE,
+        "xyz_ref": str(normalize_path(xyz_path)),
+        "xyz_sha256": _compute_file_hash(xyz_path),
+        "atoms": atoms,
+    }
+    verify_atom_mapping_table(payload, xyz_path)
+    normalized_output = normalize_path(output_path)
+    normalized_output.parent.mkdir(parents=True, exist_ok=True)
+    normalized_output.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return normalized_output
+
+
+def bind_atom_mapping_to_xyz(source_path: Path, xyz_path: Path, output_path: Path) -> Path:
+    """Verify unchanged atom order and bind an existing table to a new geometry."""
+
+    payload = _load_json_object(
+        normalize_path(source_path),
+        missing_message=f"Atom mapping sidecar not found: {source_path}",
+        label="atom mapping sidecar",
+    )
+    verify_atom_mapping_table(payload, xyz_path)
+    payload["xyz_ref"] = str(normalize_path(xyz_path))
+    payload["xyz_sha256"] = _compute_file_hash(xyz_path)
+    payload["mapping_status"] = "verified"
+    normalized_output = normalize_path(output_path)
+    normalized_output.parent.mkdir(parents=True, exist_ok=True)
+    normalized_output.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return normalized_output
 
 
 def _coerce_int_pair(raw_pair: object, *, context: str) -> Tuple[int, int]:
@@ -277,12 +387,17 @@ def load_s1_smiles_to_xyz_map(path: Path, product_xyz: Path) -> Dict[str, object
     if expected_hash is not None:
         actual_hash = _compute_file_hash(normalized_product_xyz)
         if actual_hash is not None and str(expected_hash) != actual_hash:
-            logger.warning(
-                "S1 smiles_to_xyz_map xyz_sha256 mismatch for %s: sidecar=%s actual=%s",
-                normalized_product_xyz,
-                expected_hash,
-                actual_hash,
+            raise PebResolutionError(
+                "S1 smiles_to_xyz_map xyz_sha256 mismatch for "
+                f"{normalized_product_xyz}: sidecar={expected_hash} actual={actual_hash}"
             )
+
+    # V4 generation sidecars contain a complete atom table and therefore gate
+    # the whole XYZ sequence.  Older validation fixtures may intentionally
+    # contain only mapped heavy atoms; their resolved indices are still gated
+    # below by resolve_peb_forming_bonds.
+    if payload.get("schema_version") == "s1_atom_mapping_v1":
+        verify_atom_mapping_table(payload, normalized_product_xyz)
 
     return payload
 

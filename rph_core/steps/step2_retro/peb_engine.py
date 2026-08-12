@@ -9,15 +9,18 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
+from rph_core.steps.step2_retro.path_profile import build_orca_scan_profile
+from rph_core.steps.step2_retro.path_profile import build_xtb_path_profile
+from rph_core.steps.step2_retro.path_selector import policy_from_config, select_path_seeds
 from rph_core.utils.file_io import read_xyz
 from rph_core.utils.bond_pairs import canonicalize_bond_pairs
 from rph_core.utils.geometry_tools import GeometryUtils, LogParser, kabsch_rmsd
 from rph_core.utils.json_io import write_text_atomic
 from rph_core.utils.log_manager import LoggerMixin
+from rph_core.utils.qc_interface import XTBInterface
 from rph_core.utils.naming_compat import (
     INTERMEDIATE_XYZ,
 )
-from rph_core.utils.qc_interface import XTBInterface
 from rph_core.utils.scan_profile_plotter import (
     HARTREE_TO_KCAL,
     compute_scan_distances,
@@ -28,6 +31,7 @@ from .energy_refinement import ScanEnergyRefiner
 from .geometry_guard import (
     check_scan_trajectory,
 )
+from .relaxed_scan_rescue import B97CRelaxedScanRescuer
 from .scan_trajectory import CompositeProfileBuilder, ScanAttempt, attempt_manifest
 
 logger = logging.getLogger(__name__)
@@ -51,6 +55,7 @@ class PEBScanEngine(LoggerMixin):
         self.molecule_name = molecule_name
         self.event_callback = event_callback
         self._active_scan_params: Dict[str, Any] = {}
+        self.last_profile_payload: Optional[Dict[str, Any]] = None
         self.logger.info("[S2] PEB scan engine initialized")
 
     def _emit_progress(self, event: str, **fields: Any) -> None:
@@ -340,7 +345,49 @@ class PEBScanEngine(LoggerMixin):
                 ).lower(),
                 "ts_min_prominence_kcal_mol": max(
                     0.0,
-                    float(selection_cfg.get("ts_min_prominence_kcal_mol", 0.15)),
+                    float(selection_cfg.get("ts_min_prominence_kcal_mol", 0.40)),
+                ),
+                "ts_min_clean_neighbors": max(
+                    1, int(selection_cfg.get("ts_min_clean_neighbors", 1))
+                ),
+                "valid_corridor_weak_peak_min_prominence_kcal_mol": max(
+                    0.0,
+                    float(
+                        selection_cfg.get(
+                            "valid_corridor_weak_peak_min_prominence_kcal_mol",
+                            0.10,
+                        )
+                    ),
+                ),
+                "valid_corridor_weak_peak_min_barrier_kcal_mol": max(
+                    0.0,
+                    float(
+                        selection_cfg.get(
+                            "valid_corridor_weak_peak_min_barrier_kcal_mol",
+                            3.0,
+                        )
+                    ),
+                ),
+                "ts_min_reactant_barrier_kcal_mol": max(
+                    0.0,
+                    float(selection_cfg.get("ts_min_reactant_barrier_kcal_mol", 3.0)),
+                ),
+                "require_intermediate": bool(selection_cfg.get("require_intermediate", False)),
+                "max_nonreactive_scaffold_rmsd_A": max(
+                    0.0,
+                    float(selection_cfg.get("max_nonreactive_scaffold_rmsd_A", 0.75)),
+                ),
+                "full_endpoint_min_clean_frames_from_boundary": max(
+                    1,
+                    int(
+                        selection_cfg.get(
+                            "full_endpoint_min_clean_frames_from_boundary", 3
+                        )
+                    ),
+                ),
+                "ts_seed_reactant_backoff_A": max(
+                    0.0,
+                    float(selection_cfg.get("ts_seed_reactant_backoff_A", 0.0)),
                 ),
                 "int_min_basin_prominence_kcal_mol": max(
                     0.0,
@@ -349,6 +396,56 @@ class PEBScanEngine(LoggerMixin):
                             "int_min_basin_prominence_kcal_mol", 0.50
                         )
                     ),
+                ),
+                "int_plateau_fallback_enabled": bool(
+                    selection_cfg.get("int_plateau_fallback_enabled", True)
+                ),
+                "int_plateau_min_consecutive_frames": max(
+                    2, int(selection_cfg.get("int_plateau_min_consecutive_frames", 3))
+                ),
+                "int_plateau_min_ts_separation_A": max(
+                    0.0,
+                    float(selection_cfg.get("int_plateau_min_ts_separation_A", 0.10)),
+                ),
+                "int_plateau_energy_window_kcal_mol": max(
+                    0.0,
+                    float(selection_cfg.get("int_plateau_energy_window_kcal_mol", 2.0)),
+                ),
+                "int_plateau_barrier_fraction": max(
+                    0.0,
+                    float(selection_cfg.get("int_plateau_barrier_fraction", 0.25)),
+                ),
+                "int_plateau_max_slope_kcal_mol_A": max(
+                    0.0,
+                    float(selection_cfg.get("int_plateau_max_slope_kcal_mol_A", 40.0)),
+                ),
+                "endpoint_exclusion_frames": max(
+                    0, int(selection_cfg.get("endpoint_exclusion_frames", 2))
+                ),
+                "min_reaction_progress": max(
+                    0.0,
+                    float(selection_cfg.get("min_reaction_progress", 0.35)),
+                ),
+                "min_valid_neighbor_window": max(
+                    1, int(selection_cfg.get("min_valid_neighbor_window", 1))
+                ),
+                "allow_monotonic_shoulder": bool(
+                    selection_cfg.get("allow_monotonic_shoulder", True)
+                ),
+                "shoulder_max_abs_slope_kcal_mol_per_A": max(
+                    0.0,
+                    float(
+                        selection_cfg.get(
+                            "shoulder_max_abs_slope_kcal_mol_per_A", 20.0
+                        )
+                    ),
+                ),
+                "shoulder_min_curvature_signal": max(
+                    0.0,
+                    float(selection_cfg.get("shoulder_min_curvature_signal", 0.05)),
+                ),
+                "allow_shared_search_seed": bool(
+                    selection_cfg.get("allow_shared_search_seed", True)
                 ),
             },
             "terminate_after_consecutive_off_path": int(
@@ -581,268 +678,139 @@ class PEBScanEngine(LoggerMixin):
         }
 
     @staticmethod
-    def _select_int_stable_point(
-        anchors: Dict[str, Any],
-        frame_paths: Sequence[Path],
-        reaction_coordinate: Sequence[float],
-        energies: Sequence[Optional[float]],
-        off_path_indices: Sequence[int],
-    ) -> Dict[str, Any]:
-        """Pick the topology-valid frame with the smallest local |gradient|
-        on the M -> last_valid plateau; fall back to the plateau midpoint
-        when there is insufficient derivative support.
+    def _select_reactant_side_ts_seed(
+        *,
+        peak_index: int,
+        forming_bond_distances: Sequence[Optional[Sequence[Optional[float]]]],
+        invalid_indices: Sequence[int],
+        backoff_A: float,
+        path_arclength: Optional[Sequence[float]] = None,
+    ) -> Tuple[int, Dict[str, Any]]:
+        """Compatibility helper for historical callers; not used by ``run``.
+
+        The production path now gets both TS and INT seeds from
+        ``select_path_seeds``.  Keep this helper temporarily for old fixtures
+        and offline comparisons, but do not use it to publish S2 decisions.
+
+        Choose an S3 seed before an energy-located TS peak along PATH.
+
+        The energy peak remains the TS locator. This only chooses a nearby
+        PATH geometry for S3 when the peak frame is too far along the forming-
+        bond coordinate.  PATH order, not the mean forming-bond distance, is
+        authoritative for deciding which side is reactant-like: asynchronous
+        bond formation can make the mean distance non-monotonic near product.
         """
-        m_index = int(anchors["plateau_onset_index"])
-        last_valid = int(anchors["last_valid_before_drift_index"])
-        off_path = {int(index) for index in off_path_indices}
-        candidates = [
+
+        def _mean_distance(index: int) -> Optional[float]:
+            if index < 0 or index >= len(forming_bond_distances):
+                return None
+            distances = forming_bond_distances[index]
+            if not distances or any(value is None for value in distances):
+                return None
+            valid_distances = [float(value) for value in distances if value is not None]
+            if len(valid_distances) != len(distances):
+                return None
+            return float(sum(valid_distances) / len(valid_distances))
+
+        invalid = {int(index) for index in invalid_indices}
+        usable = [
             index
-            for index in range(m_index + 1, last_valid + 1)
-            if index not in off_path and energies[index] is not None
+            for index in range(len(forming_bond_distances))
+            if index not in invalid and _mean_distance(index) is not None
         ]
+        if path_arclength is not None and len(path_arclength) == len(
+            forming_bond_distances
+        ):
+            coordinates = [float(value) for value in path_arclength]
+        else:
+            coordinates = [float(index) for index in range(len(forming_bond_distances))]
+        ordered = sorted(usable, key=lambda index: coordinates[index])
+        peak_mean = _mean_distance(int(peak_index))
+        metadata: Dict[str, Any] = {
+            "energy_peak_index": int(peak_index),
+            "seed_index": int(peak_index),
+            "seed_rule": "energy_peak_geometry",
+            "seed_backoff_requested_A": float(backoff_A),
+            "seed_backoff_applied_A": 0.0,
+            "seed_target_mean_forming_bond_distance_A": peak_mean,
+            "seed_mean_forming_bond_distance_A": peak_mean,
+        }
+        if (
+            backoff_A <= 0.0
+            or peak_mean is None
+            or int(peak_index) not in ordered
+        ):
+            return int(peak_index), metadata
+
+        peak_position = ordered.index(int(peak_index))
+        pre_peak = ordered[:peak_position]
+        if not pre_peak:
+            metadata["seed_backoff_status"] = "no_clean_pre_peak_frame"
+            return int(peak_index), metadata
+
+        peak_distances = forming_bond_distances[int(peak_index)]
+        if not peak_distances or any(value is None for value in peak_distances):
+            metadata["seed_backoff_status"] = "peak_bond_coordinate_unavailable"
+            return int(peak_index), metadata
+        peak_distance_values = [float(value) for value in peak_distances if value is not None]
+        target_mean = float(peak_mean + backoff_A)
+        candidates: List[int] = []
+        for index in pre_peak:
+            candidate_distances = forming_bond_distances[index]
+            if (
+                not candidate_distances
+                or len(candidate_distances) != len(peak_distance_values)
+                or any(value is None for value in candidate_distances)
+            ):
+                continue
+            candidate_values = [float(value) for value in candidate_distances if value is not None]
+            if all(
+                candidate_distance >= peak_distance - 1.0e-6
+                for candidate_distance, peak_distance in zip(
+                    candidate_values,
+                    peak_distance_values,
+                )
+            ):
+                candidates.append(index)
         if not candidates:
-            raise RuntimeError("S2 INT selection: empty M->last_valid plateau")
-        if len(candidates) == 1:
-            selected = candidates[0]
-            rule = "single_plateau_frame"
-        else:
-            x_values = np.asarray(
-                [float(reaction_coordinate[index]) for index in candidates],
-                dtype=float,
-            )
-            y_values = np.asarray(
-                [
-                    PEBScanEngine._require_energy(
-                        energies[index], "S2 INT stable-point missing energy"
-                    )
-                    * HARTREE_TO_KCAL
-                    for index in candidates
-                ],
-                dtype=float,
-            )
-            unique_x = len(np.unique(x_values))
-            if unique_x >= 3 and len(candidates) >= 3:
-                gradients = np.gradient(y_values, x_values, edge_order=2)
-                grad_map = {index: abs(float(grad)) for index, grad in zip(candidates, gradients)}
-                selected = min(candidates, key=lambda index: (grad_map[index], abs(reaction_coordinate[index] - reaction_coordinate[m_index])))
-                rule = "min_local_gradient"
-            else:
-                selected = candidates[len(candidates) // 2]
-                rule = "plateau_midpoint_fallback"
-        return {
-            "index": int(selected),
-            "frame_xyz": str(Path(frame_paths[selected])),
-            "rule": rule,
-            "candidate_indices": list(candidates),
-            "target_coordinate_A": float(reaction_coordinate[selected]),
-        }
-
-
-    @staticmethod
-    def _select_path_nodes(
-        engine,
-        anchors: Dict[str, Any],
-        frame_paths: Sequence[Path],
-        reaction_coordinate: Sequence[float],
-        method_energies: Sequence[Optional[float]],
-        path_metadata: Dict[str, Any],
-        off_path_indices: Sequence[int],
-        path_arclength: Optional[np.ndarray] = None,
-        preferred_int_index: Optional[int] = None,
-    ) -> Tuple[Dict[str, Any], Dict[str, Any], int, Optional[int], str]:
-        """Pick TS and INT from the refined PATH profile.
-
-        TS strategy:
-          1. If xTB PATH returned ``estimated_ts_point``, use that frame index
-             directly. xTB's meta-dynamics TS estimate is a converged result.
-          2. Otherwise fall back to Kneedle on the refined energy curve.
-          3. As a last resort use the plateau_onset anchor M.
-
-        INT strategy:
-          - Kneedle ``dipole_distance`` (minimum-gradient point between TS and
-            the energy peak). If Kneedle fails, take the frame with the
-            smallest local |gradient| on the post-TS plateau; if that also
-            fails, return ``intermediate_idx = None`` (DEGRADED).
-        """
-        from rph_core.utils.scan_profile_plotter import find_ts_and_dipole_guess
-
-        valid_energies = [
-            (i, float(method_energies[i]))
-            for i in range(len(method_energies))
-            if method_energies[i] is not None and i not in set(off_path_indices)
-        ]
-        ts_index: Optional[int] = None
-        ts_rule = "unknown"
-        ts_actual_method = "unknown"
-
-        # --- 优先级 1: xTB 日志报告的 estimated TS point ---
-        # 正则从 "norm(g) at est. TS, point: 0.01196   5" 解析,
-        # 已转换为 0-based index.
-        estimated = path_metadata.get("estimated_ts_point")
-        ts_guess_xyz = path_metadata.get("ts_guess_xyz")
-        if estimated is not None and 0 <= int(estimated) < len(frame_paths):
-            ts_index = int(estimated)
-            ts_rule = "xtb_path_estimated_ts"
-            ts_actual_method = "xtb_path_estimated_ts"
-        elif ts_guess_xyz:
-            # fallback: 通过结构 RMSD 匹配 xtbpath_ts.xyz
-            ts_target = Path(ts_guess_xyz)
-            if ts_target.exists():
-                from rph_core.utils.file_io import read_xyz
-                from rph_core.utils.geometry_tools import kabsch_rmsd
-                ts_coords, _ = read_xyz(ts_target)
-                best_i, best_rmsd = 0, float("inf")
-                for i, frame in enumerate(frame_paths):
-                    try:
-                        fc, _ = read_xyz(Path(frame))
-                        r = kabsch_rmsd(np.asarray(fc, dtype=float),
-                                        np.asarray(ts_coords, dtype=float))
-                        if r < best_rmsd:
-                            best_i, best_rmsd = i, r
-                    except Exception:
-                        continue
-                if best_rmsd < 0.01:  # 0.01 Å 阈值
-                    ts_index = best_i
-                    ts_rule = "xtb_path_ts_xyz_rmsd"
-                    ts_actual_method = "xtb_path_ts_xyz_rmsd"
-
-        # --- 优先级 2: B97-3c 路径最高能点验证 / 微调 ---
-        # 当 method_energies 全部非 None（即 B97-3c 完整覆盖），
-        # 与 xTB TS 对比并微调
-        if ts_index is not None and all(e is not None for e in method_energies):
-            full_method_energies = [float(value) for value in method_energies if value is not None]
-            nrg_max = max(range(len(full_method_energies)), key=full_method_energies.__getitem__)
-            frame_shift = abs(nrg_max - ts_index)
-            if frame_shift <= 2:
-                ts_index = nrg_max
-                ts_rule += "+b973c_validated"
-            elif frame_shift > 2:
-                engine.logger.warning(
-                    "[S2] Energy max (frame %d) differs from xTB TS (frame %d) by %d frames",
-                    nrg_max, ts_index, frame_shift,
-                )
-                ts_rule += "+b973c_disagreement"
-
-        # --- 优先级 3: xTB 能量最高点 ---
-        if ts_index is None:
-            xb_max = max(valid_energies, key=lambda item: item[1])[0]
-            if 0 < xb_max < len(frame_paths) - 1:  # 不在端点
-                ts_index = xb_max
-                ts_rule = "xtb_energy_maximum"
-                ts_actual_method = "xtb_energy_maximum"
-
-        # --- 优先级 4: Kneedle on path_arclength (仅作 fallback) ---
-        if ts_index is None and len(valid_energies) >= 3:
-            if path_arclength is not None:
-                # PATH 模式：使用弧长排序，保持帧序
-                arc_x = [float(path_arclength[i]) for i, _ in valid_energies]
-            else:
-                # 粗扫回退：使用 forming-bond mean（此时单调）
-                arc_x = [float(reaction_coordinate[i]) for i, _ in valid_energies]
-            energies_kcal = [e * HARTREE_TO_KCAL for _, e in valid_energies]
-            ts_distance, _ = find_ts_and_dipole_guess(
-                distances=arc_x,
-                energies=energies_kcal,
-                energies_in_hartree=False,
-            )
-            if ts_distance is not None:
-                nearest_x = arc_x if path_arclength is not None else reaction_coordinate
-                ts_index = min(
-                    range(len(nearest_x)),
-                    key=lambda i: abs(float(nearest_x[i]) - float(ts_distance)),
-                )
-                ts_rule = "kneedle_ts"
-                ts_actual_method = "kneedle_ts"
-
-        # --- 优先级 5: plateau onset (最后备选) ---
-        if ts_index is None:
-            ts_index = int(anchors["plateau_onset_index"])
-            ts_rule = "anchor:plateau_onset_index"
-            ts_actual_method = "anchor_plateau_onset_fallback"
-
-        ts_index = max(0, min(int(ts_index), len(frame_paths) - 1))
-        ts_selection = {
-            "index": int(ts_index),
-            "frame_xyz": str(Path(frame_paths[ts_index])),
-            "rule": ts_rule,
-            "actual_method": ts_actual_method,
-            "target_coordinate_A": float(reaction_coordinate[ts_index]),
-            "candidate_indices": [int(ts_index)],
-            "ts_guess_xyz_source": str(ts_guess_xyz) if ts_guess_xyz else None,
-        }
-
-        intermediate_idx: Optional[int] = None
-        int_rule = "unavailable"
-        int_status = "unavailable"
-        int_selection: Dict[str, Any] = {
-            "index": None,
-            "rule": int_rule,
-            "status": int_status,
-            "selection_status": int_status,
-        }
-
-        post_ts = [
-            i for i, _ in valid_energies
-            if i > ts_index
-        ]
-        # --- INT: 安全平台中心（来自粗扫稳定平台） ---
-        if preferred_int_index is not None and 0 <= preferred_int_index < len(frame_paths):
-            intermediate_idx = preferred_int_index
-            # 确保 INT 在 TS 之后
-            if intermediate_idx <= ts_index:
-                intermediate_idx = min(ts_index + 1, len(frame_paths) - 1)
-            int_rule = "coarse_safe_plateau_center"
-            int_status = "selected"
-        else:
-            valid_post_ts = [i for i in post_ts if method_energies[i] is not None]
-            if valid_post_ts and len(valid_post_ts) >= 2:
-                coords_post = [float(reaction_coordinate[i]) for i in valid_post_ts]
-                energies_post = [
-                    float(method_energies[i]) * HARTREE_TO_KCAL for i in valid_post_ts
-                ]
-                sorted_pts = sorted(valid_energies, key=lambda item: reaction_coordinate[item[0]])
-                distances_full = [reaction_coordinate[i] for i, _ in sorted_pts]
-                energies_full = [e * HARTREE_TO_KCAL for _, e in sorted_pts]
-                _, dipole_distance = find_ts_and_dipole_guess(
-                    distances=distances_full,
-                    energies=energies_full,
-                    energies_in_hartree=False,
-                )
-                if dipole_distance is not None:
-                    intermediate_idx = min(
-                        valid_post_ts,
-                        key=lambda i: abs(float(reaction_coordinate[i]) - float(dipole_distance)),
-                    )
-                    int_rule = "kneedle_dipole"
-                if intermediate_idx is None and len(coords_post) >= 3:
-                    if path_arclength is not None:
-                        x_for_grad = np.asarray(
-                            [float(path_arclength[i]) for i in valid_post_ts], dtype=float
-                        )
-                    else:
-                        x_for_grad = np.asarray(coords_post, dtype=float)
-                    gradients = np.gradient(
-                        np.asarray(energies_post, dtype=float),
-                        x_for_grad,
-                        edge_order=2,
-                    )
-                    local_idx = int(np.argmin(np.abs(gradients)))
-                    intermediate_idx = valid_post_ts[local_idx]
-                    int_rule = "min_gradient_post_ts"
-            if intermediate_idx is not None:
-                int_selection = {
-                    "index": int(intermediate_idx),
-                    "frame_xyz": str(Path(frame_paths[intermediate_idx])),
-                    "rule": int_rule,
-                    "status": "selected",
-                    "selection_status": "selected",
-                    "target_coordinate_A": float(reaction_coordinate[intermediate_idx]),
-                    "candidate_indices": list(post_ts),
+            boundary_index = int(pre_peak[0])
+            boundary_mean = _mean_distance(boundary_index)
+            metadata.update(
+                {
+                    "seed_index": boundary_index,
+                    "seed_rule": "path_order_boundary_fallback",
+                    "seed_backoff_status": "no_bond_consistent_pre_peak_frame",
+                    "seed_mean_forming_bond_distance_A": boundary_mean,
+                    "clean_path_boundary_index": boundary_index,
                 }
+            )
+            return boundary_index, metadata
 
-        return ts_selection, int_selection, int(ts_index), intermediate_idx, (
-            "selected" if intermediate_idx is not None else "unavailable"
+        def _distance_or_fail(index: int) -> float:
+            mean_distance = _mean_distance(index)
+            if mean_distance is None:
+                raise RuntimeError("S2 TS seed backoff candidate lacks bond distances")
+            return float(mean_distance)
+
+        seed_index = min(
+            candidates,
+            key=lambda index: (
+                abs(_distance_or_fail(index) - target_mean),
+                -_distance_or_fail(index),
+            ),
         )
+        seed_mean = _distance_or_fail(seed_index)
+        metadata.update(
+            {
+                "seed_index": int(seed_index),
+                "seed_rule": "reactant_side_mean_distance_backoff",
+                "seed_backoff_status": "applied",
+                "seed_backoff_applied_A": float(seed_mean - peak_mean),
+                "seed_target_mean_forming_bond_distance_A": target_mean,
+                "seed_mean_forming_bond_distance_A": seed_mean,
+            }
+        )
+        return int(seed_index), metadata
 
     def _select_refined_path_nodes(
         self,
@@ -855,12 +823,17 @@ class PEBScanEngine(LoggerMixin):
         path_arclength: Optional[np.ndarray],
         selection_config: Mapping[str, Any],
     ) -> Tuple[Dict[str, Any], Dict[str, Any], int, Optional[int], str]:
-        """Select a curve-consistent TS and an S3 INT-search seed.
+        """Compatibility helper for historical callers; not used by ``run``.
+
+        Production selection is centralized in ``select_path_seeds``; this
+        method remains only for old fixtures and offline comparisons.
+
+        Select a curve-consistent TS and an S3 INT-search seed.
 
         A PATH geometry is not itself a stationary point.  TS selection therefore
         uses only extrema on the method-consistent energy curve.  The optional
-        INT structure is either a resolvable pre-TS basin or a midpoint geometry
-        that S3 may relax without claiming that an intermediate was found.
+        INT structure is either a resolvable pre-TS basin or, after TS seeding,
+        a late low-gradient pre-TS platform selected by the caller.
         """
         invalid = {int(index) for index in off_path_indices}
         valid_indices = [
@@ -877,19 +850,26 @@ class PEBScanEngine(LoggerMixin):
             coordinates = [float(value) for value in reaction_coordinate]
         ordered = sorted(valid_indices, key=lambda index: coordinates[index])
         energies_kcal = {
-            index: float(method_energies[index]) * HARTREE_TO_KCAL
+            index: self._require_energy(
+                method_energies[index],
+                "S2 refined PATH selection missing method energy",
+            )
+            * HARTREE_TO_KCAL
             for index in valid_indices
         }
         ts_prominence_cutoff = float(
-            selection_config.get("ts_min_prominence_kcal_mol", 0.15)
+            selection_config.get("ts_min_prominence_kcal_mol", 0.40)
         )
         int_prominence_cutoff = float(
             selection_config.get("int_min_basin_prominence_kcal_mol", 0.50)
         )
 
+        minimum_neighbors = max(
+            1, int(selection_config.get("ts_min_clean_neighbors", 1))
+        )
         maxima: List[Tuple[int, float]] = []
         weak_maxima: List[Tuple[int, float]] = []
-        for position in range(1, len(ordered) - 1):
+        for position in range(minimum_neighbors, len(ordered) - minimum_neighbors):
             left, index, right = ordered[position - 1 : position + 2]
             rise = energies_kcal[index] - energies_kcal[left]
             fall = energies_kcal[index] - energies_kcal[right]
@@ -902,7 +882,10 @@ class PEBScanEngine(LoggerMixin):
         if maxima:
             ts_index, ts_prominence = max(
                 maxima,
-                key=lambda item: (energies_kcal[item[0]], item[1]),
+                # A multi-step reaction can expose more than one maximum.  The
+                # first significant maximum from the reactant-side endpoint is
+                # the relevant seed for this product-forming PATH.
+                key=lambda item: (coordinates[item[0]], -item[1]),
             )
             ts_rule = "refined_curve_local_maximum"
             ts_confidence = "high" if ts_prominence >= 0.50 else "medium"
@@ -910,7 +893,7 @@ class PEBScanEngine(LoggerMixin):
         elif weak_maxima:
             ts_index, ts_prominence = max(
                 weak_maxima,
-                key=lambda item: (energies_kcal[item[0]], item[1]),
+                key=lambda item: (coordinates[item[0]], -item[1]),
             )
             ts_rule = "refined_curve_weak_local_maximum"
             ts_confidence = "low"
@@ -954,27 +937,18 @@ class PEBScanEngine(LoggerMixin):
             int_candidates = [index for index, _ in basin_candidates]
             int_extra = {"basin_prominence_kcal_mol": float(basin_prominence)}
         else:
-            pre_ts_interior = ordered[1:ts_position]
-            if pre_ts_interior:
-                left_endpoint = ordered[0]
-                midpoint = 0.5 * (coordinates[left_endpoint] + coordinates[ts_index])
-                intermediate_idx = min(
-                    pre_ts_interior,
-                    key=lambda index: abs(coordinates[index] - midpoint),
-                )
-                int_mode = "midpoint_fallback"
-                int_rule = "pre_ts_arclength_midpoint"
-                int_candidates = list(pre_ts_interior)
-                int_extra = {
-                    "left_endpoint_index": int(left_endpoint),
-                    "target_path_coordinate": float(midpoint),
-                    "reason": "no_resolved_pre_ts_basin",
-                }
-            else:
-                int_mode = "unavailable"
-                int_rule = "no_pre_ts_interior_frame"
-                int_candidates = []
-                int_extra = {"reason": "no_pre_ts_interior_frame"}
+            # A monotonic path does not justify an arbitrary midpoint MIN
+            # calculation.  Preserve the fact that no distinct INT was found,
+            # and let downstream scheduling omit the duplicate S3 structure.
+            intermediate_idx = None
+            int_mode = "shared_ts_fallback"
+            int_rule = "no_resolved_pre_ts_basin_shared_ts_seed"
+            int_candidates = [int(ts_index)]
+            int_extra = {
+                "reason": "no_resolved_pre_ts_basin",
+                "shared_ts_index": int(ts_index),
+                "s3_job_required": False,
+            }
 
         ts_selection = {
             "index": int(ts_index),
@@ -996,25 +970,234 @@ class PEBScanEngine(LoggerMixin):
             "candidate_indices": [int(index) for index in ts_candidates],
         }
         int_selection: Dict[str, Any] = {
-            "index": None if intermediate_idx is None else int(intermediate_idx),
+            "index": (
+                int(ts_index)
+                if int_mode == "shared_ts_fallback"
+                else None if intermediate_idx is None else int(intermediate_idx)
+            ),
             "frame_xyz": (
-                None if intermediate_idx is None else str(Path(frame_paths[intermediate_idx]))
+                str(Path(frame_paths[ts_index]))
+                if int_mode == "shared_ts_fallback"
+                else None if intermediate_idx is None else str(Path(frame_paths[intermediate_idx]))
             ),
             "rule": int_rule,
             "selection_mode": int_mode,
-            "selection_status": "selected" if intermediate_idx is not None else "unavailable",
+            "selection_status": (
+                "shared_with_ts"
+                if int_mode == "shared_ts_fallback"
+                else "selected" if intermediate_idx is not None else "unavailable"
+            ),
             "stationary_point_claimed": False,
             "target_coordinate_A": (
-                None
-                if intermediate_idx is None
-                else float(reaction_coordinate[intermediate_idx])
+                float(reaction_coordinate[ts_index])
+                if int_mode == "shared_ts_fallback"
+                else None if intermediate_idx is None else float(reaction_coordinate[intermediate_idx])
             ),
             "candidate_indices": [int(index) for index in int_candidates],
             **int_extra,
         }
         return ts_selection, int_selection, int(ts_index), intermediate_idx, (
-            "selected" if intermediate_idx is not None else "unavailable"
+            "shared_with_ts"
+            if int_mode == "shared_ts_fallback"
+            else "selected" if intermediate_idx is not None else "unavailable"
         )
+
+    @staticmethod
+    def _path_requires_relaxed_scan(
+        trajectory_quality: Mapping[str, Any],
+    ) -> bool:
+        """Return whether PEB supplied no usable path geometry at all.
+
+        S2 selects *search seeds*, rather than proving stationary points.  A
+        weak peak, a platform, or shared TS/INT frame is therefore still a
+        valid S3 input when the underlying PATH is usable.  The expensive
+        B97-3c relaxed scan is reserved for the one unambiguous PEB failure:
+        topology drift persists from the first frame, leaving no clean path
+        segment from which either seed can be selected.
+        """
+
+        if not bool(trajectory_quality.get("checked", False)):
+            return False
+        persistent_start = trajectory_quality.get(
+            "persistent_off_path_start",
+            trajectory_quality.get("topology_drift_index"),
+        )
+        usable_end = trajectory_quality.get(
+            "usable_end_index",
+            trajectory_quality.get("last_valid_before_drift_index"),
+        )
+        return (
+            persistent_start == 0
+            and usable_end in {-1, None}
+        )
+
+    @staticmethod
+    def _nonreactive_scaffold_admission(
+        reference_xyz: Path,
+        candidate_xyz: Path,
+        forming_bonds: Sequence[Tuple[int, int]],
+        maximum_rmsd: float,
+    ) -> Dict[str, Any]:
+        """Reject a PATH frame that distorts the mapped non-reactive scaffold."""
+
+        try:
+            reference, _ = read_xyz(Path(reference_xyz))
+            candidate, _ = read_xyz(Path(candidate_xyz))
+            if reference.shape != candidate.shape:
+                return {"accepted": False, "reason": "atom_count_mismatch"}
+            reactive_atoms = {int(atom) for pair in forming_bonds for atom in pair}
+            scaffold = [index for index in range(len(reference)) if index not in reactive_atoms]
+            if len(scaffold) < 3:
+                return {
+                    "accepted": True,
+                    "nonreactive_scaffold_rmsd_A": None,
+                    "reason": "insufficient_nonreactive_atoms",
+                }
+            rmsd = float(kabsch_rmsd(reference[scaffold], candidate[scaffold]))
+            return {
+                "accepted": rmsd <= maximum_rmsd,
+                "nonreactive_scaffold_rmsd_A": rmsd,
+                "maximum_nonreactive_scaffold_rmsd_A": maximum_rmsd,
+            }
+        except (OSError, ValueError, np.linalg.LinAlgError) as exc:
+            return {"accepted": False, "reason": f"geometry_check_failed:{exc}"}
+
+
+    @staticmethod
+    def _select_late_pre_ts_platform_seed(
+        *,
+        frame_paths: Sequence[Path],
+        reaction_coordinate: Sequence[float],
+        method_energies: Sequence[Optional[float]],
+        off_path_indices: Sequence[int],
+        path_arclength: Optional[np.ndarray],
+        ts_peak_index: int,
+        ts_seed_index: int,
+        selection_config: Mapping[str, Any],
+    ) -> Tuple[Optional[int], Dict[str, Any]]:
+        """Compatibility helper for historical callers; not used by ``run``.
+
+        Production selection is centralized in ``select_path_seeds``; this
+        method remains only for old fixtures and offline comparisons.
+
+        Choose the latest clean, low-gradient platform before the TS seed.
+
+        A monotonic PATH can still contain a chemically useful precursor-side
+        plateau even though it has no stationary local minimum.  This routine
+        deliberately returns a search seed only; it never asserts that an INT
+        has been located.
+        """
+        if not bool(selection_config.get("int_plateau_fallback_enabled", True)):
+            return None, {"reason": "int_plateau_fallback_disabled"}
+        if not (0 <= int(ts_peak_index) < len(frame_paths)) or not (
+            0 <= int(ts_seed_index) < len(frame_paths)
+        ):
+            return None, {"reason": "invalid_ts_index_for_int_platform"}
+
+        invalid = {int(index) for index in off_path_indices}
+        if path_arclength is not None and len(path_arclength) == len(frame_paths):
+            coordinates = [float(path_arclength[index]) for index in range(len(frame_paths))]
+        else:
+            coordinates = [float(value) for value in reaction_coordinate]
+        valid = [
+            index
+            for index, energy in enumerate(method_energies)
+            if energy is not None and index not in invalid
+        ]
+        ordered = sorted(valid, key=lambda index: coordinates[index])
+        if int(ts_seed_index) not in ordered or int(ts_peak_index) not in ordered:
+            return None, {"reason": "ts_not_in_clean_path_segment"}
+
+        seed_position = ordered.index(int(ts_seed_index))
+        pre_ts = ordered[:seed_position]
+        minimum_frames = max(
+            2, int(selection_config.get("int_plateau_min_consecutive_frames", 3))
+        )
+        if len(pre_ts) < minimum_frames:
+            return None, {
+                "reason": "insufficient_clean_pre_ts_frames",
+                "clean_pre_ts_frame_count": len(pre_ts),
+            }
+
+        energy_kcal = {
+            index: PEBScanEngine._require_energy(
+                method_energies[index],
+                "S2 late pre-TS platform selection missing method energy",
+            )
+            * HARTREE_TO_KCAL
+            for index in ordered
+        }
+        pre_ts_floor = min(energy_kcal[index] for index in pre_ts)
+        barrier = max(0.0, energy_kcal[int(ts_peak_index)] - pre_ts_floor)
+        energy_window = max(
+            float(selection_config.get("int_plateau_energy_window_kcal_mol", 2.0)),
+            float(selection_config.get("int_plateau_barrier_fraction", 0.25)) * barrier,
+        )
+        min_separation = float(
+            selection_config.get("int_plateau_min_ts_separation_A", 0.10)
+        )
+        energy_limit = pre_ts_floor + energy_window
+        eligible = [
+            index
+            for index in pre_ts
+            if energy_kcal[index] <= energy_limit
+            and coordinates[int(ts_seed_index)] - coordinates[index] + 1.0e-8 >= min_separation
+        ]
+        eligible_set = set(eligible)
+        groups: List[List[int]] = []
+        current: List[int] = []
+        for index in pre_ts:
+            if index in eligible_set:
+                current.append(index)
+            elif current:
+                groups.append(current)
+                current = []
+        if current:
+            groups.append(current)
+
+        max_slope = float(
+            selection_config.get("int_plateau_max_slope_kcal_mol_A", 40.0)
+        )
+        accepted: List[Tuple[List[int], float]] = []
+        for group in groups:
+            if len(group) < minimum_frames:
+                continue
+            slopes = []
+            for left, right in zip(group, group[1:]):
+                delta_s = coordinates[right] - coordinates[left]
+                if delta_s <= 1.0e-8:
+                    continue
+                slopes.append(abs(energy_kcal[right] - energy_kcal[left]) / delta_s)
+            if max_slope > 0.0 and slopes and max(slopes) > max_slope:
+                continue
+            accepted.append((group, max(slopes, default=0.0)))
+
+        if not accepted:
+            return None, {
+                "reason": "no_continuous_low_gradient_pre_ts_platform",
+                "clean_pre_ts_frame_count": len(pre_ts),
+                "energy_window_kcal_mol": energy_window,
+                "energy_limit_kcal_mol": energy_limit,
+            }
+
+        group, group_max_slope = max(
+            accepted, key=lambda item: coordinates[item[0][-1]]
+        )
+        index = int(group[-1])
+        return index, {
+            "rule": "late_pre_ts_low_gradient_platform",
+            "selection_mode": "late_pre_ts_platform_fallback",
+            "selection_status": "selected",
+            "stationary_point_claimed": False,
+            "candidate_indices": [int(value) for value in group],
+            "pre_ts_floor_kcal_mol": pre_ts_floor,
+            "barrier_from_pre_ts_floor_kcal_mol": barrier,
+            "energy_window_kcal_mol": energy_window,
+            "energy_limit_kcal_mol": energy_limit,
+            "platform_max_slope_kcal_mol_A": group_max_slope,
+            "clean_pre_ts_frame_count": len(pre_ts),
+            "s3_job_required": True,
+        }
 
 
     def _xtb_path_config(self) -> Dict[str, Any]:
@@ -1164,6 +1347,13 @@ class PEBScanEngine(LoggerMixin):
         end_xyz: Path,
         output_dir: Path,
         forming_bonds: Sequence[Tuple[int, int]],
+        *,
+        path_name: str = "valid_corridor",
+        topology_config: Optional[Dict[str, Any]] = None,
+        reference_coords: Optional[Sequence[Sequence[float]]] = None,
+        reference_symbols: Optional[Sequence[str]] = None,
+        reference_path: Optional[Path] = None,
+        consecutive_off_path: int = 2,
     ) -> Tuple[ScanAttempt, Dict[str, Any]]:
         """Run xTB2 meta-dynamics PATH and wrap the result as a ScanAttempt.
 
@@ -1173,6 +1363,8 @@ class PEBScanEngine(LoggerMixin):
         path_cfg = self._xtb_path_config()
         if not bool(path_cfg.get("enabled", True)):
             raise RuntimeError("S2 xtb_path disabled in config")
+        npoint_key = f"npoint_{path_name}"
+        npoint = int(path_cfg.get(npoint_key, path_cfg.get("npoint", 28)))
         charge, spin = self._xtb_path_settings()
 
         xtb_settings = self.step2_cfg.get("xtb_settings", {}) or {}
@@ -1185,18 +1377,19 @@ class PEBScanEngine(LoggerMixin):
             config=self.config,
         )
 
-        path_dir = output_dir / "xtb_path"
+        path_dir = output_dir / "xtb_path" / str(path_name)
         path_dir.mkdir(parents=True, exist_ok=True)
+        batch_name = f"{self.molecule_name or 'product'}:xtb_path:{path_name}"
 
         self._emit_progress(
             "batch_started",
-            batch=f"{self.molecule_name or 'product'}:xtb_path",
+            batch=batch_name,
             phase="xtb_path",
-            label="xTB2 meta-dynamics PATH search",
+            label=f"xTB2 meta-dynamics PATH search ({path_name})",
             started_at=time.time(),
             engine="xtb",
             method=f"GFN{int(path_cfg.get('gfn_level', 2))}",
-            npoint=int(path_cfg.get("npoint", 28)),
+            npoint=npoint,
         )
         path_started = time.monotonic()
         try:
@@ -1205,7 +1398,7 @@ class PEBScanEngine(LoggerMixin):
                 end_xyz=Path(end_xyz),
                 output_dir=path_dir,
                 nrun=int(path_cfg.get("nrun", 1)),
-                npoint=int(path_cfg.get("npoint", 28)),
+                npoint=npoint,
                 anopt=int(path_cfg.get("anopt", 10)),
                 kpush=float(path_cfg.get("kpush", 0.003)),
                 kpull=float(path_cfg.get("kpull", -0.015)),
@@ -1217,7 +1410,7 @@ class PEBScanEngine(LoggerMixin):
         except Exception as exc:
             self._emit_progress(
                 "batch_finished",
-                batch=f"{self.molecule_name or 'product'}:xtb_path",
+                batch=batch_name,
                 phase="xtb_path",
                 status="failed",
                 error=str(exc),
@@ -1228,7 +1421,7 @@ class PEBScanEngine(LoggerMixin):
         if not path_result.success or not path_result.path_xyz_files:
             self._emit_progress(
                 "batch_finished",
-                batch=f"{self.molecule_name or 'product'}:xtb_path",
+                batch=batch_name,
                 phase="xtb_path",
                 status="failed",
                 error=path_result.error_message or "no path frames",
@@ -1265,26 +1458,60 @@ class PEBScanEngine(LoggerMixin):
         )
         energies = tuple(float(e) if e is not None else float("nan") for e in sp_energies)
 
+        trajectory_quality: Dict[str, Any] = {
+            "xtb_path": True,
+            "path_name": str(path_name),
+            "npoint_requested": npoint,
+            "npoint_returned": len(frame_paths),
+            "barrier_forward_kcal": path_result.barrier_forward_kcal,
+            "barrier_backward_kcal": path_result.barrier_backward_kcal,
+            "reaction_energy_kcal": path_result.reaction_energy_kcal,
+            "gradient_norm_at_ts": path_result.gradient_norm_at_ts,
+        }
+        off_path_indices: Tuple[int, ...] = ()
+        if (
+            topology_config is not None
+            and reference_coords is not None
+            and reference_symbols is not None
+            and reference_path is not None
+        ):
+            trajectory_quality, off_path, _ = self._assess_trajectory(
+                frame_paths,
+                forming_bonds,
+                topology_config,
+                consecutive_off_path,
+                [float(value) for value in energies],
+                reference_coords,
+                reference_symbols,
+                Path(reference_path),
+            )
+            trajectory_quality.update(
+                {
+                    "xtb_path": True,
+                    "path_name": str(path_name),
+                    "npoint_requested": npoint,
+                    "npoint_returned": len(frame_paths),
+                    "barrier_forward_kcal": path_result.barrier_forward_kcal,
+                    "barrier_backward_kcal": path_result.barrier_backward_kcal,
+                    "reaction_energy_kcal": path_result.reaction_energy_kcal,
+                    "gradient_norm_at_ts": path_result.gradient_norm_at_ts,
+                }
+            )
+            off_path_indices = tuple(sorted(off_path))
+
         attempt = ScanAttempt(
-            attempt_id="NN_xtb_path",
+            attempt_id=f"NN_xtb_path_{path_name}",
             kind="xtb_path",
             directory=path_dir,
             frame_paths=frame_paths,
             target_coordinates_A=coordinates,
             xtb_energies_hartree=energies,
-            off_path_indices=(),
-            trajectory_quality={
-                "xtb_path": True,
-                "npoint_requested": int(path_cfg.get("npoint", 28)),
-                "npoint_returned": len(frame_paths),
-                "barrier_forward_kcal": path_result.barrier_forward_kcal,
-                "barrier_backward_kcal": path_result.barrier_backward_kcal,
-                "reaction_energy_kcal": path_result.reaction_energy_kcal,
-                "gradient_norm_at_ts": path_result.gradient_norm_at_ts,
-            },
+            off_path_indices=off_path_indices,
+            trajectory_quality=trajectory_quality,
             scan_policy="xtb_path",
         )
         path_metadata = {
+            "path_name": str(path_name),
             "ts_guess_xyz": str(path_result.ts_guess_xyz) if path_result.ts_guess_xyz else None,
             "path_log": str(path_result.path_log) if path_result.path_log else None,
             "estimated_ts_point": path_result.estimated_ts_point,
@@ -1298,13 +1525,181 @@ class PEBScanEngine(LoggerMixin):
         }
         self._emit_progress(
             "batch_finished",
-            batch=f"{self.molecule_name or 'product'}:xtb_path",
+            batch=batch_name,
             phase="xtb_path",
             status="complete",
             npoint_returned=len(frame_paths),
             elapsed_seconds=time.monotonic() - path_started,
         )
         return attempt, path_metadata
+
+    @staticmethod
+    def _product_connected_valid_indices(
+        frame_count: int,
+        off_path_indices: Sequence[int],
+    ) -> List[int]:
+        """Return the topology-valid PATH segment connected to the product end.
+
+        xTB PATH frames are ordered from the stretched endpoint to the product.
+        A distorted endpoint may legitimately be retained for exploration, but
+        selection must never jump across an off-topology section to use an
+        earlier, disconnected fragment of that PATH.
+        """
+        invalid = {int(index) for index in off_path_indices}
+        end = int(frame_count) - 1
+        if end < 0 or end in invalid:
+            return []
+        start = end
+        while start - 1 >= 0 and start - 1 not in invalid:
+            start -= 1
+        return list(range(start, end + 1))
+
+    @classmethod
+    def _path_selection_anchors(
+        cls,
+        *,
+        energies: Sequence[Optional[float]],
+        reaction_coordinate: Sequence[float],
+        valid_indices: Sequence[int],
+        off_path_indices: Sequence[int],
+    ) -> Dict[str, Any]:
+        """Build safe PATH-local anchors for a product-connected valid segment."""
+        if not valid_indices:
+            raise RuntimeError("S2 PATH has no topology-valid segment connected to product")
+        valid = [int(index) for index in valid_indices]
+        energy_valid = [
+            index for index in valid if energies[index] is not None
+        ]
+        if not energy_valid:
+            raise RuntimeError("S2 PATH product-connected segment has no energies")
+        maximum = max(
+            energy_valid,
+            key=lambda index: cls._require_energy(
+                energies[index], "S2 PATH anchor energy is missing"
+            ),
+        )
+        return {
+            "product_index": valid[-1],
+            "coarse_ts_index": maximum,
+            "plateau_onset_index": valid[0],
+            "absolute_energy_maximum_index": maximum,
+            "topology_drift_index": valid[0] - 1 if valid[0] > 0 else None,
+            "last_valid_before_drift_index": valid[0],
+            "scan_endpoint_index": 0,
+            "product_connected_valid_indices": valid,
+            "excluded_path_indices": sorted(
+                set(range(len(reaction_coordinate))) - set(valid)
+                | {int(index) for index in off_path_indices}
+            ),
+        }
+
+    @staticmethod
+    def _branch_relative_energies(
+        energies: Sequence[Optional[float]],
+        *,
+        reference_side: str = "first",
+    ) -> List[Optional[float]]:
+        if reference_side == "last":
+            reference = next(
+                (float(value) for value in reversed(energies) if value is not None),
+                None,
+            )
+        else:
+            reference = next((float(value) for value in energies if value is not None), None)
+        return [
+            None if value is None or reference is None
+            else (float(value) - reference) * HARTREE_TO_KCAL
+            for value in energies
+        ]
+
+    @staticmethod
+    def _mean_frame_coordinates(
+        forming_bond_distances: Sequence[Optional[Sequence[float]]],
+    ) -> List[float]:
+        coordinates: List[float] = []
+        for index, distances in enumerate(forming_bond_distances):
+            if distances and all(value is not None for value in distances):
+                coordinates.append(
+                    float(sum(float(value) for value in distances) / len(distances))
+                )
+            else:
+                coordinates.append(float(index))
+        return coordinates
+
+    @staticmethod
+    def _seed_frame_index(seed: Optional[Mapping[str, Any]]) -> Optional[int]:
+        if not seed:
+            return None
+        frame_index_raw = seed.get("frame_index")
+        if frame_index_raw is None:
+            return None
+        try:
+            frame_index = int(frame_index_raw)
+        except (TypeError, ValueError):
+            return None
+        return frame_index if frame_index >= 0 else None
+
+    @staticmethod
+    def _selector_ts_rule(seed_evidence: str, fallback: str = "unresolved") -> str:
+        if seed_evidence in {"knee_shifted", "peak_knee_shifted"}:
+            return "energy_knee_right_shifted"
+        if seed_evidence in {"local_peak", "peak_and_basin"}:
+            return "refined_curve_local_maximum"
+        if seed_evidence == "monotonic_shoulder":
+            return "late_pre_ts_low_gradient_platform"
+        return fallback
+
+    @staticmethod
+    def _selector_int_rule(
+        *,
+        selection_source: str,
+        seed_evidence: str,
+        int_seed: Optional[Mapping[str, Any]],
+        has_independent_int: bool,
+        fallback: str = "no_int_search_seed",
+    ) -> str:
+        if not int_seed:
+            return fallback
+        if has_independent_int:
+            return (
+                "b973c_relaxed_scan_post_ts_basin"
+                if selection_source == "orca_relaxed_scan"
+                else "refined_curve_pre_ts_local_minimum"
+            )
+        if str(int_seed.get("selection_mode")) == "ts_to_effective_endpoint_midpoint":
+            return "ts_to_effective_endpoint_midpoint"
+        if str(int_seed.get("selection_mode")) == "stretch_plateau":
+            return "stretch_side_low_energy_plateau"
+        if seed_evidence in {"knee_shifted", "peak_knee_shifted"}:
+            return "ts_to_effective_endpoint_midpoint"
+        if seed_evidence == "monotonic_shoulder":
+            return "late_pre_ts_low_gradient_platform"
+        if bool(int_seed.get("shared_with_ts", False)):
+            return "no_resolved_pre_ts_basin_shared_ts_seed"
+        return "search_seed"
+
+    @staticmethod
+    def _selector_int_selection_mode(
+        *,
+        seed_evidence: str,
+        int_seed: Optional[Mapping[str, Any]],
+        has_independent_int: bool,
+    ) -> str:
+        if not int_seed:
+            return "unavailable"
+        if has_independent_int:
+            return "stable_basin_candidate"
+        if str(int_seed.get("selection_mode")) == "ts_to_effective_endpoint_midpoint":
+            return "ts_to_effective_endpoint_midpoint"
+        if str(int_seed.get("selection_mode")) == "stretch_plateau":
+            return "stretch_side_low_energy_plateau"
+        if seed_evidence in {"knee_shifted", "peak_knee_shifted"}:
+            return "ts_to_effective_endpoint_midpoint"
+        if seed_evidence == "monotonic_shoulder":
+            return "late_pre_ts_platform_fallback"
+        if bool(int_seed.get("shared_with_ts", False)):
+            return "shared_ts_fallback"
+        return "search_seed"
 
 
     @staticmethod
@@ -1639,6 +2034,650 @@ class PEBScanEngine(LoggerMixin):
             "reasons": reasons,
         }
 
+    @staticmethod
+    def _unified_selection_records(
+        *,
+        profile: Any,
+        selection: Any,
+        method_energies: Sequence[Optional[float]],
+        energy_source: str,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any], Optional[int], Optional[int], str]:
+        """Adapt the shared selector result to the S2 manifest contract.
+
+        This is the only adapter between ``SeedSelection`` and the historical
+        ``selections.ts_guess``/``selections.intermediate`` records.  The
+        adapter never makes a second chemical decision; it only enriches the
+        selector's canonical frame indices with output metadata.
+        """
+
+        diagnostics = dict(getattr(selection, "diagnostics", {}) or {})
+        ts_seed = dict(getattr(selection, "ts_search_seed", None) or {})
+        int_seed = dict(getattr(selection, "int_search_seed", None) or {})
+        ts_index_raw = ts_seed.get("frame_index")
+        ts_index = None if ts_index_raw is None else int(ts_index_raw)
+        peak_index_raw = diagnostics.get("energy_peak_index", ts_index)
+        peak_index = None if peak_index_raw is None else int(peak_index_raw)
+        source = str(profile.source)
+        source_attempt = profile.source_provenance.get("attempt_id")
+        state = str(getattr(selection, "s2_state", "unresolved"))
+        evidence = str(getattr(selection, "seed_evidence", "none"))
+        rejection_reason = getattr(selection, "rejection_reason", None)
+
+        if ts_index is None:
+            ts_selection: Dict[str, Any] = {
+                "index": None,
+                "energy_peak_index": peak_index,
+                "seed_index": None,
+                "frame_xyz": None,
+                "rule": "unified_selector_unresolved",
+                "actual_method": "unified_selector",
+                "configured_method": "unified_selector",
+                "selection_status": "unavailable",
+                "reason": rejection_reason,
+                "candidate_indices": [],
+                "source": None,
+            }
+        else:
+            frame = profile.frames[ts_index]
+            confidence = str(ts_seed.get("confidence", "medium"))
+            ts_rule = (
+                "unified_selector_knee_shifted_ts"
+                if evidence in {"knee_shifted", "peak_knee_shifted"}
+                else
+                "unified_selector_peak"
+                if evidence in {"local_peak", "peak_and_basin"}
+                else "unified_selector_monotonic_shoulder"
+                if evidence == "monotonic_shoulder"
+                else "unified_selector"
+            )
+            ts_selection = {
+                "index": ts_index,
+                "energy_peak_index": peak_index,
+                "seed_index": ts_index,
+                "frame_xyz": str(frame.xyz),
+                "rule": ts_rule,
+                "actual_method": "unified_selector",
+                "configured_method": "unified_selector",
+                "confidence": confidence,
+                "candidate_indices": [ts_index],
+                "selection_status": "selected",
+                "energy_source": energy_source,
+                "source": source,
+                "source_attempt": source_attempt,
+                "energy_hartree": (
+                    None
+                    if ts_index >= len(method_energies)
+                    or method_energies[ts_index] is None
+                    else float(method_energies[ts_index])
+                ),
+            }
+
+        int_index_raw = int_seed.get("frame_index")
+        int_index = None if int_index_raw is None else int(int_index_raw)
+        shared = bool(int_seed.get("shared_with_ts", False))
+        has_independent_int = bool(getattr(selection, "has_independent_int", False))
+        if int_index is None:
+            int_selection: Dict[str, Any] = {
+                "index": None,
+                "frame_xyz": None,
+                "rule": "unified_selector_no_int_seed",
+                "selection_mode": "unavailable",
+                "selection_status": "unavailable",
+                "stationary_point_claimed": False,
+                "reason": "no_int_search_seed",
+                "candidate_indices": [],
+                "source": None,
+            }
+            int_status = "unavailable"
+        else:
+            int_frame = profile.frames[int_index]
+            int_mode = "stable_basin_candidate" if has_independent_int else "shared_ts_fallback"
+            int_selection = {
+                "index": int_index,
+                "frame_xyz": str(int_frame.xyz),
+                "rule": "unified_selector_pre_peak_basin"
+                if has_independent_int
+                else "unified_selector_ts_to_effective_endpoint_midpoint"
+                if str(int_seed.get("selection_mode"))
+                == "ts_to_effective_endpoint_midpoint"
+                else "unified_selector_shared_ts",
+                "selection_mode": (
+                    str(int_seed.get("selection_mode"))
+                    if int_seed.get("selection_mode")
+                    else int_mode
+                ),
+                "selection_status": "selected",
+                "stationary_point_claimed": False,
+                "reason": None if has_independent_int else "no_resolved_pre_ts_basin",
+                "candidate_indices": [int_index],
+                "shared_ts_index": int(ts_index) if shared and ts_index is not None else None,
+                "energy_source": energy_source,
+                "source": source,
+                "source_attempt": source_attempt,
+                "energy_hartree": (
+                    None
+                    if int_index >= len(method_energies)
+                    or method_energies[int_index] is None
+                    else float(method_energies[int_index])
+                ),
+            }
+            int_status = "shared_with_ts" if shared else "selected"
+
+        return ts_selection, int_selection, peak_index, int_index, int_status
+
+    @staticmethod
+    def _validate_unified_selection_contract(
+        *,
+        s2_state: str,
+        selection_source: Optional[str],
+        ts_selection: Mapping[str, Any],
+        intermediate_selection: Mapping[str, Any],
+        s3_dispatch: Mapping[str, Any],
+        ts_guess_xyz: Path,
+        intermediate_xyz: Path,
+    ) -> None:
+        """Reject mixed selector/legacy state before publishing S2 artifacts."""
+
+        state = str(s2_state or "unresolved")
+        resolution = str(s3_dispatch.get("resolution") or "unresolved")
+        submit_ts = bool(s3_dispatch.get("submit_ts", False))
+        submit_intermediate = bool(s3_dispatch.get("submit_intermediate", False))
+        ts_index = ts_selection.get("index")
+        int_index = intermediate_selection.get("index")
+
+        if state != resolution:
+            raise RuntimeError(
+                f"S2 selection contract mismatch: s2_state={state!r}, "
+                f"s3_dispatch.resolution={resolution!r}"
+            )
+        if state == "unresolved":
+            if submit_ts or submit_intermediate:
+                raise RuntimeError("Unresolved S2 selection cannot submit S3 jobs")
+            if ts_index is not None or int_index is not None:
+                raise RuntimeError("Unresolved S2 selection retains an active seed index")
+            if ts_guess_xyz.exists() or intermediate_xyz.exists():
+                raise RuntimeError("Unresolved S2 selection retains a canonical XYZ artifact")
+            if selection_source is not None:
+                raise RuntimeError("Unresolved S2 selection must not have an active source")
+            return
+
+        if state not in {"path_seeded", "rescue_seeded"}:
+            raise RuntimeError(f"Unknown S2 selection state: {state!r}")
+        if selection_source is None or ts_index is None or not submit_ts:
+            raise RuntimeError("Seeded S2 selection lacks a canonical TS seed")
+        if not ts_guess_xyz.exists():
+            raise RuntimeError("Seeded S2 selection lacks ts_guess.xyz")
+        if submit_intermediate:
+            if int_index is None or not intermediate_xyz.exists():
+                raise RuntimeError("S3 intermediate dispatch lacks intermediate.xyz")
+
+    @staticmethod
+    def _relative_scan_energies(
+        energies: Sequence[Optional[float]],
+        *,
+        reference: str = "last",
+    ) -> List[Optional[float]]:
+        values = [None if value is None else float(value) for value in energies]
+        valid = [index for index, value in enumerate(values) if value is not None]
+        if not valid:
+            return [None] * len(values)
+        reference_index = valid[-1] if reference == "last" else valid[0]
+        reference_energy = float(values[reference_index])
+        return [
+            None if value is None else (float(value) - reference_energy) * HARTREE_TO_KCAL
+            for value in values
+        ]
+
+    @staticmethod
+    def _scan_coordinates(
+        frames: Sequence[Path],
+        forming_bonds: Sequence[Tuple[int, int]],
+    ) -> List[float]:
+        coordinates: List[float] = []
+        for index, frame in enumerate(frames):
+            try:
+                coords, _symbols = read_xyz(Path(frame))
+                distances = [
+                    float(np.linalg.norm(coords[int(atom_i)] - coords[int(atom_j)]))
+                    for atom_i, atom_j in forming_bonds
+                ]
+                coordinates.append(float(np.mean(distances)))
+            except (OSError, ValueError, IndexError):
+                coordinates.append(float(index))
+        return coordinates
+
+    @staticmethod
+    def _topology_rescue_decision(
+        profile: Optional[Any],
+        selection: Optional[Any],
+        minimum_clean_frames_after_knee: int,
+    ) -> Dict[str, Any]:
+        """Decide whether topology distortion truncates the usable curve.
+
+        The rescue boundary is defined by the curve itself: the first
+        topology-invalid frame must occur after a supported knee, and the
+        clean corridor must contain enough frames after that knee for seed
+        optimization.  No absolute reaction-coordinate threshold is used.
+        """
+
+        excluded = sorted(
+            int(index) for index in (getattr(profile, "excluded_frames", ()) or ())
+        )
+        minimum_frames = max(1, int(minimum_clean_frames_after_knee))
+        diagnostics = getattr(selection, "diagnostics", {}) if selection is not None else {}
+        if not isinstance(diagnostics, Mapping):
+            diagnostics = {}
+        knee_value = diagnostics.get("knee_frame_index")
+        try:
+            knee_index = None if knee_value is None else int(knee_value)
+        except (TypeError, ValueError):
+            knee_index = None
+
+        if not excluded:
+            return {
+                "distortion_frame_index": None,
+                "knee_frame_index": knee_index,
+                "post_knee_frame_indices": [],
+                "clean_frames_after_knee": 0,
+                "minimum_clean_frames_after_knee": minimum_frames,
+                "rescue_required": False,
+                "decision": "retain_primary_no_distortion",
+            }
+
+        distortion_index = excluded[0]
+        frames = tuple(getattr(profile, "frames", ()) or ())
+        post_knee_indices = []
+        if knee_index is not None and knee_index < distortion_index:
+            post_knee_indices = [
+                int(getattr(frame, "frame_index", index))
+                for index, frame in enumerate(frames)
+                if knee_index < int(getattr(frame, "frame_index", index)) < distortion_index
+                and bool(getattr(frame, "topology_valid", True))
+            ]
+
+        if knee_index is None:
+            decision = "rescue_no_supported_knee"
+            rescue_required = True
+        elif knee_index >= distortion_index:
+            decision = "rescue_knee_not_before_distortion"
+            rescue_required = True
+        elif len(post_knee_indices) < minimum_frames:
+            decision = "rescue_insufficient_post_knee_support"
+            rescue_required = True
+        else:
+            decision = "retain_primary_knee_supported"
+            rescue_required = False
+
+        return {
+            "distortion_frame_index": distortion_index,
+            "knee_frame_index": knee_index,
+            "post_knee_frame_indices": post_knee_indices,
+            "clean_frames_after_knee": len(post_knee_indices),
+            "minimum_clean_frames_after_knee": minimum_frames,
+            "rescue_required": rescue_required,
+            "decision": decision,
+        }
+
+    def _run_orca_gfn2_workflow(
+        self,
+        product_xyz: Path,
+        output_dir: Path,
+        forming_bonds: Sequence[Tuple[int, int]],
+        scan_config: Optional[Dict[str, Any]],
+    ) -> Tuple[
+        Optional[Path], Optional[Path], Optional[Path], Tuple[Tuple[int, int], ...],
+        Path, str, str, Tuple[str, ...]
+    ]:
+        """Run the canonical ORCA-GFN2 → B97-3c-SP → rescue workflow."""
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        archived_outputs = self._archive_previous_outputs(output_dir)
+        bonds = self._validate_forming_bonds(forming_bonds, product_xyz_path=product_xyz)
+        product_file = self._resolve_product_file(product_xyz)
+        params = self._resolve_scan_params(scan_config)
+        selection_cfg = dict(params.get("selection", {}) or {})
+        policy = policy_from_config(selection_cfg)
+        degraded_reasons: List[str] = []
+
+        primary_dir = output_dir / "scan"
+        primary = B97CRelaxedScanRescuer(
+            self.config,
+            event_callback=self.event_callback,
+            variant=self.molecule_name,
+            scan_method="GFN2-xTB",
+            scan_role="primary",
+        ).run(
+            product_file,
+            primary_dir,
+            bonds,
+            trigger_reasons=["primary_orca_gfn2_relaxed_scan"],
+        )
+        primary_frames = [Path(value) for value in primary.get("frames") or []]
+        primary_energies = [
+            None if value is None else float(value)
+            for value in primary.get("energies_hartree") or []
+        ]
+        b973c_refinement: Dict[str, Any] = {"status": "not_run"}
+        b973c_energies: List[Optional[float]] = []
+        primary_profile = None
+        if primary.get("status") == "complete" and len(primary_frames) >= 3:
+            refiner = ScanEnergyRefiner(
+                self.config,
+                output_dir / "energy_refinement",
+                event_callback=self.event_callback,
+                variant=self.molecule_name or "product",
+            )
+            b973c_refinement = refiner.refine(
+                primary_frames,
+                point_ids=[f"gfn2_{index:04d}" for index in range(len(primary_frames))],
+            )
+            b973c_energies = [
+                None if value is None else float(value)
+                for value in b973c_refinement.get("energies_hartree") or []
+            ]
+            b973c_energies = (b973c_energies + [None] * len(primary_frames))[:len(primary_frames)]
+            if all(value is not None for value in b973c_energies):
+                primary_profile = build_orca_scan_profile(
+                    frames=primary_frames,
+                    energies_hartree=b973c_energies,
+                    forming_bonds=bonds,
+                    product_xyz=product_file,
+                    energy_source="ORCA B97-3c SP",
+                    source_provenance={
+                        "scan_engine": "orca",
+                        "scan_method": "GFN2-xTB",
+                        "energy_refinement_engine": "orca",
+                        "energy_refinement_method": "B97-3c",
+                        "gfn2_energy_source": primary.get("energy_source"),
+                    },
+                )
+
+        primary_selection = (
+            select_path_seeds(primary_profile, policy)
+            if primary_profile is not None
+            else None
+        )
+        scan_or_sp_incomplete = (
+            primary_profile is None
+            or len(primary_frames) < 3
+            or len(primary_energies) != len(primary_frames)
+            or any(value is None for value in primary_energies)
+        )
+        topology_decision = self._topology_rescue_decision(
+            primary_profile,
+            primary_selection,
+            policy.minimum_clean_frames_after_knee,
+        )
+        topology_rescue_required = bool(topology_decision["rescue_required"])
+        # GFN2-only robustness mode: with the B97-3c rescue disabled, topology
+        # drift no longer forces the rescue branch -- the primary GFN2
+        # selection (knee-shifted over clean frames) is retained so drift is
+        # tolerated instead of triggering a second, expensive scan.
+        rescue_cfg = dict((self.config or {}).get("step2", {}).get("rescue", {}) or {})
+        rescue_enabled = bool(rescue_cfg.get("enabled", True))
+        if topology_rescue_required and not rescue_enabled:
+            degraded_reasons.append("orca_gfn2_topology_drift_tolerated_no_rescue")
+        rescue_required = scan_or_sp_incomplete or (topology_rescue_required and rescue_enabled)
+        rescue_payload: Dict[str, Any] = {
+            "status": "not_run",
+            "resolution": "unresolved",
+            "s2_state": "unresolved",
+            "ts_xyz": None,
+            "intermediate_xyz": None,
+        }
+        active_profile = primary_profile
+        active_frames = primary_frames
+        active_energies = b973c_energies
+        selection_source = "orca_gfn2_b973c_sp"
+        s2_state = "unresolved"
+        selection: Dict[str, Any] = {}
+        if rescue_required:
+            degraded_reasons.append(
+                "orca_gfn2_scan_or_sp_incomplete"
+                if scan_or_sp_incomplete
+                else "orca_gfn2_topology_before_knee_support"
+            )
+            active_profile = None
+            rescue_payload = B97CRelaxedScanRescuer(
+                self.config,
+                event_callback=self.event_callback,
+                variant=self.molecule_name,
+                scan_method="B97-3c",
+                scan_role="rescue",
+            ).run(
+                product_file,
+                output_dir / "rescue",
+                bonds,
+                trigger_reasons=[
+                    "orca_gfn2_topology_before_knee_support"
+                    if not scan_or_sp_incomplete
+                    else "orca_gfn2_scan_or_sp_incomplete"
+                ],
+            )
+            selection_source = "orca_b973c_relaxed_scan"
+            s2_state = str(rescue_payload.get("s2_state") or "unresolved")
+            active_frames = [Path(value) for value in rescue_payload.get("frames") or []]
+            active_energies = [
+                None if value is None else float(value)
+                for value in rescue_payload.get("energies_hartree") or []
+            ]
+            if rescue_payload.get("scan_profile"):
+                rescue_profile_path = Path(str(rescue_payload["scan_profile"]))
+                try:
+                    rescue_profile_payload = json.loads(
+                        rescue_profile_path.read_text(encoding="utf-8")
+                    )
+                    selection = dict(rescue_profile_payload.get("rescue") or rescue_payload)
+                except (OSError, ValueError):
+                    selection = dict(rescue_payload)
+            else:
+                selection = dict(rescue_payload)
+        elif primary_profile is not None:
+            selected = primary_selection or select_path_seeds(primary_profile, policy)
+            selection = selected.to_dict()
+            s2_state = "gfn2_seeded" if selected.s2_state != "unresolved" else "unresolved"
+        else:
+            selection = {"s2_state": "unresolved", "rejection_reason": "gfn2_scan_or_sp_incomplete"}
+
+        if active_profile is None and active_frames and len(active_frames) == len(active_energies) and all(
+            value is not None for value in active_energies
+        ):
+            active_profile = build_orca_scan_profile(
+                frames=active_frames,
+                energies_hartree=active_energies,
+                forming_bonds=bonds,
+                product_xyz=product_file,
+                energy_source="ORCA B97-3c relaxed scan",
+                source_provenance={
+                    "scan_engine": "orca",
+                    "scan_method": "B97-3c",
+                    "scan_role": "rescue",
+                },
+            )
+        if active_profile is None:
+            active_profile = build_orca_scan_profile(
+                frames=active_frames,
+                energies_hartree=active_energies,
+                forming_bonds=bonds,
+                product_xyz=product_file,
+                energy_source="ORCA B97-3c SP",
+            )
+
+        ts_seed = dict(selection.get("ts_search_seed") or {})
+        int_seed = dict(selection.get("int_search_seed") or {})
+        if s2_state == "unresolved":
+            ts_seed = {}
+            int_seed = {}
+        def seed_path(seed: Mapping[str, Any]) -> Optional[Path]:
+            value = seed.get("xyz") or seed.get("frame_xyz")
+            if value:
+                return Path(str(value))
+            index = seed.get("frame_index")
+            if index is None or not (0 <= int(index) < len(active_frames)):
+                return None
+            return active_frames[int(index)]
+
+        ts_source = seed_path(ts_seed)
+        int_source = seed_path(int_seed)
+        dispatch = {
+            "resolution": "direct_seeded" if s2_state == "gfn2_seeded" else "rescue_seeded" if s2_state == "rescue_seeded" else "unresolved",
+            "submit_ts": bool(ts_source and s2_state != "unresolved"),
+            "submit_intermediate": bool(int_source and s2_state != "unresolved"),
+            "neb_eligible": False,
+            "source": selection_source,
+            "path_fully_distorted": bool(rescue_required),
+        }
+        ts_guess = output_dir / "ts_guess.xyz"
+        intermediate = output_dir / INTERMEDIATE_XYZ
+        if dispatch["submit_ts"]:
+            self._atomic_copy(ts_source, ts_guess)
+        if dispatch["submit_intermediate"]:
+            self._atomic_copy(int_source, intermediate)
+
+        active_gfn2 = primary_energies if active_profile is primary_profile else []
+        active_b973c = active_energies
+        coordinates = self._scan_coordinates(active_frames, bonds)
+        relative_b973c = self._relative_scan_energies(active_b973c)
+        relative_gfn2 = self._relative_scan_energies(primary_energies)
+        selection_payload = {
+            "authority": "unified_selector",
+            "source": selection_source,
+            "s2_state": s2_state,
+            "seed_evidence": selection.get("seed_evidence", "none"),
+            "ts_search_seed": ts_seed or None,
+            "int_search_seed": int_seed or None,
+            "has_independent_int": bool(selection.get("has_independent_int", False)),
+            "rejection_reason": selection.get("rejection_reason"),
+            "diagnostics": dict(selection.get("diagnostics") or selection.get("selection_diagnostics") or {}),
+        }
+        ts_index = ts_seed.get("frame_index")
+        int_index = int_seed.get("frame_index")
+        profile_payload: Dict[str, Any] = {
+            "profile_schema_version": "s2_scan_profile_v11",
+            "generation_method": "orca_gfn2_relaxed_scan_b973c_sp",
+            "product_xyz": str(product_file),
+            "forming_bonds": [list(pair) for pair in bonds],
+            "scan_engine": "orca",
+            "scan_method": "GFN2-xTB",
+            "energy_refinement_engine": "orca",
+            "energy_refinement_method": "B97-3c",
+            "selection_source": selection_source,
+            "s2_state": s2_state,
+            "seed_evidence": selection.get("seed_evidence", "none"),
+            "endpoint_evidence": dict(selection.get("endpoint_evidence") or {}),
+            "knee_evidence": dict(selection.get("knee_evidence") or {}),
+            "ts_search_seed": ts_seed or None,
+            "int_search_seed": int_seed or None,
+            "has_independent_int": bool(selection.get("has_independent_int", False)),
+            "rejection_reason": selection.get("rejection_reason"),
+            "selection_decision": {
+                "rule": "knee + adaptive right shift; INT = TS-to-effective-endpoint midpoint",
+                "selected_branch": selection_source,
+                "ts_seed_index": ts_index,
+                "int_seed_index": int_index,
+            },
+            "selection_policy": {
+                "preferred_source": "b973c",
+                "actual_source": "B97-3c",
+                "ts_source": "B97-3c",
+                "intermediate_source": "B97-3c",
+                "algorithm": "endpoint_knee_shift_midpoint_v1",
+                "topology_rescue_rule": (
+                    "supported_knee_before_first_distortion_plus_clean_post_knee_frames"
+                ),
+                "minimum_clean_frames_after_knee": policy.minimum_clean_frames_after_knee,
+            },
+            "seed_selection": selection_payload,
+            "s3_dispatch": dispatch,
+            "scan_parameters": params,
+            "trajectory_quality": {
+                "checked": True,
+                "topology_state": (
+                    "incomplete"
+                    if scan_or_sp_incomplete
+                    else "distorted_before_knee_support"
+                    if topology_rescue_required
+                    else "tail_distorted_after_knee"
+                    if primary_profile is not None and primary_profile.excluded_frames
+                    else "valid"
+                ),
+                "off_path_indices": list(active_profile.excluded_frames),
+                "excluded_frames": list(active_profile.excluded_frames),
+                "topology_rescue_decision": topology_decision,
+            },
+            "reaction_coordinate_angstrom": coordinates,
+            "energy_curves": {
+                "gfn2": {
+                    "status": "complete" if primary_energies else "not_run",
+                    "engine": "orca",
+                    "method": "GFN2-xTB",
+                    "energies_hartree": primary_energies,
+                    "relative_energies_kcal_mol": relative_gfn2,
+                },
+                "b973c": {
+                    "status": "complete" if all(value is not None for value in active_b973c) else "incomplete",
+                    "engine": "orca",
+                    "method": "B97-3c",
+                    "energies_hartree": active_b973c,
+                    "relative_energies_kcal_mol": relative_b973c,
+                },
+            },
+            "energies_hartree": active_b973c,
+            "relative_energies_kcal_mol": relative_b973c,
+            "frames": [str(frame) for frame in active_frames],
+            "energy_refinement": b973c_refinement,
+            "primary_scan": dict(primary),
+            "rescue": dict(rescue_payload),
+            "selections": {
+                "ts_guess": {
+                    **ts_seed,
+                    "index": ts_index,
+                    "frame_xyz": str(ts_source) if ts_source else None,
+                    "rule": "knee + adaptive right shift",
+                    "source": selection_source,
+                },
+                "intermediate": {
+                    **int_seed,
+                    "index": int_index,
+                    "frame_xyz": str(int_source) if int_source else None,
+                    "rule": "TS-to-effective-endpoint midpoint",
+                    "source": selection_source,
+                },
+            },
+            "artifact_lifecycle": {
+                "stale_outputs_archived_to": str(archived_outputs) if archived_outputs else None,
+                "legacy_xtb_scan_path_removed": True,
+            },
+            "scan_plot": None,
+        }
+        scan_profile_json = output_dir / "scan_profile.json"
+        self.last_profile_payload = profile_payload
+        try:
+            plot_path = plot_scan_profile(
+                scan_profile_json,
+                output_dir / "scan_profile.png",
+                profile_payload=profile_payload,
+            )
+            profile_payload["scan_plot"] = str(plot_path) if plot_path else None
+        except Exception as exc:
+            self.logger.warning("[S2] Failed to render ORCA scan profile: %s", exc, exc_info=True)
+        write_text_atomic(scan_profile_json, json.dumps(profile_payload, indent=2), encoding="utf-8")
+
+        status = "COMPLETE" if dispatch["submit_ts"] else "DEGRADED"
+        if not dispatch["submit_ts"]:
+            degraded_reasons.append(str(selection.get("rejection_reason") or "s2_unresolved"))
+        confidence = str(ts_seed.get("confidence") or "low" if dispatch["submit_ts"] else "unresolved")
+        return (
+            ts_guess if dispatch["submit_ts"] else None,
+            intermediate if dispatch["submit_intermediate"] else None,
+            intermediate if dispatch["submit_intermediate"] else None,
+            bonds,
+            scan_profile_json,
+            status,
+            confidence,
+            tuple(dict.fromkeys(degraded_reasons)),
+        )
+
     def run(
         self,
         product_xyz: Path,
@@ -1646,7 +2685,7 @@ class PEBScanEngine(LoggerMixin):
         forming_bonds: Sequence[Tuple[int, int]],
         scan_config: Optional[Dict[str, Any]] = None,
     ) -> Tuple[
-        Path,
+        Optional[Path],
         Optional[Path],
         Optional[Path],
         Tuple[Tuple[int, int], ...],
@@ -1655,6 +2694,25 @@ class PEBScanEngine(LoggerMixin):
         str,
         Tuple[str, ...],
     ]:
+        # A bare hand-built config without the V4 S2 method block is retained
+        # for old offline fixtures only.  The shipped defaults always contain
+        # ``orca_gfn2_scan`` and therefore cannot enter this branch.
+        legacy_fixture_mode = (
+            str(self.step2_cfg.get("method", "") or "").strip().lower() == "xtb_path"
+            or "xtb_path" in self.step2_cfg
+            or (
+                "method" not in self.step2_cfg
+                and "orca_gfn2_scan" not in self.step2_cfg
+                and "xtb_path" not in self.step2_cfg
+            )
+        )
+        if not legacy_fixture_mode:
+            return self._run_orca_gfn2_workflow(
+                product_xyz, output_dir, forming_bonds, scan_config
+            )
+        # The legacy xTB coarse/PATH implementation below is retained only as
+        # compatibility code for old offline fixtures; it is unreachable from
+        # the V4 S2 entrypoint and never launches a calculation.
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         archived_outputs = self._archive_previous_outputs(output_dir)
@@ -1886,7 +2944,6 @@ class PEBScanEngine(LoggerMixin):
                 active_params = extension_params
                 composite_candidates.append(active_attempt)
 
-        refinement_cfg = dict(params.get("candidate_refinement", {}) or {})
         anchor_cfg = dict(params.get("anchor_detection", {}) or {})
         selection_cfg = dict(params.get("selection", {}) or {})
         coarse_anchors = self._detect_scan_anchors(
@@ -1916,31 +2973,279 @@ class PEBScanEngine(LoggerMixin):
         )
 
         path_start_index = int(coarse_anchors["last_valid_before_drift_index"])
+        full_endpoint_index = int(coarse_anchors["scan_endpoint_index"])
         product_index = int(coarse_anchors["product_index"])
         if path_start_index == product_index:
             raise RuntimeError(
                 "S2 xTB PATH cannot start and end on the same frame "
                 f"(index={path_start_index})"
             )
-        path_start_frame = active_attempt.frame_paths[path_start_index]
         path_end_frame = active_attempt.frame_paths[product_index]
 
+        path_cfg = self._xtb_path_config()
+        endpoint_strategy = str(
+            path_cfg.get("endpoint_strategy", "full_endpoint_with_valid_corridor")
+        ).strip().lower()
+        explore_full_endpoint = endpoint_strategy == "full_endpoint_with_valid_corridor"
+        retain_valid_corridor = bool(path_cfg.get("retain_valid_corridor_path", True))
         path_attempt: Optional[ScanAttempt] = None
         path_metadata: Dict[str, Any] = {}
-        try:
-            path_attempt, path_metadata = self._execute_xtb_path(
-                start_xyz=path_start_frame,
-                end_xyz=path_end_frame,
-                output_dir=output_dir,
-                forming_bonds=bonds,
+        valid_path_attempt: Optional[ScanAttempt] = None
+        valid_path_metadata: Dict[str, Any] = {}
+        full_path_attempt: Optional[ScanAttempt] = None
+        full_path_metadata: Dict[str, Any] = {}
+        path_context = {
+            "topology_config": topology_config,
+            "reference_coords": np.asarray(coords, dtype=float).tolist(),
+            "reference_symbols": symbols,
+            "reference_path": product_file,
+            "consecutive_off_path": int(params["terminate_after_consecutive_off_path"]),
+        }
+
+        def execute_path_branch(
+            name: str, start_index: int,
+        ) -> Tuple[Optional[ScanAttempt], Dict[str, Any]]:
+            if start_index == product_index:
+                return None, {}
+            try:
+                attempt, metadata = self._execute_xtb_path(
+                    start_xyz=active_attempt.frame_paths[start_index],
+                    end_xyz=path_end_frame,
+                    output_dir=output_dir,
+                    forming_bonds=bonds,
+                    path_name=name,
+                    **path_context,
+                )
+                attempts.append(attempt)
+                return attempt, metadata
+            except RuntimeError as exc:
+                self.logger.warning("[S2] xTB PATH branch %s failed: %s", name, exc)
+                degraded_reasons.append(f"xtb_path_{name}_failed:{exc}")
+                return None, {}
+
+        if explore_full_endpoint and full_endpoint_index != path_start_index:
+            full_path_attempt, full_path_metadata = execute_path_branch(
+                "full_endpoint", full_endpoint_index
             )
-            attempts.append(path_attempt)
-        except RuntimeError as exc:
+        if retain_valid_corridor or full_path_attempt is None:
+            valid_path_attempt, valid_path_metadata = execute_path_branch(
+                "valid_corridor", path_start_index
+            )
+
+        branch_attempts = {
+            name: (attempt, metadata)
+            for name, attempt, metadata in (
+                ("full_endpoint", full_path_attempt, full_path_metadata),
+                ("valid_corridor", valid_path_attempt, valid_path_metadata),
+            )
+            if attempt is not None
+        }
+        branch_refinements: Dict[str, Dict[str, Any]] = {}
+        branch_b973c_energies: Dict[str, List[Optional[float]]] = {}
+        branch_evaluations: Dict[str, Dict[str, Any]] = {}
+        preferred_b973c = selection_cfg.get("preferred_energy_source") == "b973c"
+        peak_cutoff = float(selection_cfg.get("ts_min_prominence_kcal_mol", 0.40))
+        weak_peak_cutoff = float(
+            selection_cfg.get(
+                "valid_corridor_weak_peak_min_prominence_kcal_mol", 0.10
+            )
+        )
+        weak_peak_barrier = float(
+            selection_cfg.get(
+                "valid_corridor_weak_peak_min_barrier_kcal_mol", 3.0
+            )
+        )
+        full_boundary_min_frames = max(
+            1,
+            int(
+                selection_cfg.get(
+                    "full_endpoint_min_clean_frames_from_boundary", 3
+                )
+            ),
+        )
+
+        # Both PATHs must be evaluated before a seed branch is chosen.  The
+        # former implementation selected full_endpoint eagerly, which made the
+        # valid-corridor B97-3c peak informational only.
+        for branch_name, (attempt, metadata) in branch_attempts.items():
+            branch_frames = list(attempt.frame_paths)
+            refinement = ScanEnergyRefiner(
+                self.config,
+                output_dir / "energy_refinement",
+                event_callback=self.event_callback,
+                variant=self.molecule_name or "product",
+            ).refine(
+                branch_frames,
+                point_ids=[f"{branch_name}_{index:04d}" for index in range(len(branch_frames))],
+            )
+            b97_energies = [
+                None if value is None else float(value)
+                for value in list(refinement.get("energies_hartree") or [])
+            ]
+            if len(b97_energies) != len(branch_frames):
+                b97_energies = (b97_energies + [None] * len(branch_frames))[:len(branch_frames)]
+            branch_refinements[branch_name] = dict(refinement)
+            branch_b973c_energies[branch_name] = b97_energies
+            b97_complete = bool(b97_energies) and all(value is not None for value in b97_energies)
+            method_energies = (
+                b97_energies
+                if preferred_b973c and b97_complete
+                else [float(value) for value in attempt.xtb_energies_hartree]
+            )
+            connected = self._product_connected_valid_indices(
+                len(branch_frames), attempt.off_path_indices
+            )
+            excluded = sorted(set(range(len(branch_frames))) - set(connected))
+            branch_anchors = self._path_selection_anchors(
+                energies=attempt.xtb_energies_hartree,
+                reaction_coordinate=attempt.target_coordinates_A,
+                valid_indices=connected,
+                off_path_indices=excluded,
+            )
+            candidate, _int_candidate, peak_index, _int_index, _int_status = (
+                self._select_refined_path_nodes(
+                    anchors=branch_anchors,
+                    frame_paths=branch_frames,
+                    reaction_coordinate=attempt.target_coordinates_A,
+                    method_energies=method_energies,
+                    off_path_indices=excluded,
+                    path_arclength=np.asarray(metadata.get("path_arclength") or [], dtype=float),
+                    selection_config=selection_cfg,
+                )
+            )
+            significant_peak = (
+                candidate.get("rule") == "refined_curve_local_maximum"
+                and float(candidate.get("prominence_kcal_mol") or 0.0) >= peak_cutoff
+            )
+            path_arclength = list(metadata.get("path_arclength") or [])
+            path_arclength_values = (
+                [float(value) for value in path_arclength if value is not None]
+                if len(path_arclength) == len(branch_frames)
+                and all(value is not None for value in path_arclength)
+                else None
+            )
+            if path_arclength_values is not None:
+                arclength_lookup = tuple(path_arclength_values)
+                ordered_connected = sorted(
+                    connected, key=lambda index: arclength_lookup[index]
+                )
+            else:
+                ordered_connected = sorted(connected)
+            peak_position = (
+                ordered_connected.index(int(peak_index))
+                if int(peak_index) in ordered_connected
+                else None
+            )
+            reactant_index = ordered_connected[0] if ordered_connected else None
+            peak_energy = (
+                None
+                if peak_index is None
+                else method_energies[int(peak_index)]
+            )
+            reactant_energy = (
+                None
+                if reactant_index is None
+                else method_energies[int(reactant_index)]
+            )
+            barrier_from_reactant = (
+                (float(peak_energy) - float(reactant_energy))
+                * HARTREE_TO_KCAL
+                if reactant_index is not None
+                and peak_energy is not None
+                and reactant_energy is not None
+                else None
+            )
+            local_peak = candidate.get("rule") in {
+                "refined_curve_local_maximum",
+                "refined_curve_weak_local_maximum",
+            }
+            topology_clean = not excluded
+            weak_credible = bool(
+                topology_clean
+                and b97_complete
+                and local_peak
+                and float(candidate.get("prominence_kcal_mol") or 0.0)
+                >= weak_peak_cutoff
+                and barrier_from_reactant is not None
+                and float(barrier_from_reactant) >= weak_peak_barrier
+            )
+            full_boundary_safe = bool(
+                topology_clean
+                or (
+                    peak_position is not None
+                    and int(peak_position) >= full_boundary_min_frames
+                )
+            )
+            branch_evaluations[branch_name] = {
+                "eligible": bool(significant_peak),
+                "strong_peak": bool(significant_peak),
+                "weak_credible": weak_credible,
+                "peak_index": int(peak_index),
+                "peak_rule": candidate.get("rule"),
+                "peak_prominence_kcal_mol": float(candidate.get("prominence_kcal_mol") or 0.0),
+                "barrier_from_reactant_kcal_mol": barrier_from_reactant,
+                "energy_source": "B97-3c" if preferred_b973c and b97_complete else "xtb_fallback",
+                "b973c_complete": bool(b97_complete),
+                "topology_clean": topology_clean,
+                "clean_frames_before_peak": peak_position,
+                "full_endpoint_boundary_safe": full_boundary_safe,
+                "product_connected_valid_indices": connected,
+                "selection_excluded_indices": excluded,
+            }
+
+        selected_branch: Optional[str] = None
+        selection_rule: str
+        if branch_evaluations.get("valid_corridor", {}).get("eligible"):
+            selected_branch = "valid_corridor"
+            selection_rule = "precise_significant_peak_preferred"
+        elif branch_evaluations.get("valid_corridor", {}).get("weak_credible"):
+            selected_branch = "valid_corridor"
+            selection_rule = "valid_corridor_credible_weak_peak_preferred"
+        elif (
+            branch_evaluations.get("full_endpoint", {}).get("eligible")
+            and branch_evaluations.get("full_endpoint", {}).get(
+                "full_endpoint_boundary_safe"
+            )
+        ):
+            selected_branch = "full_endpoint"
+            selection_rule = "full_endpoint_significant_peak_fallback"
+        elif branch_evaluations.get("full_endpoint", {}).get("weak_credible"):
+            selected_branch = "full_endpoint"
+            selection_rule = "full_endpoint_credible_weak_peak_fallback"
+        elif "full_endpoint" in branch_attempts:
+            selected_branch = "full_endpoint"
+            if branch_evaluations.get("full_endpoint", {}).get("topology_clean"):
+                selection_rule = "full_endpoint_low_confidence_fallback"
+            else:
+                selection_rule = "full_endpoint_boundary_seed_fallback"
+        elif "valid_corridor" in branch_attempts:
+            selected_branch = "valid_corridor"
+            selection_rule = "valid_corridor_fallback_no_significant_peak"
+        else:
+            selection_rule = "coarse_only_no_path_branch"
+
+        selection_decision: Dict[str, Any] = {
+            "selected_branch": selected_branch,
+            "rule": selection_rule,
+            "significant_peak_threshold_kcal_mol": peak_cutoff,
+            "weak_peak_threshold_kcal_mol": weak_peak_cutoff,
+            "weak_peak_min_barrier_kcal_mol": weak_peak_barrier,
+            "candidates": branch_evaluations,
+        }
+        if selection_rule in {
+            "full_endpoint_boundary_seed_fallback",
+            "full_endpoint_low_confidence_fallback",
+            "valid_corridor_fallback_no_significant_peak",
+        }:
+            status = "DEGRADED"
+            ts_guess_confidence = "low"
+            degraded_reasons.append("no_credible_refined_path_peak")
+        if selected_branch is not None:
+            path_attempt, path_metadata = branch_attempts[selected_branch]
+        else:
             self.logger.warning(
-                "[S2] xTB PATH failed (%s); falling back to coarse-only anchor selection",
-                exc,
+                "[S2] all xTB PATH branches failed; falling back to coarse-only selection"
             )
-            degraded_reasons.append(f"xtb_path_failed:{exc}")
             status = "DEGRADED"
             ts_guess_confidence = "medium"
 
@@ -1952,7 +3257,10 @@ class PEBScanEngine(LoggerMixin):
             xtb_energies = [
                 float(value) for value in path_attempt.xtb_energies_hartree
             ]
-            off_path_indices = set()
+            product_connected_indices = self._product_connected_valid_indices(
+                len(frame_paths), path_attempt.off_path_indices
+            )
+            off_path_indices = set(range(len(frame_paths))) - set(product_connected_indices)
             composite_points = [
                 {
                     "point_id": f"path_{index:04d}",
@@ -1963,7 +3271,7 @@ class PEBScanEngine(LoggerMixin):
                     "xyz_sha256": None,
                     "target_coordinate_A": float(coordinate),
                     "xtb_energy_hartree": float(energy),
-                    "topology_valid": True,
+                    "topology_valid": index not in off_path_indices,
                 }
                 for index, (frame, coordinate, energy) in enumerate(
                     zip(frame_paths, reaction_coordinate, xtb_energies)
@@ -1977,20 +3285,24 @@ class PEBScanEngine(LoggerMixin):
                     "coordinate_min_A": min(reaction_coordinate),
                     "coordinate_max_A": max(reaction_coordinate),
                     "point_count": len(composite_points),
-                    "topology_valid_point_count": len(composite_points),
+                    "topology_valid_point_count": len(product_connected_indices),
                     "complete_xtb_curve": True,
                 },
                 "continuity_checks": [],
             }
-            trajectory_quality = {
-                "checked": False,
-                "total_frames": len(composite_points),
-                "off_path_indices": [],
-                "off_path_count": 0,
-                "coverage_checks": coverage_checks,
-                "source_attempts": [path_attempt.attempt_id],
-                "xtb_path": True,
-            }
+            trajectory_quality = dict(path_attempt.trajectory_quality)
+            trajectory_quality.update(
+                {
+                    "total_frames": len(composite_points),
+                    "off_path_indices": sorted(off_path_indices),
+                    "off_path_count": len(off_path_indices),
+                    "product_connected_valid_indices": product_connected_indices,
+                    "coverage_checks": coverage_checks,
+                    "source_attempts": [path_attempt.attempt_id],
+                    "xtb_path": True,
+                    "selection_branch": path_metadata.get("path_name"),
+                }
+            )
         else:
             frame_paths = [Path(p) for p in active_attempt.frame_paths]
             reaction_coordinate = [
@@ -2041,36 +3353,40 @@ class PEBScanEngine(LoggerMixin):
                 "xtb_path": False,
             }
 
-        anchors = self._detect_scan_anchors(
-            xtb_energies,
-            reaction_coordinate,
-            sorted(off_path_indices),
-            int(anchor_cfg.get("persistent_drift_points", 2)),
-            anchor_cfg,
-        )
+        if path_attempt is not None:
+            anchors = self._path_selection_anchors(
+                energies=xtb_energies,
+                reaction_coordinate=reaction_coordinate,
+                valid_indices=trajectory_quality["product_connected_valid_indices"],
+                off_path_indices=sorted(off_path_indices),
+            )
+        else:
+            anchors = self._detect_scan_anchors(
+                xtb_energies,
+                reaction_coordinate,
+                sorted(off_path_indices),
+                int(anchor_cfg.get("persistent_drift_points", 2)),
+                anchor_cfg,
+            )
 
         # PATH 模式: 终点应为最后一帧（产物），而非坐标极值
         # _detect_scan_anchors 的 endpoint_index = argmax(coordinate)
         # 这对粗扫正确（最大距离 = 扫描终点），但对 PATH 语义相反
         # （最大距离 = PATH 起点 frame 0，最小距离 = 产物 frame N-1）。
-        if path_attempt is not None:
-            path_end = len(reaction_coordinate) - 1
-            anchors["scan_endpoint_index"] = path_end
-            if "product_index" not in anchors:
-                anchors["product_index"] = path_end
-
-        energy_refinement_cfg = dict(self.step2_cfg.get("energy_refinement", {}) or {})
         all_indices = list(range(len(composite_points)))
         refinement_frames = [frame_paths[index] for index in all_indices]
         refinement_point_ids = [
             str(composite_points[index]["point_id"]) for index in all_indices
         ]
-        valid_refinement = ScanEnergyRefiner(
-            self.config,
-            output_dir / "energy_refinement",
-            event_callback=self.event_callback,
-            variant=self.molecule_name or "product",
-        ).refine(refinement_frames, point_ids=refinement_point_ids)
+        selected_path_name = str(path_metadata.get("path_name", "valid_corridor"))
+        valid_refinement = dict(branch_refinements.get(selected_path_name) or {})
+        if not valid_refinement:
+            valid_refinement = ScanEnergyRefiner(
+                self.config,
+                output_dir / "energy_refinement",
+                event_callback=self.event_callback,
+                variant=self.molecule_name or "product",
+            ).refine(refinement_frames, point_ids=refinement_point_ids)
         b973c_energies: List[Optional[float]] = [None] * len(composite_points)
         for local_index, composite_index in enumerate(all_indices):
             values = list(valid_refinement.get("energies_hartree") or [])
@@ -2091,7 +3407,6 @@ class PEBScanEngine(LoggerMixin):
         ]
         energy_refinement["total_composite_points"] = len(composite_points)
 
-        preferred_b973c = selection_cfg.get("preferred_energy_source") == "b973c"
         b973c_complete = bool(completed_refinement_indices) and all(
             b973c_energies[index] is not None for index in all_indices
         )
@@ -2118,6 +3433,53 @@ class PEBScanEngine(LoggerMixin):
         }
         energy_refinement["coverage"] = b973c_coverage
 
+        path_arclength = (
+            np.asarray(path_metadata.get("path_arclength", []), dtype=float)
+            if path_metadata and path_metadata.get("path_arclength")
+            else None
+        )
+        xtb_path_profile = build_xtb_path_profile(
+            frame_paths=frame_paths,
+            energies_hartree=method_energies,
+            forming_bonds=bonds,
+            product_xyz=product_file,
+            off_path_indices=sorted(off_path_indices),
+            source_provenance={
+                "path_name": selected_path_name,
+                "attempt_id": composite_profile.get("backbone_attempt_id"),
+                "energy_source": ts_selection_energy_source,
+                "point_ids": refinement_point_ids,
+                "path_arclength": list(path_arclength) if path_arclength is not None else [],
+            },
+        )
+        xtb_selector_selection = select_path_seeds(
+            xtb_path_profile,
+            policy_from_config(selection_cfg),
+        )
+        xtb_selector_payload = xtb_selector_selection.to_dict()
+        profile_selection_source = None
+        profile_s2_state = str(xtb_selector_payload.get("s2_state") or "unresolved")
+        profile_seed_evidence = str(
+            xtb_selector_payload.get("seed_evidence") or "none"
+        )
+        profile_ts_search_seed = (
+            None
+            if xtb_selector_payload.get("ts_search_seed") is None
+            else dict(xtb_selector_payload["ts_search_seed"])
+        )
+        profile_int_search_seed = (
+            None
+            if xtb_selector_payload.get("int_search_seed") is None
+            else dict(xtb_selector_payload["int_search_seed"])
+        )
+        profile_has_independent_int = bool(
+            xtb_selector_payload.get("has_independent_int", False)
+        )
+        profile_rejection_reason = xtb_selector_payload.get("rejection_reason")
+        profile_selection_diagnostics = dict(
+            xtb_selector_payload.get("diagnostics") or {}
+        )
+
         selection_started = time.monotonic()
         self._emit_progress(
             "step_started",
@@ -2128,63 +3490,312 @@ class PEBScanEngine(LoggerMixin):
             point_count=len(composite_points),
         )
 
-        # --- 从粗扫稳定平台计算 INT 候选 ---
-        preferred_int_index: Optional[int] = None
-        if path_attempt is not None:
-            p_onset = coarse_anchors.get("plateau_onset_index")
-            p_drift = coarse_anchors.get("topology_drift_index") or coarse_anchors.get("scan_endpoint_index")
-            if p_onset is not None and p_drift is not None:
-                p_onset = int(p_onset)
-                p_drift = int(p_drift)
-                if p_drift > p_onset:
-                    plateau_len = p_drift - p_onset + 1
-                    margin = max(1, math.ceil(0.20 * plateau_len))
-                    safe_start = p_onset + margin
-                    safe_end = p_drift - margin
-                    if safe_start <= safe_end:
-                        # 粗扫安全平台中心坐标
-                        coarse_rc = coarse_scan_summary.get("reaction_coordinate_angstrom", [])
-                        center_idx = (safe_start + safe_end) // 2
-                        if center_idx < len(coarse_rc):
-                            target_coord = float(coarse_rc[center_idx])
-                            # 映射到 PATH 最近帧
-                            preferred_int_index = min(
-                                range(len(reaction_coordinate)),
-                                key=lambda i: abs(float(reaction_coordinate[i]) - target_coord),
-                            )
-
-        ts_selection, intermediate_selection, max_idx, intermediate_idx, intermediate_selection_status = (
-            self._select_refined_path_nodes(
-                anchors=anchors,
-                frame_paths=frame_paths,
-                reaction_coordinate=reaction_coordinate,
-                method_energies=method_energies,
-                off_path_indices=sorted(off_path_indices),
-                path_arclength=(
-                    np.asarray(path_metadata.get("path_arclength", []), dtype=float)
-                    if path_metadata and path_metadata.get("path_arclength")
-                    else None
-                ),
-                selection_config=selection_cfg,
-            )
+        (
+            ts_selection,
+            intermediate_selection,
+            max_idx,
+            intermediate_idx,
+            intermediate_selection_status,
+        ) = self._unified_selection_records(
+            profile=xtb_path_profile,
+            selection=xtb_selector_selection,
+            method_energies=method_energies,
+            energy_source=ts_selection_energy_source,
         )
         ts_selection.update(
             {
-                "configured_method": "refined_path_curve",
-                "actual_method": ts_selection.get("actual_method", "refined_path_curve"),
                 "xtb_path_estimated_ts_point": path_metadata.get("estimated_ts_point"),
+                "source_branch": selected_path_name,
+                "target_coordinate_A": (
+                    None
+                    if ts_selection.get("index") is None
+                    else float(reaction_coordinate[int(ts_selection["index"])])
+                ),
+                "point_id": (
+                    None
+                    if ts_selection.get("index") is None
+                    else str(composite_points[int(ts_selection["index"])] ["point_id"])
+                ),
             }
         )
+        if intermediate_selection.get("index") is not None:
+            intermediate_selection.update(
+                {
+                    "target_coordinate_A": float(
+                        reaction_coordinate[int(intermediate_selection["index"])]
+                    ),
+                    "point_id": str(
+                        composite_points[int(intermediate_selection["index"])] ["point_id"]
+                    ),
+                    "source_branch": selected_path_name,
+                }
+            )
         ts_guess_confidence = str(ts_selection.get("confidence", ts_guess_confidence))
-        if intermediate_idx is None:
-            intermediate_selection.setdefault("reason", "no_int_search_seed")
+        selection_decision = {
+            "selected_branch": selected_path_name,
+            "rule": ts_selection.get("rule"),
+            "configured_method": "unified_selector",
+            "actual_method": ts_selection.get("actual_method"),
+        }
+
+        forming_bond_distances = self._forming_bond_distances_by_frame(frame_paths, bonds)
+        ts_peak_idx = None if max_idx is None else int(max_idx)
+        ts_seed_idx = ts_selection.get("index")
+
+        path_requires_rescue = self._path_requires_relaxed_scan(
+            trajectory_quality
+        )
+        selection_source = (
+            "xtb_peb"
+            if xtb_selector_selection.s2_state == "path_seeded"
+            else None
+        )
+        path_seed_available = (
+            selection_source == "xtb_peb"
+            and not path_requires_rescue
+            and ts_seed_idx is not None
+        )
+        if not path_requires_rescue and not path_seed_available:
+            status = "DEGRADED"
+            degraded_reasons.append("s2_selector_unresolved")
+        s3_dispatch: Dict[str, Any] = {
+            "resolution": "path_seeded" if path_seed_available else "unresolved",
+            "submit_ts": bool(path_seed_available),
+            "submit_intermediate": bool(path_seed_available and intermediate_idx is not None),
+            # S2 only provides seeds.  Whether an optimized intermediate is
+            # suitable for an S3 endpoint is deliberately outside this gate.
+            "neb_eligible": False,
+            "source": "peb_path",
+            "path_fully_distorted": path_requires_rescue,
+        }
+        profile_selection_source = selection_source
+        rescue_payload: Dict[str, Any] = {"status": "not_required"}
+        ts_seed_source = (
+            Path(frame_paths[int(ts_seed_idx)])
+            if path_seed_available
+            else None
+        )
+        intermediate_seed_idx_raw = intermediate_selection.get("index")
+        intermediate_seed_idx = (
+            None
+            if intermediate_seed_idx_raw is None
+            else int(intermediate_seed_idx_raw)
+        )
+        intermediate_source = (
+            Path(frame_paths[intermediate_seed_idx])
+            if intermediate_seed_idx is not None and path_seed_available
+            else None
+        )
+        if intermediate_source is not None:
+            # A shared TS/INT frame is still a legitimate pair of independent
+            # S3 search seeds on a usable path.  Keep its index so the
+            # published intermediate.xyz reaches the orchestrator.
+            intermediate_idx = intermediate_seed_idx
+        if path_requires_rescue:
+            rescue_payload = B97CRelaxedScanRescuer(
+                self.config,
+                event_callback=self.event_callback,
+                variant=self.molecule_name,
+            ).run(
+                product_file,
+                output_dir / "rescue",
+                bonds,
+                trigger_reasons=["path_fully_topology_distorted"],
+            )
+            profile_selection_source = "orca_relaxed_scan"
+            profile_s2_state = str(
+                rescue_payload.get("s2_state")
+                or rescue_payload.get("resolution")
+                or "unresolved"
+            )
+            profile_seed_evidence = str(
+                rescue_payload.get("seed_evidence") or "none"
+            )
+            profile_ts_search_seed = (
+                None
+                if rescue_payload.get("ts_search_seed") is None
+                else dict(rescue_payload["ts_search_seed"])
+            )
+            profile_int_search_seed = (
+                None
+                if rescue_payload.get("int_search_seed") is None
+                else dict(rescue_payload["int_search_seed"])
+            )
+            profile_has_independent_int = bool(
+                rescue_payload.get("has_independent_int", False)
+            )
+            profile_rejection_reason = rescue_payload.get("rejection_reason")
+            profile_selection_diagnostics = dict(
+                rescue_payload.get("selection_diagnostics") or {}
+            )
+            rescue_state = profile_s2_state
+            if rescue_state == "rescue_seeded":
+                selection_source = "orca_relaxed_scan"
+                for key in (
+                    "energy_peak_rule",
+                    "energy_peak_candidate_indices",
+                    "energy_peak_coordinate_A",
+                    "seed_index",
+                    "seed_rule",
+                    "seed_backoff_requested_A",
+                    "seed_backoff_applied_A",
+                    "seed_target_mean_forming_bond_distance_A",
+                    "seed_mean_forming_bond_distance_A",
+                    "seed_backoff_status",
+                    "clean_path_boundary_index",
+                    "xtb_path_estimated_ts_point",
+                ):
+                    ts_selection.pop(key, None)
+                for key in (
+                    "pre_ts_floor_kcal_mol",
+                    "barrier_from_pre_ts_floor_kcal_mol",
+                    "energy_window_kcal_mol",
+                    "energy_limit_kcal_mol",
+                    "platform_max_slope_kcal_mol_A",
+                    "clean_pre_ts_frame_count",
+                    "shared_ts_index",
+                ):
+                    intermediate_selection.pop(key, None)
+                s3_dispatch = {
+                    "resolution": "rescue_seeded",
+                    "submit_ts": bool(rescue_payload.get("ts_xyz")),
+                    "submit_intermediate": bool(rescue_payload.get("intermediate_xyz")),
+                    "neb_eligible": False,
+                    "source": "b973c_relaxed_scan",
+                    "path_fully_distorted": True,
+                }
+                ts_selection_energy_source = "B97-3c"
+                intermediate_energy_source = "B97-3c"
+                ts_seed_source = Path(str(rescue_payload["ts_xyz"]))
+                intermediate_raw = rescue_payload.get("intermediate_xyz")
+                intermediate_source = Path(str(intermediate_raw)) if intermediate_raw else None
+                rescue_ts_seed = profile_ts_search_seed or {}
+                rescue_int_seed = profile_int_search_seed or {}
+                rescue_ts_index = self._seed_frame_index(rescue_ts_seed)
+                rescue_int_index = self._seed_frame_index(rescue_int_seed)
+                rescue_int_mode = self._selector_int_selection_mode(
+                    seed_evidence=profile_seed_evidence,
+                    int_seed=rescue_int_seed,
+                    has_independent_int=profile_has_independent_int,
+                )
+                ts_selection.update(
+                    {
+                        "index": rescue_ts_index,
+                        "frame_xyz": str(ts_seed_source),
+                        "rule": self._selector_ts_rule(
+                            profile_seed_evidence,
+                            fallback="b973c_relaxed_scan_seed",
+                        ),
+                        "actual_method": (
+                            "b973c_scants"
+                            if rescue_payload.get("scan_ts")
+                            else "b973c_simultaneous_relaxed_scan"
+                        ),
+                        "confidence": rescue_ts_seed.get("confidence", "medium"),
+                        "source_branch": "s2_rescue",
+                        "source": selection_source,
+                        "candidate_indices": (
+                            [] if rescue_ts_index is None else [int(rescue_ts_index)]
+                        ),
+                    }
+                )
+                ts_guess_confidence = str(
+                    rescue_ts_seed.get("confidence", ts_guess_confidence)
+                )
+                intermediate_selection_status = (
+                    "shared_with_ts"
+                    if rescue_int_mode == "shared_ts_fallback"
+                    else "selected"
+                    if rescue_int_seed
+                    else "unavailable"
+                )
+                intermediate_selection.update(
+                    {
+                        "index": rescue_int_index,
+                        "frame_xyz": (
+                            str(intermediate_source)
+                            if intermediate_source is not None
+                            else rescue_int_seed.get("xyz")
+                        ),
+                        "rule": self._selector_int_rule(
+                            selection_source=selection_source,
+                            seed_evidence=profile_seed_evidence,
+                            int_seed=rescue_int_seed,
+                            has_independent_int=profile_has_independent_int,
+                        ),
+                        "selection_mode": rescue_int_mode,
+                        "selection_status": intermediate_selection_status,
+                        "stationary_point_claimed": False,
+                        "reason": (
+                            None
+                            if rescue_int_seed and rescue_int_mode == "stable_basin_candidate"
+                            else "no_resolved_pre_ts_basin"
+                            if rescue_int_mode == "shared_ts_fallback"
+                            else "no_int_search_seed"
+                            if not rescue_int_seed
+                            else "search_seed"
+                        ),
+                        "source_branch": "s2_rescue",
+                        "source": selection_source,
+                        "candidate_indices": (
+                            []
+                            if rescue_int_index is None
+                            else [int(rescue_int_index)]
+                        ),
+                        "shared_ts_index": (
+                            int(rescue_ts_index)
+                            if rescue_int_mode == "shared_ts_fallback"
+                            and rescue_ts_index is not None
+                            else None
+                        ),
+                    }
+                )
+                intermediate_idx = rescue_int_index
+            else:
+                s3_dispatch.update(
+                    {
+                        "resolution": "unresolved",
+                        "submit_ts": False,
+                        "submit_intermediate": False,
+                        "source": "b973c_relaxed_scan",
+                    }
+                )
+                selection_source = None
+                profile_selection_source = None
+                ts_seed_source = None
+                intermediate_source = None
+                intermediate_idx = None
+                ts_selection = {
+                    "index": None,
+                    "frame_xyz": None,
+                    "rule": "unresolved_rescue",
+                    "selection_status": "unavailable",
+                    "reason": profile_rejection_reason or "s2_rescue_unresolved",
+                    "source": None,
+                    "candidate_indices": [],
+                }
+                intermediate_selection = {
+                    "index": None,
+                    "frame_xyz": None,
+                    "rule": "unresolved_rescue",
+                    "selection_mode": "unavailable",
+                    "selection_status": "unavailable",
+                    "reason": "s2_rescue_unresolved",
+                    "source": None,
+                    "candidate_indices": [],
+                }
+                degraded_reasons.append("s2_rescue_unresolved")
+                status = "DEGRADED"
 
         ts_guess_xyz_final = output_dir / "ts_guess.xyz"
-        self._atomic_copy(frame_paths[max_idx], ts_guess_xyz_final)
+        if ts_seed_source is not None and s3_dispatch["submit_ts"]:
+            self._atomic_copy(ts_seed_source, ts_guess_xyz_final)
 
         dipolar_xyz = output_dir / INTERMEDIATE_XYZ
-        if intermediate_idx is not None:
-            self._atomic_copy(frame_paths[intermediate_idx], dipolar_xyz)
+        if intermediate_source is not None and s3_dispatch["submit_intermediate"]:
+            self._atomic_copy(intermediate_source, dipolar_xyz)
+        else:
+            intermediate_idx = None
 
         xtb_relative_energies = [
             (float(energy) - float(xtb_energies[0])) * HARTREE_TO_KCAL
@@ -2206,24 +3817,184 @@ class PEBScanEngine(LoggerMixin):
                 else None
                 for value in b973c_energies
             ]
-        if intermediate_idx is not None:
-            intermediate_energy = method_energies[intermediate_idx]
+
+        valid_branch_refinement: Optional[Dict[str, Any]] = None
+        if valid_path_attempt is not None and valid_path_attempt is not path_attempt:
+            valid_frames = list(valid_path_attempt.frame_paths)
+            valid_branch_refinement = dict(
+                branch_refinements.get("valid_corridor") or {}
+            )
+            if not valid_branch_refinement:
+                valid_branch_refinement = ScanEnergyRefiner(
+                    self.config,
+                    output_dir / "energy_refinement",
+                    event_callback=self.event_callback,
+                    variant=self.molecule_name or "product",
+                ).refine(
+                    valid_frames,
+                    point_ids=[f"valid_corridor_{index:04d}" for index in range(len(valid_frames))],
+                )
+        def path_branch_payload(
+            name: str,
+            attempt: ScanAttempt,
+            metadata: Mapping[str, Any],
+            b97_energies: Sequence[Optional[float]],
+            refinement: Optional[Mapping[str, Any]],
+            *,
+            selected_for_s3: bool,
+        ) -> Dict[str, Any]:
+            branch_xtb = [float(value) for value in attempt.xtb_energies_hartree]
+            branch_b97 = [
+                None if value is None else float(value) for value in b97_energies
+            ]
+            product_connected = self._product_connected_valid_indices(
+                len(attempt.frame_paths), attempt.off_path_indices
+            )
+            excluded = sorted(
+                set(range(len(attempt.frame_paths))) - set(product_connected)
+            )
+            return {
+                "name": name,
+                "role": (
+                    "selection_path"
+                    if selected_for_s3
+                    else "exploratory_diagnostic"
+                    if name == "full_endpoint"
+                    else "valid_corridor_control"
+                ),
+                "selected_for_s3": selected_for_s3,
+                "metadata": dict(metadata),
+                "point_ids": [f"{name}_{index:04d}" for index in range(len(attempt.frame_paths))],
+                "frame_paths": [str(frame) for frame in attempt.frame_paths],
+                "reaction_coordinate_angstrom": [
+                    float(value) for value in attempt.target_coordinates_A
+                ],
+                "path_arclength": list(metadata.get("path_arclength") or []),
+                "forming_bond_distances_angstrom": self._forming_bond_distances_by_frame(
+                    attempt.frame_paths, bonds
+                ),
+                "trajectory_quality": {
+                    **dict(attempt.trajectory_quality),
+                    "product_connected_valid_indices": product_connected,
+                    "selection_excluded_indices": excluded,
+                },
+                "energy_refinement": dict(refinement or {}),
+                "energy_curves": {
+                    "xtb": {
+                        "energies_hartree": branch_xtb,
+                        "relative_energies_kcal_mol": self._branch_relative_energies(branch_xtb),
+                    },
+                    "b973c": {
+                        "energies_hartree": branch_b97,
+                        "relative_energies_kcal_mol": self._branch_relative_energies(branch_b97),
+                    },
+                },
+            }
+
+        path_branches: Dict[str, Any] = {}
+        for branch_name, (branch_attempt, branch_metadata) in branch_attempts.items():
+            if branch_name == selected_path_name:
+                branch_b97 = b973c_energies
+                branch_refinement = energy_refinement
+            else:
+                branch_b97 = branch_b973c_energies.get(branch_name, [])
+                branch_refinement = branch_refinements.get(branch_name, {})
+            path_branches[branch_name] = path_branch_payload(
+                branch_name,
+                branch_attempt,
+                branch_metadata,
+                branch_b97,
+                branch_refinement,
+                selected_for_s3=branch_name == selected_path_name,
+            )
+            path_branches[branch_name]["selection_candidate"] = dict(
+                branch_evaluations.get(branch_name) or {}
+            )
+
+        ts_selection["source"] = selection_source
+        intermediate_selection["source"] = selection_source
+        published_ts_seed_idx_raw = ts_selection.get("index")
+        published_ts_seed_idx = (
+            None
+            if published_ts_seed_idx_raw is None
+            else int(published_ts_seed_idx_raw)
+        )
+        published_ts_peak_idx = (
+            published_ts_seed_idx
+            if selection_source == "orca_relaxed_scan"
+            else None
+            if ts_peak_idx is None
+            else int(ts_peak_idx)
+        )
+        published_intermediate_idx = None if intermediate_idx is None else int(intermediate_idx)
+
+        selection_coordinates = [float(value) for value in reaction_coordinate]
+        selection_point_ids = [str(point["point_id"]) for point in composite_points]
+        selection_source_attempts = [
+            str(point["source_attempt"]) for point in composite_points
+        ]
+        selection_method_energies = [
+            None if value is None else float(value) for value in method_energies
+        ]
+        selection_relative_energies = (
+            b973c_relative_energies
+            if ts_selection_energy_source == "B97-3c"
+            else xtb_relative_energies
+        )
+        selection_xtb_energies: List[Optional[float]] = [
+            float(value) for value in xtb_energies
+        ]
+        selection_source_branch = selected_path_name
+        if selection_source == "orca_relaxed_scan":
+            rescue_frames = [
+                Path(value) for value in list(rescue_payload.get("frames") or [])
+            ]
+            rescue_energies = [
+                None if value is None else float(value)
+                for value in list(rescue_payload.get("energies_hartree") or [])
+            ]
+            rescue_forming_bond_distances = self._forming_bond_distances_by_frame(
+                rescue_frames,
+                bonds,
+            )
+            selection_coordinates = self._mean_frame_coordinates(
+                rescue_forming_bond_distances
+            )
+            selection_point_ids = [
+                f"rescue_{index:04d}" for index in range(len(rescue_frames))
+            ]
+            selection_source_attempts = [
+                "b973c_relaxed_scan" for _ in range(len(rescue_frames))
+            ]
+            selection_method_energies = rescue_energies
+            selection_relative_energies = self._branch_relative_energies(
+                rescue_energies,
+                reference_side="last",
+            )
+            selection_xtb_energies = [None] * len(rescue_frames)
+            selection_source_branch = "s2_rescue"
+
+        if published_intermediate_idx is not None:
+            intermediate_energy = selection_method_energies[published_intermediate_idx]
             if intermediate_energy is None:
                 raise RuntimeError(
                     "S2 selected an intermediate without a method-consistent energy"
                 )
-            intermediate_relative_energy = (
-                b973c_relative_energies[intermediate_idx]
-                if intermediate_energy_source == "B97-3c"
-                else xtb_relative_energies[intermediate_idx]
-            )
+            intermediate_relative_energy = selection_relative_energies[
+                published_intermediate_idx
+            ]
+            intermediate_xtb_energy = selection_xtb_energies[published_intermediate_idx]
             int_selection_mode = str(
                 intermediate_selection.get("selection_mode", "midpoint_fallback")
             )
             int_method_label = (
                 "PRE_TS_BASIN"
                 if int_selection_mode == "stable_basin_candidate"
-                else "PRE_TS_MIDPOINT"
+                else "PRE_TS_PLATFORM"
+                if int_selection_mode == "late_pre_ts_platform_fallback"
+                else "TS_ENDPOINT_MIDPOINT"
+                if int_selection_mode == "ts_to_effective_endpoint_midpoint"
+                else "PRE_TS_SEARCH"
             )
             intermediate_selection.update(
                 {
@@ -2237,61 +4008,104 @@ class PEBScanEngine(LoggerMixin):
                         "s3_unconstrained_optimization",
                         "s3_frequency",
                     ],
-                    "target_distance_angstrom": float(reaction_coordinate[intermediate_idx]),
-                    "point_id": composite_points[intermediate_idx]["point_id"],
-                    "source_attempt": composite_points[intermediate_idx]["source_attempt"],
+                    "target_distance_angstrom": float(
+                        selection_coordinates[published_intermediate_idx]
+                    ),
+                    "point_id": selection_point_ids[published_intermediate_idx],
+                    "source_attempt": selection_source_attempts[
+                        published_intermediate_idx
+                    ],
                     "energy_hartree": float(intermediate_energy),
                     "energy_source": intermediate_energy_source,
-                    "xtb_energy_hartree": float(xtb_energies[intermediate_idx]),
+                    "target_coordinate_A": float(
+                        selection_coordinates[published_intermediate_idx]
+                    ),
+                    "xtb_energy_hartree": (
+                        None
+                        if intermediate_xtb_energy is None
+                        else float(intermediate_xtb_energy)
+                    ),
                     "relative_energy_kcal_mol": (
                         float(intermediate_relative_energy)
                         if intermediate_relative_energy is not None
                         else None
                     ),
-                    "selection_status": "selected",
+                    "selection_status": intermediate_selection_status,
+                    "source_branch": selection_source_branch,
+                    "source": selection_source,
                     "output_xyz": str(dipolar_xyz),
                 }
             )
-        ts_method_label = "PATH_TS"
-        ts_selection.update(
-            {
-                "status": f"B973C_LOCAL_{ts_method_label}_TS_GUESS"
-                if ts_selection_energy_source == "B97-3c"
-                else f"XTB_LOCAL_{ts_method_label}_TS_GUESS",
-                "confirmation_level": "guess_only",
-                "validation_required": ["s3_opt_ts", "s3_frequency"],
-                "output_xyz": str(ts_guess_xyz_final),
-                "target_distance_angstrom": float(reaction_coordinate[max_idx]),
-                "point_id": composite_points[max_idx]["point_id"],
-                "source_attempt": composite_points[max_idx]["source_attempt"],
-                "energy_hartree": self._require_energy(
-                    method_energies[max_idx],
-                    "S2 selected a TS without a method-consistent energy",
-                ),
-                "energy_source": ts_selection_energy_source,
-                "xtb_energy_hartree": float(xtb_energies[max_idx]),
-                "relative_energy_kcal_mol": (
-                    self._require_energy(
-                        b973c_relative_energies[max_idx],
-                        "S2 selected a B97-3c TS without a relative energy",
-                    )
+        if published_ts_seed_idx is not None and published_ts_peak_idx is not None:
+            ts_method_label = "SCAN_TS" if selection_source == "orca_relaxed_scan" else "PATH_TS"
+            ts_peak_xtb_energy = selection_xtb_energies[published_ts_peak_idx]
+            ts_seed_xtb_energy = selection_xtb_energies[published_ts_seed_idx]
+            ts_relative_energy = selection_relative_energies[published_ts_peak_idx]
+            ts_selection.update(
+                {
+                    "status": f"B973C_LOCAL_{ts_method_label}_TS_GUESS"
                     if ts_selection_energy_source == "B97-3c"
-                    and b973c_relative_energies[max_idx] is not None
-                    else float(xtb_relative_energies[max_idx])
-                ),
-            }
+                    else f"XTB_LOCAL_{ts_method_label}_TS_GUESS",
+                    "confirmation_level": "guess_only",
+                    "validation_required": ["s3_opt_ts", "s3_frequency"],
+                    "output_xyz": str(ts_guess_xyz_final) if ts_guess_xyz_final.exists() else None,
+                    "target_distance_angstrom": float(
+                        selection_coordinates[published_ts_seed_idx]
+                    ),
+                    "target_coordinate_A": float(
+                        selection_coordinates[published_ts_seed_idx]
+                    ),
+                    "point_id": selection_point_ids[published_ts_seed_idx],
+                    "source_attempt": selection_source_attempts[published_ts_seed_idx],
+                    "energy_hartree": self._require_energy(
+                        selection_method_energies[published_ts_peak_idx],
+                        "S2 selected a TS without a method-consistent energy",
+                    ),
+                    "seed_energy_hartree": self._require_energy(
+                        selection_method_energies[published_ts_seed_idx],
+                        "S2 selected a TS seed without a method-consistent energy",
+                    ),
+                    "energy_source": ts_selection_energy_source,
+                    "xtb_energy_hartree": (
+                        None
+                        if ts_peak_xtb_energy is None
+                        else float(ts_peak_xtb_energy)
+                    ),
+                    "seed_xtb_energy_hartree": (
+                        None
+                        if ts_seed_xtb_energy is None
+                        else float(ts_seed_xtb_energy)
+                    ),
+                    "relative_energy_kcal_mol": (
+                        None
+                        if ts_relative_energy is None
+                        else float(ts_relative_energy)
+                    ),
+                    "source_branch": selection_source_branch,
+                    "source": selection_source,
+                }
+            )
+        self._validate_unified_selection_contract(
+            s2_state=profile_s2_state,
+            selection_source=selection_source,
+            ts_selection=ts_selection,
+            intermediate_selection=intermediate_selection,
+            s3_dispatch=s3_dispatch,
+            ts_guess_xyz=ts_guess_xyz_final,
+            intermediate_xyz=dipolar_xyz,
         )
         trajectory_quality.update(
             {
                 "endpoint_index": int(anchors["scan_endpoint_index"]),
-                "endpoint_excluded": True,
+                "endpoint_retained": True,
+                "endpoint_excluded": int(anchors["scan_endpoint_index"])
+                in off_path_indices,
                 "topology_drift_index": anchors["topology_drift_index"],
                 "last_valid_before_drift_index": anchors[
                     "last_valid_before_drift_index"
                 ],
             }
         )
-        forming_bond_distances = self._forming_bond_distances_by_frame(frame_paths, bonds)
         for point, distances in zip(composite_points, forming_bond_distances):
             point["actual_forming_bond_distances_A"] = distances
         accepted_attempt_ids = set(composite_profile.get("accepted_attempt_ids", []))
@@ -2326,10 +4140,28 @@ class PEBScanEngine(LoggerMixin):
 
         scan_profile_json = output_dir / "scan_profile.json"
         profile_payload: Dict[str, Any] = {
-            "profile_schema_version": "s2_scan_profile_v9",
+            "profile_schema_version": "s2_scan_profile_v10",
             "generation_method": "xtb_path_full_coverage",
             "product_xyz": str(product_file),
             "intermediate_xyz": str(dipolar_xyz) if intermediate_idx is not None else None,
+            "selection_source": profile_selection_source,
+            "s2_state": profile_s2_state,
+            "seed_evidence": profile_seed_evidence,
+            "endpoint_evidence": dict(
+                profile_selection_diagnostics.get("endpoints") or {}
+            ),
+            "knee_evidence": {
+                "frame_index": profile_selection_diagnostics.get("knee_frame_index"),
+                "coordinate_A": profile_selection_diagnostics.get("knee_coordinate_A"),
+                "anchor_type": profile_selection_diagnostics.get("knee_anchor_type"),
+                "right_shift_A": profile_selection_diagnostics.get(
+                    "ts_right_shift_applied_A"
+                ),
+            },
+            "ts_search_seed": profile_ts_search_seed,
+            "int_search_seed": profile_int_search_seed,
+            "has_independent_int": profile_has_independent_int,
+            "rejection_reason": profile_rejection_reason,
             "forming_bonds": [list(pair) for pair in bonds],
             "scan_parameters": params,
             "coarse_scan": coarse_scan_summary,
@@ -2337,30 +4169,66 @@ class PEBScanEngine(LoggerMixin):
             "composite_profile": composite_profile,
             "anchors": anchor_payload,
             "xtb_path": path_metadata if path_attempt is not None else None,
+            "xtb_paths": {
+                "full_endpoint": full_path_metadata or None,
+                "valid_corridor": valid_path_metadata or None,
+            },
+            "path_branches": path_branches,
+            "selection_decision": {
+                **selection_decision,
+                "ts_seed_index": published_ts_seed_idx,
+                "energy_peak_index": published_ts_peak_idx,
+                "ts_confidence": ts_selection.get("confidence"),
+                "int_policy": intermediate_selection.get("selection_mode"),
+            },
+            "seed_selection": {
+                "authority": "unified_selector",
+                "source": selection_source,
+                "s2_state": profile_s2_state,
+                "seed_evidence": profile_seed_evidence,
+                "rejection_reason": profile_rejection_reason,
+                "ts_search_seed": profile_ts_search_seed,
+                "int_search_seed": profile_int_search_seed,
+                "has_independent_int": profile_has_independent_int,
+                "diagnostics": profile_selection_diagnostics,
+            },
+            "s3_dispatch": s3_dispatch,
+            "rescue": rescue_payload,
             "coarse_candidates": {
                 "ts_guess_1": coarse_ts_selection,
             },
             "derivative_analysis": {
                 "method": ts_selection_energy_source,
-                "rule": "xtb_path_or_kneedle",
+                "rule": selection_decision["rule"],
                 "actual_method": ts_selection.get("actual_method"),
-                "selected_index": int(max_idx),
+                "selected_index": published_ts_seed_idx,
+                "energy_peak_index": published_ts_peak_idx,
             },
             "scan_quality": {
-                "ts_index": int(max_idx),
+                "ts_index": published_ts_seed_idx,
+                "energy_peak_index": published_ts_peak_idx,
+                "ts_seed_index": published_ts_seed_idx,
                 "plateau_onset_index": int(anchors["plateau_onset_index"]),
                 "absolute_energy_maximum_index": int(
                     anchors["absolute_energy_maximum_index"]
                 ),
                 "selection_energy_source": ts_selection_energy_source,
                 "intermediate_energy_source": intermediate_energy_source,
-                "intermediate_index": intermediate_idx,
+                "intermediate_index": published_intermediate_idx,
                 "intermediate_selection_status": intermediate_selection_status,
                 "status": status,
                 "ts_guess_confidence": ts_guess_confidence,
+                "selected_path_branch": selection_source_branch,
                 "intermediate_confidence": (
                     "high"
-                    if intermediate_idx is not None
+                    if intermediate_selection.get("selection_mode") == "stable_basin_candidate"
+                    else "medium"
+                    if intermediate_selection.get("selection_mode") == "late_pre_ts_platform_fallback"
+                    else "medium"
+                    if intermediate_selection.get("selection_mode")
+                    == "ts_to_effective_endpoint_midpoint"
+                    else "unresolved_shared_ts"
+                    if intermediate_selection.get("selection_mode") == "shared_ts_fallback"
                     else "unavailable"
                 ),
                 "degraded_reasons": degraded_reasons,
@@ -2456,13 +4324,13 @@ class PEBScanEngine(LoggerMixin):
             total_steps=3,
             status="complete" if status == "COMPLETE" else "degraded",
             point_count=len(composite_points),
-            ts_index=int(max_idx),
+            ts_index=(None if max_idx is None else int(max_idx)),
             intermediate_index=intermediate_idx,
             elapsed_seconds=time.monotonic() - selection_started,
         )
 
         return (
-            ts_guess_xyz_final,
+            ts_guess_xyz_final if ts_guess_xyz_final.exists() else None,
             dipolar_xyz if intermediate_idx is not None else None,
             dipolar_xyz if intermediate_idx is not None else None,
             bonds,

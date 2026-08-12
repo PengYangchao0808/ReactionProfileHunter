@@ -40,6 +40,7 @@ class ScanEnergyRefiner(LoggerMixin):
         self.event_callback = event_callback
         self.variant = variant or "product"
         self._legacy_cache_index: Dict[tuple[str, str], Dict[str, Any]] = {}
+        self._legacy_index_spec_signature = ""
         self._progress_lock = threading.Lock()
         self._progress_done = 0
         self._progress_failed = 0
@@ -115,8 +116,17 @@ class ScanEnergyRefiner(LoggerMixin):
         temporary.replace(path)
 
     def _index_legacy_frame_cache(self, spec_signature: str) -> None:
-        """Index v1 frame-number caches by scientific identity for migration."""
+        """Index v1 frame-number caches by scientific identity for migration.
 
+        Rebuilt only when the QC spec signature changes; repeated ``refine()``
+        calls for the same spec reuse the existing index instead of re-globbing.
+        """
+
+        if (
+            self._legacy_index_spec_signature == spec_signature
+            and self._legacy_cache_index
+        ):
+            return
         self._legacy_cache_index = {}
         for cache_path in sorted(self.output_dir.glob("frame_*/result.json")):
             try:
@@ -133,13 +143,15 @@ class ScanEnergyRefiner(LoggerMixin):
             ):
                 record["legacy_cache_path"] = str(cache_path)
                 self._legacy_cache_index[(str(xyz_hash), str(cached_spec))] = record
+        self._legacy_index_spec_signature = spec_signature
 
     def _run_one_impl(
         self, item: Dict[str, Any], spec: QCJobSpec, spec_signature: str
     ) -> Dict[str, Any]:
         index = int(item["index"])
         frame = Path(item["frame"])
-        xyz_hash = str(item.get("xyz_sha256") or self._file_hash(frame))
+        xyz_hash_value = item.get("xyz_sha256")
+        xyz_hash = str(xyz_hash_value) if xyz_hash_value is not None else self._file_hash(frame)
         job_dir = self.output_dir / "cache" / f"{xyz_hash[:20]}_{spec_signature[:12]}"
         cache_path = job_dir / "result.json"
         if cache_path.is_file():
@@ -201,7 +213,12 @@ class ScanEnergyRefiner(LoggerMixin):
     ) -> Dict[str, Any]:
         point_id = str(item.get("point_id") or f"frame_{int(item['index']):04d}")
         job_id = f"{self.variant}:{point_id}"
-        xyz_hash = str(item.get("xyz_sha256") or self._file_hash(Path(item["frame"])))
+        xyz_hash_value = item.get("xyz_sha256")
+        xyz_hash = (
+            str(xyz_hash_value)
+            if xyz_hash_value is not None
+            else self._file_hash(Path(item["frame"]))
+        )
         job_dir = self.output_dir / "cache" / f"{xyz_hash[:20]}_{spec_signature[:12]}"
         started = time.monotonic()
         self._emit(

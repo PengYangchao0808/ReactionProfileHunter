@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from rph_core.steps.mechanism_classifier.context import ProductVariant, ReactionContext
 from rph_core.steps.mechanism_classifier.dr_completion import (
@@ -24,6 +25,9 @@ from rph_core.steps.mechanism_classifier.s0_record import (
     S0ReactionRecord,
     _build_map_to_product_smiles,
 )
+from rph_core.utils.json_io import write_json_atomic, write_text_atomic
+from rph_core.utils.provenance import build_provenance, sha256_of_file
+from rph_core.utils.run_id import RUN_ID_FIELD
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +35,7 @@ logger = logging.getLogger(__name__)
 def write_s0_artifacts(
     work_dir: Path,
     record: S0ReactionRecord,
+    run_id: Optional[str] = None,
 ) -> Tuple[ReactionContext, List[ProductVariant], Path]:
     """Build and write all S0 mechanism artifacts.
 
@@ -68,36 +73,77 @@ def write_s0_artifacts(
         mapping_trusted=record.mapping_trusted,
     )
 
-    mechanism_path = stage_dir / "mechanism.json"
-    _write_json(
-        mechanism_path,
-        {
-            "schema_version": "s0_mechanism_v2",
-            "stage": "S0",
-            "source": "trusted_reaction_record",
-            "rx_id": record.rx_id,
-            "source_csv": str(record.source_csv),
-            "source_row_hash": record.source_row_hash,
-            "reaction_type": record.reaction_type,
-            "topology": record.topology,
-            "cyclo_mode": record.cyclo_mode,
-            "precursor_type": record.precursor_type,
-            "canonical_product_smiles": record.product_smiles,
-            "canonical_precursor_smiles": record.canonical_precursor_smiles,
-            "mapped_product_smiles": record.mapped_product_smiles,
-            "mapped_precursor_smiles": record.mapped_precursor_smiles,
-            "forming_bonds": [list(item) for item in record.forming_bonds],
-            "mapped_forming_bonds": [list(item) for item in record.mapped_forming_bonds],
-            "index_base": 0,
-            "index_space": "product_smiles_rdkit_heavy_atom_0_based",
-            "mapping_confidence": record.mapping_confidence,
-            "mapping_trusted": record.mapping_trusted,
-            "confidence": "trusted_dataset_mapping",
-            "variants": [variant.variant_id for variant in product_variants],
-            "mechanism_graph_ref": "mechanism_graph.json",
-            "branch_plan_ref": "dr_branch_plan.json",
-        },
+    mapping_dir = stage_dir / "atom_mappings"
+    mapping_dir.mkdir(parents=True, exist_ok=True)
+    registry_variants = []
+    variant_mapping_payloads: Dict[str, Dict[str, object]] = {}
+    for variant in product_variants:
+        mapping_ref = Path("atom_mappings") / f"{variant.variant_id}.json"
+        mapping_payload = _atom_map_smiles_payload(
+            record,
+            graph,
+            reference_smiles=variant.branch_product_smiles,
+            variant_id=variant.variant_id,
+        )
+        variant_mapping_payloads[str(variant.variant_id)] = mapping_payload
+        _write_json(stage_dir / mapping_ref, mapping_payload)
+        registry_variants.append(
+            {
+                **variant.to_dict(),
+                "atom_mapping_ref": mapping_ref.as_posix(),
+                "atom_mapping_digest": mapping_payload["mapping_digest"],
+            }
+        )
+
+    major_mapping = next(
+        (item for item in registry_variants if item["variant_id"] == "product_major"),
+        registry_variants[0],
     )
+    major_mapping_payload = variant_mapping_payloads[str(major_mapping["variant_id"])]
+    mechanism_path = stage_dir / "mechanism.json"
+    mechanism_payload = {
+        "schema_version": "s0_mechanism_v3",
+        "stage": "S0",
+        RUN_ID_FIELD: run_id,
+        "source": "trusted_reaction_record",
+        "rx_id": record.rx_id,
+        "source_csv": str(record.source_csv),
+        "source_row_hash": record.source_row_hash,
+        "reaction_type": record.reaction_type,
+        "topology": record.topology,
+        "cyclo_mode": record.cyclo_mode,
+        "precursor_type": record.precursor_type,
+        "canonical_product_smiles": record.product_smiles,
+        "canonical_precursor_smiles": record.canonical_precursor_smiles,
+        "mapped_product_smiles": record.mapped_product_smiles,
+        "mapped_precursor_smiles": record.mapped_precursor_smiles,
+        "forming_bonds": [list(item) for item in record.forming_bonds],
+        "mapped_forming_bonds": [list(item) for item in record.mapped_forming_bonds],
+        "index_base": 0,
+        "index_space": "geometry_product_smiles_idx",
+        "atom_mapping_ref": major_mapping["atom_mapping_ref"],
+        "atom_mapping_digest": major_mapping["atom_mapping_digest"],
+        "mapping_confidence": record.mapping_confidence,
+        "mapping_trusted": record.mapping_trusted,
+        "confidence": "trusted_dataset_mapping",
+        "variants": [variant.variant_id for variant in product_variants],
+        "mechanism_graph_ref": "mechanism_graph.json",
+        "branch_plan_ref": "dr_branch_plan.json",
+    }
+    mechanism_payload["provenance"] = build_provenance(
+        run_id=run_id,
+        schema_version=str(mechanism_payload["schema_version"]),
+        protocol_version=None,
+        parent_manifest_paths={},
+        atom_mapping_payload=major_mapping_payload,
+        forming_bonds=record.forming_bonds,
+        variant_manifest_path=None,
+        extra={
+            "source_csv_hash": sha256_of_file(record.source_csv),
+            "source_row_hash": record.source_row_hash,
+        },
+    ).to_dict()
+    _write_json(mechanism_path, mechanism_payload)
     _write_json(
         stage_dir / "reaction_context.json",
         {
@@ -109,13 +155,16 @@ def write_s0_artifacts(
     _write_json(
         stage_dir / "variant_registry.json",
         {
-            "schema_version": "s0_variant_registry_v1",
+            "schema_version": "s0_variant_registry_v2",
             "reaction_id": record.rx_id,
-            "variants": [variant.to_dict() for variant in product_variants],
+            "variants": registry_variants,
         },
     )
     _write_text(stage_dir / "dr_branch_plan.json", plan.model_dump_json(indent=2))
-    _write_json(stage_dir / "atom_map_smiles.json", _atom_map_smiles_payload(record, graph))
+    _write_json(
+        stage_dir / "atom_map_smiles.json",
+        major_mapping_payload,
+    )
 
     return reaction_context, product_variants, mechanism_path
 
@@ -228,19 +277,43 @@ def _parse_topology(value: str) -> TopologyType:
     return TopologyType.INTER
 
 
-def _atom_map_smiles_payload(record: S0ReactionRecord, graph: MechanismGraph) -> Dict[str, object]:
+def _atom_map_smiles_payload(
+    record: S0ReactionRecord,
+    graph: MechanismGraph,
+    *,
+    reference_smiles: str | None = None,
+    variant_id: str = "product_major",
+) -> Dict[str, object]:
+    geometry_smiles = reference_smiles or record.mapped_product_smiles
     map_to_product_smiles = _build_map_to_product_smiles(
         record.product_smiles,
-        record.mapped_product_smiles,
+        geometry_smiles,
     )
     product_smiles_to_map = {value: key for key, value in map_to_product_smiles.items()}
+    forming_bonds = [
+        [map_to_product_smiles[left], map_to_product_smiles[right]]
+        for left, right in record.mapped_forming_bonds
+    ]
+    digest_payload = {
+        "reference_smiles": geometry_smiles,
+        "map_to_product_smiles": map_to_product_smiles,
+        "forming_bonds_map_space": record.mapped_forming_bonds,
+        "forming_bonds_product_smiles": forming_bonds,
+    }
+    mapping_digest = hashlib.sha256(
+        json.dumps(digest_payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()
     return {
-        "schema_version": "s0_atom_map_smiles_v1",
+        "schema_version": "s0_atom_map_smiles_v2",
         "reaction_id": record.rx_id,
+        "variant_id": variant_id,
+        "reference_smiles": geometry_smiles,
         "mapped_product_smiles": record.mapped_product_smiles,
         "mapped_precursor_smiles": record.mapped_precursor_smiles,
         "canonical_product_smiles": record.product_smiles,
         "forming_bonds_map_space": [list(item) for item in record.mapped_forming_bonds],
+        "forming_bonds": forming_bonds,
+        "forming_bonds_index_space": "geometry_product_smiles_idx",
         "forming_bonds_annotated": [
             annotation.model_dump(mode="json") for annotation in (graph.forming_bonds_annotated or [])
         ],
@@ -251,16 +324,18 @@ def _atom_map_smiles_payload(record: S0ReactionRecord, graph: MechanismGraph) ->
             "product_smiles_to_map": {str(key): value for key, value in product_smiles_to_map.items()},
         },
         "product_smiles_idx_space": "geometry_product_smiles_idx",
+        "mapping_digest": mapping_digest,
+        "mapping_status": "verified",
         "index_spaces": {
             "map_numbers": "1-based atom map numbers from mapped SMILES",
-            "geometry_product_smiles_idx": "0-based RDKit atom index in S1 geometry product SMILES",
+            "geometry_product_smiles_idx": "0-based RDKit atom index in the exact mapped branch SMILES passed to S1",
         },
     }
 
 
 def _write_json(path: Path, payload: Dict[str, object]) -> None:
-    _write_text(path, json.dumps(payload, indent=2))
+    write_json_atomic(path, payload)
 
 
 def _write_text(path: Path, content: str) -> None:
-    path.write_text(content, encoding="utf-8")
+    write_text_atomic(path, content, encoding="utf-8")

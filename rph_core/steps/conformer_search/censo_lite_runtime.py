@@ -16,6 +16,7 @@ from rph_core.utils.constants import HARTREE_TO_KCAL
 from rph_core.utils.file_io import write_xyz
 from rph_core.utils.qc_interface import CRESTInterface, XTBInterface
 from rph_core.utils.orca_interface import ORCAInterface
+from rph_core.utils.atom_mapping import write_smiles_to_xyz_mapping
 from rph_core.steps.conformer_search.xtb_thermo import XTBThermoResult
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,11 @@ class CensoLiteRuntime:
         symbols = [atom.GetSymbol() for atom in mol.GetAtoms()]
         output = self.molecule_dir / "initial.xyz"
         write_xyz(output, coordinates, symbols, title="CENSO-LITE initial geometry")
+        write_smiles_to_xyz_mapping(
+            smiles,
+            output,
+            self.molecule_dir / "initial_atom_mapping.json",
+        )
         return output
 
     def crest_search(self, input_xyz: Path) -> Path:

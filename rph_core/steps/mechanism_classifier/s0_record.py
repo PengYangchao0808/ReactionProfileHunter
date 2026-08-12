@@ -1,9 +1,9 @@
-"""Resolve trusted Reaxys records into the S0 product-coordinate contract.
+"""Resolve trusted reaction records into the V4 atom-mapping contract.
 
-The reaction-cleaning dataset stores mechanistic bond changes in atom-map
-space, whereas S1/S2 operate on the heavy-atom order produced from the
-unmapped product SMILES.  This module is the single, explicit conversion
-boundary between those two index spaces.
+The dataset stores mechanistic bond changes in atom-map space.  V4 keeps the
+mapped product SMILES as the geometry reference so RDKit, S1 XYZ files and S2
+all share one atom order.  Canonical/unmapped SMILES are display and identity
+fields only; their atom indices must never drive a QC constraint.
 """
 
 from __future__ import annotations
@@ -95,6 +95,11 @@ def load_s0_reaction_record(csv_path: Path, rx_id: str) -> S0ReactionRecord:
             f"rx_id={rx_id!r} must provide exactly two mechanistic_forming_bonds; "
             f"got {len(mapped_forming_bonds)}"
         )
+    _validate_mapped_reaction_bonds(
+        mapped_precursor_smiles,
+        mapped_product_smiles,
+        mapped_forming_bonds,
+    )
     forming_bonds = _map_bonds_to_product_indices(
         product_smiles,
         mapped_product_smiles,
@@ -182,8 +187,8 @@ def _map_bonds_to_product_indices(
     mapped_product_smiles: str,
     mapped_pairs: Iterable[BondPair],
 ) -> Tuple[BondPair, ...]:
-    product = Chem.MolFromSmiles(product_smiles)
     map_to_product = _build_map_to_product_smiles(product_smiles, mapped_product_smiles)
+    product = Chem.MolFromSmiles(mapped_product_smiles)
     if product is None:
         raise ValueError("Could not parse product SMILES while resolving S0 atom indices")
 
@@ -196,7 +201,7 @@ def _map_bonds_to_product_indices(
             raise ValueError(f"Forming-bond map number {exc.args[0]} is absent from the mapped product") from exc
         if product.GetBondBetweenAtoms(product_a, product_b) is None:
             raise ValueError(
-                f"Mapped forming bond ({map_a}, {map_b}) is absent from product_smiles_main"
+                f"Mapped forming bond ({map_a}, {map_b}) is absent from mapped product"
             )
         product_pairs.append((product_a, product_b))
     return tuple(product_pairs)
@@ -217,6 +222,10 @@ def _build_map_to_product_smiles(
     if len(atom_match) != mapped_product.GetNumAtoms():
         raise ValueError("Mapped product does not map one-to-one onto product_smiles_main")
 
+    # The substructure match above is validation only.  Executable indices are
+    # the indices of the exact mapped SMILES handed to RDKit in S1.  Returning
+    # atom_match[...] here was the V4 regression that changed rx_id=2 C7-C8
+    # into C7-C22 after canonical SMILES reordering.
     map_to_product: Dict[int, int] = {}
     for mapped_atom in mapped_product.GetAtoms():
         atom_map = mapped_atom.GetAtomMapNum()
@@ -224,8 +233,42 @@ def _build_map_to_product_smiles(
         # oxygen) unnumbered.  They are irrelevant unless a declared forming
         # bond references them; that is checked explicitly below.
         if atom_map > 0:
-            map_to_product[atom_map] = atom_match[mapped_atom.GetIdx()]
+            if atom_map in map_to_product:
+                raise ValueError(f"Duplicate atom-map number {atom_map} in mapped product")
+            map_to_product[atom_map] = mapped_atom.GetIdx()
     return map_to_product
+
+
+def _map_number_to_atom(mol: Chem.Mol) -> Dict[int, int]:
+    result: Dict[int, int] = {}
+    for atom in mol.GetAtoms():
+        map_number = atom.GetAtomMapNum()
+        if map_number <= 0:
+            continue
+        if map_number in result:
+            raise ValueError(f"Duplicate atom-map number {map_number} in mapped reaction")
+        result[map_number] = atom.GetIdx()
+    return result
+
+
+def _validate_mapped_reaction_bonds(
+    mapped_precursor_smiles: str,
+    mapped_product_smiles: str,
+    mapped_pairs: Iterable[BondPair],
+) -> None:
+    """Require every declared PEB bond to resolve and exist in the product."""
+
+    precursor = Chem.MolFromSmiles(mapped_precursor_smiles)
+    product = Chem.MolFromSmiles(mapped_product_smiles)
+    if precursor is None or product is None:
+        raise ValueError("Could not parse mapped reaction while validating forming bonds")
+    _map_number_to_atom(precursor)
+    product_map = _map_number_to_atom(product)
+    for map_a, map_b in mapped_pairs:
+        if map_a not in product_map or map_b not in product_map:
+            raise ValueError(f"Forming bond ({map_a}, {map_b}) is unresolved in mapped product")
+        if product.GetBondBetweenAtoms(product_map[map_a], product_map[map_b]) is None:
+            raise ValueError(f"Forming bond ({map_a}, {map_b}) is absent from mapped product")
 
 
 def _as_bool(value: Optional[str]) -> bool:

@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from rph_core.utils.shared_console import get_console
 from rph_core.utils.stage_progress import scan_all_stages
+from rph_core.utils.run_id import RUN_ID_FIELD
 from rph_core.utils.ui_adapter import UiStructure, UiTask, adapt_s3_structures, adapt_s4_structures
 from rph_core.utils.ui_state import UiStatus, normalize_status, status_markup
 
@@ -127,6 +128,48 @@ def _clip(value: Any, width: int) -> str:
     return text if len(text) <= width else text[: max(1, width - 1)] + "~"
 
 
+def _payload_identity(payload: Dict[str, Any] | None) -> tuple[str, str]:
+    if not isinstance(payload, dict):
+        return "", ""
+    reaction_id = str(payload.get("reaction_id") or payload.get("rx_id") or "")
+    run_id = str(payload.get(RUN_ID_FIELD) or "")
+    return reaction_id, run_id
+
+
+def _run_identity(
+    output_dir: Path,
+    *,
+    stages: Dict[str, Any] | None = None,
+    status: Dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    reaction_id, run_id = _payload_identity(status)
+    for stage_name in ("S0", "S1", "S2", "S3", "S4"):
+        if reaction_id and run_id:
+            break
+        stage_payload = (stages or {}).get(stage_name)
+        stage_reaction_id, stage_run_id = _payload_identity(stage_payload)
+        if not reaction_id:
+            reaction_id = stage_reaction_id
+        if not run_id:
+            run_id = stage_run_id
+    run_manifest = _read_json(Path(output_dir) / "run.manifest.json")
+    manifest_reaction_id, manifest_run_id = _payload_identity(run_manifest)
+    if not reaction_id:
+        reaction_id = manifest_reaction_id
+    if not run_id:
+        run_id = manifest_run_id
+    return reaction_id, run_id
+
+
+def _identity_header(reaction_id: str, run_id: str) -> str:
+    pieces: list[str] = []
+    if reaction_id:
+        pieces.append(f"RXN: {reaction_id}")
+    if run_id:
+        pieces.append(f"RUN: {run_id}")
+    return " | ".join(pieces)
+
+
 def _colour(text: str, status: str, enabled: bool) -> str:
     if not enabled:
         return text
@@ -191,6 +234,10 @@ def _render_status_rich(status: Dict[str, Any], output_dir: Path, event_count: i
     summary = _stage_summary(status)
     stage_status = normalize_status(status.get("status"))
     header_text = Text.from_markup(f"RPH V4 S4: {status_markup(stage_status)} {stage_status.value}")
+    reaction_id, run_id = _run_identity(output_dir, status=status)
+    identity = _identity_header(reaction_id, run_id)
+    if identity:
+        header_text.append(f" · {identity}")
     header = Panel(header_text, border_style="step.header")
 
     summary_text = Text(
@@ -263,6 +310,10 @@ def _render_status_plain(status: Dict[str, Any], output_dir: Path, colour: bool,
     summary = _stage_summary(status)
     stage_status = str(status.get("status", "unknown"))
     header = _colour(f"RPH V4 S4: {stage_status.upper()}", stage_status, colour)
+    reaction_id, run_id = _run_identity(output_dir, status=status)
+    identity = _identity_header(reaction_id, run_id)
+    if identity:
+        header += f" | {identity}"
     lines = [header]
     lines.append(
         "structures: {finished}/{total} finished | {running} running | {failed} failed | "
@@ -312,7 +363,12 @@ def _render_status_plain(status: Dict[str, Any], output_dir: Path, colour: bool,
 
 def _render_overview_plain(output_dir: Path, colour: bool) -> str:
     stages = _scan_all_stages(output_dir)
-    lines = [_colour("RPH V4 Cross-Stage Overview", "complete", colour)]
+    header = _colour("RPH V4 Cross-Stage Overview", "complete", colour)
+    reaction_id, run_id = _run_identity(output_dir, stages=stages)
+    identity = _identity_header(reaction_id, run_id)
+    if identity:
+        header += f" | {identity}"
+    lines = [header]
     lines.append(f"stages with status: {', '.join(sorted(stages)) or 'none'}")
     lines.append("")
     for stage_name in ("S0", "S1", "S2", "S3", "S4"):
@@ -378,6 +434,8 @@ def _render_overview_rich(output_dir: Path, event_count: int) -> Any:
 
     stages = _scan_all_stages(output_dir)
     active = _active_stage(stages)
+    reaction_id, run_id = _run_identity(output_dir, stages=stages)
+    identity = _identity_header(reaction_id, run_id)
 
     overview_table = Table(box=None, show_header=True, expand=False)
     overview_table.add_column("stage", style="step.title")
@@ -403,7 +461,11 @@ def _render_overview_rich(output_dir: Path, event_count: int) -> Any:
             str(summary.get("usable_for_ml", 0)),
             _clip("; ".join(filter(None, [_science_brief(stage_name, data), _batch_brief(data)])), 54),
         )
-    overview_panel = Panel(overview_table, title="Cross-Stage Overview", border_style="step.header")
+    overview_panel = Panel(
+        overview_table,
+        title=(f"Cross-Stage Overview · {identity}" if identity else "Cross-Stage Overview"),
+        border_style="step.header",
+    )
 
     activity_lines = _activity_lines(active, stages.get(active) or {})
     activity_panel = Panel(
@@ -471,14 +533,21 @@ def _science_brief(stage: str, data: Dict[str, Any]) -> str:
         rows = data.get("structures") or {}
         values = rows.values() if isinstance(rows, dict) else rows
         confidences: Dict[str, int] = {}
+        s2_states: Dict[str, int] = {}
         bonds: list[str] = []
         for row in values:
+            s2_state = str((row or {}).get("s2_state") or "").strip()
+            if s2_state:
+                s2_states[s2_state] = s2_states.get(s2_state, 0) + 1
             confidence = str((row or {}).get("confidence") or "unknown")
             confidences[confidence] = confidences.get(confidence, 0) + 1
             for pair in (row or {}).get("forming_bonds") or []:
                 if len(pair) >= 2:
                     bonds.append(f"{pair[0]}-{pair[1]}")
-        pieces = [f"{name}:{count}" for name, count in sorted(confidences.items())]
+        pieces: list[str] = []
+        if s2_states:
+            pieces.append("states " + ",".join(f"{name}:{count}" for name, count in sorted(s2_states.items())))
+        pieces.extend(f"{name}:{count}" for name, count in sorted(confidences.items()))
         if bonds:
             pieces.append("bonds " + ",".join(dict.fromkeys(bonds)))
         return "; ".join(pieces)
@@ -539,6 +608,37 @@ def _activity_lines(stage: str, data: Dict[str, Any]) -> list[str]:
         last_age = step.get("last_output_age_seconds")
         if last_age is not None:
             lines.append(f"  output updated {int(float(last_age))}s ago | {step.get('output', '-')}")
+    if stage == "S2":
+        selection_bits: list[str] = []
+        if step.get("s2_state"):
+            selection_bits.append(f"s2_state={step.get('s2_state')}")
+            if step.get("seed_evidence") not in (None, ""):
+                selection_bits.append(f"seed_evidence={step.get('seed_evidence')}")
+            if step.get("selection_source") not in (None, ""):
+                selection_bits.append(f"selection_source={step.get('selection_source')}")
+        if selection_bits:
+            lines.append("selection " + " | ".join(selection_bits))
+        else:
+            rows = data.get("structures") or {}
+            values = rows.items() if isinstance(rows, dict) else [
+                (str((row or {}).get("id") or (row or {}).get("structure_id") or "structure"), row)
+                for row in rows
+            ]
+            running_states: list[str] = []
+            for structure_id, row in values:
+                row_data = dict(row or {})
+                if str(row_data.get("status") or "") != "running":
+                    continue
+                s2_state = str(row_data.get("s2_state") or "").strip()
+                if not s2_state:
+                    continue
+                piece = f"{structure_id}={s2_state}"
+                seed_evidence = str(row_data.get("seed_evidence") or "").strip()
+                if seed_evidence and seed_evidence != "none":
+                    piece += f" ({seed_evidence})"
+                running_states.append(piece)
+            if running_states:
+                lines.append("selection " + " | ".join(running_states[:4]))
     funnel_all = dict(data.get("funnel") or {})
     variant = str(step.get("variant") or "") if step else ""
     funnel = dict(funnel_all.get(variant) or funnel_all.get("default") or {})

@@ -2,15 +2,28 @@
 
 from __future__ import annotations
 
+import logging
+import threading
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
-from dataclasses import asdict, dataclass
-from typing import Any, Callable, Dict, Iterable, List, Sequence, TypeVar
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Any, Callable, Dict, Iterable, List, TypeVar
 
 from rph_core.utils.resource_utils import mem_to_mb
 
 
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
+
+
+def _empty_role_limits() -> Mapping[str, int]:
+    return MappingProxyType({})
+
+
+def _structure_role(structure: Mapping[str, Any]) -> str:
+    return str(structure.get("role") or structure.get("kind", "product")).lower()
 
 
 @dataclass(frozen=True)
@@ -20,9 +33,29 @@ class StageSchedule:
     nproc_per_job: int
     memory_per_job: str
     priority_roles: tuple[str, ...]
+    max_concurrent_by_role: Mapping[str, int] = field(default_factory=_empty_role_limits)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "max_concurrent_by_role",
+            MappingProxyType(
+                {
+                    str(role): int(limit)
+                    for role, limit in self.max_concurrent_by_role.items()
+                }
+            ),
+        )
 
     def manifest_record(self) -> Dict[str, Any]:
-        return asdict(self)
+        return {
+            "enabled": self.enabled,
+            "max_workers": self.max_workers,
+            "nproc_per_job": self.nproc_per_job,
+            "memory_per_job": self.memory_per_job,
+            "priority_roles": list(self.priority_roles),
+            "max_concurrent_by_role": dict(self.max_concurrent_by_role),
+        }
 
 
 def resolve_stage_schedule(config: Dict[str, Any], stage_key: str) -> StageSchedule:
@@ -42,8 +75,13 @@ def resolve_stage_schedule(config: Dict[str, Any], stage_key: str) -> StageSched
             ("ts", "intermediate", "precursor", "product"),
         )
     )
+    raw_role_limits = scheduling.get("max_concurrent_by_role", {}) or {}
     if max_workers <= 0 or nproc_per_job <= 0:
         raise ValueError(f"{stage_key}.scheduling worker and CPU counts must be positive")
+    if not isinstance(raw_role_limits, Mapping):
+        raise ValueError(
+            f"{stage_key}.scheduling.max_concurrent_by_role must be a mapping"
+        )
     total_nproc = int(resources.get("nproc", 1))
     if max_workers * nproc_per_job > total_nproc:
         raise ValueError(
@@ -57,12 +95,40 @@ def resolve_stage_schedule(config: Dict[str, Any], stage_key: str) -> StageSched
             f"{stage_key}.scheduling requests {requested_memory_mb} MB from a "
             f"{total_memory_mb} MB resource pool"
         )
+    max_concurrent_by_role: Dict[str, int] = {}
+    for raw_role, raw_limit in raw_role_limits.items():
+        role = str(raw_role).strip()
+        if not role or role != role.lower():
+            raise ValueError(
+                f"{stage_key}.scheduling.max_concurrent_by_role keys must be lowercase"
+            )
+        if not isinstance(raw_limit, int) or isinstance(raw_limit, bool) or raw_limit < 1:
+            raise ValueError(
+                f"{stage_key}.scheduling.max_concurrent_by_role[{role!r}] must be an integer >= 1"
+            )
+        limit = raw_limit
+        if limit > max_workers:
+            logger.warning(
+                "%s.scheduling.max_concurrent_by_role[%r]=%d exceeds max_workers=%d; clamping",
+                stage_key,
+                role,
+                limit,
+                max_workers,
+            )
+            limit = max_workers
+        if nproc_per_job * limit > total_nproc:
+            raise ValueError(
+                f"{stage_key}.scheduling.max_concurrent_by_role[{role!r}] requests "
+                f"{nproc_per_job * limit} cores from a {total_nproc}-core resource pool"
+            )
+        max_concurrent_by_role[role] = limit
     return StageSchedule(
         enabled=enabled,
         max_workers=max_workers,
         nproc_per_job=nproc_per_job,
         memory_per_job=memory_per_job,
         priority_roles=priority_roles,
+        max_concurrent_by_role=max_concurrent_by_role,
     )
 
 
@@ -109,7 +175,7 @@ def run_structure_queue(
 
     def priority(item: tuple[int, Dict[str, Any]]) -> tuple[int, int]:
         index, structure = item
-        role = str(structure.get("role") or structure.get("kind", "product")).lower()
+        role = _structure_role(structure)
         return role_priority.get(role, len(role_priority)), index
 
     queued = sorted(enumerate(materialized), key=priority)
@@ -118,15 +184,69 @@ def run_structure_queue(
         for index, structure in queued:
             results[index] = worker(structure)
         return results
+    role_semaphores = {
+        role: threading.BoundedSemaphore(limit)
+        for role, limit in schedule.max_concurrent_by_role.items()
+    }
+    max_workers = min(schedule.max_workers, len(materialized))
+    if not role_semaphores:
+        with ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix=thread_name_prefix,
+        ) as executor:
+            futures = {
+                executor.submit(worker, structure): index
+                for index, structure in queued
+            }
+            for future in as_completed(futures):
+                results[futures[future]] = future.result()
+        return results
+
+    def run_with_role_limit(
+        structure: Dict[str, Any],
+        role_semaphore: threading.BoundedSemaphore | None,
+    ) -> T:
+        try:
+            return worker(structure)
+        finally:
+            if role_semaphore is not None:
+                role_semaphore.release()
 
     with ThreadPoolExecutor(
-        max_workers=min(schedule.max_workers, len(materialized)),
+        max_workers=max_workers,
         thread_name_prefix=thread_name_prefix,
     ) as executor:
-        futures = {
-            executor.submit(worker, structure): index
-            for index, structure in queued
-        }
-        for future in as_completed(futures):
-            results[futures[future]] = future.result()
+        pending = list(queued)
+        futures: Dict[Any, int] = {}
+
+        def submit_ready() -> None:
+            while len(futures) < max_workers and pending:
+                pending_position: int | None = None
+                acquired_semaphore: threading.BoundedSemaphore | None = None
+                for position, (_, structure) in enumerate(pending):
+                    role = _structure_role(structure)
+                    semaphore = role_semaphores.get(role)
+                    if semaphore is not None and not semaphore.acquire(blocking=False):
+                        continue
+                    pending_position = position
+                    acquired_semaphore = semaphore
+                    break
+                if pending_position is None:
+                    return
+                index, structure = pending.pop(pending_position)
+                try:
+                    future = executor.submit(run_with_role_limit, structure, acquired_semaphore)
+                except Exception:
+                    if acquired_semaphore is not None:
+                        acquired_semaphore.release()
+                    raise
+                futures[future] = index
+
+        submit_ready()
+        while futures:
+            future = next(as_completed(tuple(futures)))
+            results[futures.pop(future)] = future.result()
+            submit_ready()
+        if pending:
+            raise RuntimeError("Role-aware scheduler stalled with pending structures")
     return results

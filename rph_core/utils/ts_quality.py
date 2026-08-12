@@ -40,13 +40,15 @@ def analyze_ts_quality(
 
     normalized_forming_bonds = _normalize_forming_bonds(forming_bonds)
     significant = [f for f in frequencies_cm1 if f <= imaginary_cutoff_cm1]
+    all_imaginaries = [f for f in frequencies_cm1 if f < 0.0]
     frequency_count_valid = len(significant) == 1
 
     mode_displacement_valid: Optional[bool] = None
     mode_details: Dict[str, Any] = {}
+    mode_candidate_frequency = all_imaginaries[0] if len(all_imaginaries) == 1 else None
 
     if (
-        frequency_count_valid
+        mode_candidate_frequency is not None
         and normalized_forming_bonds
         and optimized_xyz
         and frequency_output
@@ -56,13 +58,13 @@ def analyze_ts_quality(
                 frequency_output,
                 optimized_xyz,
                 normalized_forming_bonds,
-                significant[0],
+                mode_candidate_frequency,
                 projection_threshold,
             )
         except Exception as exc:
             logger.warning("TS mode displacement analysis failed: %s", exc)
             mode_displacement_valid = None
-            mode_details = {"error": str(exc)}
+            mode_details = {"error": str(exc), "mode_displacement_valid": None}
 
     return {
         "frequency_count_valid": frequency_count_valid,
@@ -97,15 +99,20 @@ def _check_mode_displacement(
     )
 
     if displacements is None:
-        return None, {"note": "Displacement parsing not available for this log format."}
+        return None, {
+            "note": "Displacement parsing not available for this log format.",
+            "mode_displacement_valid": None,
+        }
 
     if len(displacements) != len(geometry):
         return None, {
             "error": f"Displacement count {len(displacements)} != geometry atoms {len(geometry)}",
+            "mode_displacement_valid": None,
         }
 
     bond_reports: List[Dict[str, Any]] = []
     all_aligned = True
+    alignment_scores: List[float] = []
 
     for a, b in forming_bonds:
         if a < 0 or b < 0 or a >= len(geometry) or b >= len(geometry):
@@ -123,13 +130,15 @@ def _check_mode_displacement(
         unit = [c / norm for c in bond_vec]
         rel = [displacements[b][i] - displacements[a][i] for i in range(3)]
         projection = sum(rel[i] * unit[i] for i in range(3))
-        aligned = abs(projection) >= threshold
+        abs_projection = abs(projection)
+        aligned = abs_projection >= threshold
+        alignment_scores.append(abs_projection)
 
         bond_reports.append(
             {
                 "bond": [a, b],
                 "projection": round(projection, 4),
-                "abs_projection": round(abs(projection), 4),
+                "abs_projection": round(abs_projection, 4),
                 "threshold": threshold,
                 "aligned": aligned,
             }
@@ -140,6 +149,13 @@ def _check_mode_displacement(
     return all_aligned, {
         "bonds": bond_reports,
         "imaginary_frequency_cm1": imaginary_frequency,
+        "mode_alignment_score": round(min(alignment_scores), 4) if alignment_scores else None,
+        "projection_threshold": threshold,
+        "atomic_displacements": [
+            [float(component) for component in displacement]
+            for displacement in displacements
+        ],
+        "mode_displacement_valid": all_aligned,
     }
 
 

@@ -165,6 +165,7 @@ class TaskKind(Enum):
     SINGLE_POINT = "single_point"
     FREQUENCY = "frequency"
     TS_OPTIMIZATION = "ts_optimization"
+    IRC = "irc"
     NBO = "nbo"
     SCAN = "scan"
 
@@ -1167,6 +1168,32 @@ class XTBInterface:
                 result.success = False
         return result
 
+    def hessian(
+        self,
+        xyz_file: Path,
+        output_dir: Path,
+        *,
+        charge: int = 0,
+        spin: int = 1,
+        solvent: Optional[str] = None,
+    ) -> QCResult:
+        """Run an xTB Hessian (``--hess``) and return vibrational frequencies."""
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        config = dict(self.config)
+        config.setdefault('resources', {})
+        config['resources']['nproc'] = self.nproc
+
+        runner = XTBRunner(config=config, work_dir=output_dir)
+        return runner.hessian(
+            xyz_file,
+            solvent=solvent if solvent is not None else self.solvent,
+            charge=charge,
+            uhf=max(spin - 1, 0),
+            gfn_level=self.gfn_level,
+        )
+
     def enso_thermo(
         self,
         xyz_file: Path,
@@ -1265,7 +1292,8 @@ class XTBInterface:
         scan_mode: str = "concerted",
         scan_force_constant: float = 1.0,
         charge: int = 0,
-        spin: int = 1
+        spin: int = 1,
+        fixed_constraints: Optional[Dict[str, float]] = None,
     ) -> ScanResult:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -1293,6 +1321,7 @@ class XTBInterface:
             result = runner.run_scan(
                 input_xyz=xyz_file,
                 constraints=constraints,
+                fixed_constraints=fixed_constraints,
                 scan_range=scan_range,
                 scan_steps=scan_steps,
                 scan_mode=scan_mode,

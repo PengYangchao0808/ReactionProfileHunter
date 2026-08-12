@@ -18,8 +18,11 @@ from rph_core.steps.conformer_search.censo_lite import (
 from rph_core.steps.mechanism_classifier.s0_artifact_writer import write_s0_artifacts
 from rph_core.steps.mechanism_classifier.s0_record import S0ReactionRecord, load_s0_reaction_record
 from rph_core.steps.step2_retro.peb_scanner import PEBScanner
-from rph_core.steps.step3_lowlevel import LowLevelEngine
-from rph_core.steps.step4_highlevel import HighLevelEngine
+from rph_core.steps.fidelity_profile import FidelityProfile
+from rph_core.steps.refinement.engine import RefinementEngine
+from rph_core.steps.refinement.manifest_io import read_refinement_manifest
+from rph_core.steps.step3_lowlevel import LowLevelEngine  # backward-compat alias
+from rph_core.steps.step4_highlevel import HighLevelEngine  # backward-compat alias
 from rph_core.utils.config_loader import load_config
 from rph_core.utils.bond_pairs import canonicalize_bond_pairs
 from rph_core.utils.atom_mapping import (
@@ -45,6 +48,7 @@ from rph_core.utils.v4_checkpoint import V4Checkpoint
 
 logger = logging.getLogger(__name__)
 SCHEMA_VERSION = "rph_v4_s0_s4_v1"
+_BACKWARD_COMPAT_STAGE_ENGINES = (LowLevelEngine, HighLevelEngine)
 
 
 class ResumeCheckpointError(RuntimeError):
@@ -63,6 +67,9 @@ class V4Orchestrator:
         start_from: Optional[str] = None,
         recompute_from: Optional[str] = None,
         refresh_stages: Optional[Sequence[str]] = None,
+        rerun_failed_s3: bool = False,
+        s3_structure_ids: Optional[Sequence[str]] = None,
+        rescue_only: bool = False,
     ):
         self.config = load_config(config_path) if config_path else load_config()
         self.color = bool(color)
@@ -80,6 +87,15 @@ class V4Orchestrator:
             for stage in (refresh_stages or ())
             if str(stage).strip()
         }
+        self.rerun_failed_s3 = bool(rerun_failed_s3)
+        self.rescue_only = bool(rescue_only)
+        self.s3_structure_ids = tuple(
+            structure_id
+            for structure_id in (
+                str(value).strip() for value in (s3_structure_ids or ())
+            )
+            if structure_id
+        )
         unknown_refresh = self.refresh_stages - set(V4Checkpoint.stage_order)
         if unknown_refresh:
             raise ValueError(f"refresh_stages contains unknown stages: {sorted(unknown_refresh)}")
@@ -107,6 +123,10 @@ class V4Orchestrator:
             raise ValueError("start_from and recompute_from cannot be combined")
         if self.refresh_stages and (self.start_from or self.recompute_from):
             raise ValueError("refresh_stages cannot be combined with start_from or recompute_from")
+        if (self.rerun_failed_s3 or self.s3_structure_ids) and self.refresh_stages:
+            raise ValueError("S3 partial rerun cannot be combined with refresh_stages")
+        if self.rerun_failed_s3 and self.s3_structure_ids:
+            raise ValueError("rerun_failed_s3 and s3_structure_ids are mutually exclusive")
         protocol = str((self.config.get("step1", {}) or {}).get("protocol", "censo_lite"))
         if protocol != "censo_lite":
             raise ValueError("RPH V4 only supports step1.protocol=censo_lite")
@@ -149,6 +169,8 @@ class V4Orchestrator:
         stop_after = str(stop_after or "s4").strip().lower()
         if stop_after not in {"s0", "s1", "s2", "s3", "s4"}:
             raise ValueError("stop_after must be one of: s0, s1, s2, s3, s4")
+        if (self.rerun_failed_s3 or self.s3_structure_ids) and stop_after != "s3":
+            raise ValueError("S3 partial rerun requires stop_after=s3")
         work_dir = Path(work_dir).resolve()
         work_dir.mkdir(parents=True, exist_ok=True)
         self._reused_signature_overrides: Dict[Tuple[str, Optional[str]], str] = {}
@@ -647,6 +669,7 @@ class V4Orchestrator:
             variant_forming_bonds = resolved_mapping.forming_bonds_product_xyz_0based
             s2_payload = {
                 "signature_schema": "s2_signature_v9",
+                "schema_version": "s2_peb_manifest_v11",
                 "stage": "s2",
                 "variant_id": variant_id,
                 "s0": s0_signature,
@@ -678,8 +701,29 @@ class V4Orchestrator:
                     all_s2_results[variant_id] = {
                         "status": "complete",
                         "manifest": s2_manifest,
-                        "ts_seed": Path(s2_data["peb_peak"]),
+                        "ts_seed": (
+                            Path(s2_data["peb_peak"])
+                            if s2_data.get("peb_peak")
+                            else None
+                        ),
                         "intermediate_xyz": Path(intermediate_value) if intermediate_value else None,
+                        "intermediate_selection_status": s2_data.get(
+                            "intermediate_selection_status"
+                        ),
+                        "s3_dispatch": dict(s2_data.get("s3_dispatch", {}) or {}),
+                        "selection_source": s2_data.get("selection_source"),
+                        "s2_state": s2_data.get("s2_state")
+                        or (s2_data.get("s3_dispatch", {}) or {}).get("resolution")
+                        or "unresolved",
+                        "seed_evidence": s2_data.get("seed_evidence"),
+                        "ts_search_seed": None
+                        if s2_data.get("ts_search_seed") is None
+                        else dict(s2_data.get("ts_search_seed") or {}),
+                        "int_search_seed": None
+                        if s2_data.get("int_search_seed") is None
+                        else dict(s2_data.get("int_search_seed") or {}),
+                        "has_independent_int": bool(s2_data.get("has_independent_int", False)),
+                        "rejection_reason": s2_data.get("rejection_reason"),
                         "variant_id": s2_data.get("variant_id"),
                         "parent_variant_id": s2_data.get("parent_variant_id"),
                         "selected_id": s2_data.get("selected_id"),
@@ -696,6 +740,7 @@ class V4Orchestrator:
                         "confidence": s2_data.get("confidence", "unknown"),
                         "degraded_reasons": tuple(s2_data.get("degraded_reasons", [])),
                         "checkpoint_signature": s2_signature,
+                        "reused": True,
                     }
                     s2_reporter.finish_structure(
                         variant_id,
@@ -720,9 +765,6 @@ class V4Orchestrator:
                     selected_id=(s1_result.get("data") or {}).get("selected"),
                     product_xyz=str(product_xyz),
                 )
-                s2_method = str(
-                    (self.config.get("step2", {}) or {}).get("method", "legacy_peb")
-                ).strip().lower()
                 s2_extra_metadata: Optional[Dict[str, Any]] = None
                 scanner = PEBScanner(self.config, molecule_name=variant_id)
                 scanner.event_callback = s2_reporter.external_event
@@ -738,12 +780,13 @@ class V4Orchestrator:
                     )
                 s2_mapping_tables = {
                     "product": s2_product_mapping_table,
-                    "ts": bind_atom_mapping_to_xyz(
+                }
+                if ts_seed is not None:
+                    s2_mapping_tables["ts"] = bind_atom_mapping_to_xyz(
                         s1_mapping_path,
                         Path(ts_seed),
                         s2_dir / "ts_atom_mapping.json",
-                    ),
-                }
+                    )
                 if intermediate_xyz is not None:
                     s2_mapping_tables["intermediate"] = bind_atom_mapping_to_xyz(
                         s1_mapping_path,
@@ -766,11 +809,13 @@ class V4Orchestrator:
                     atom_mapping_payload=peb_mapping_payload,
                     atom_mapping_tables=s2_mapping_tables,
                     s0_manifest_path=s0_manifest,
+                    profile_data=getattr(scanner, "last_profile_payload", None),
                     s1_manifest_path=s1_manifest_path,
                     run_id=self._current_run_id(),
                     s2_method=s2_method_actual,
                     extra_metadata=s2_extra_metadata,
                 )
+                s2_manifest_data = self._read_json(s2_manifest)
                 checkpoint.mark_scope(
                     variant_id,
                     "s2",
@@ -784,14 +829,33 @@ class V4Orchestrator:
                     forming_bonds=[list(pair) for pair in returned_bonds],
                     confidence=confidence,
                     degraded_reasons=list(degraded),
-                    ts_seed=str(ts_seed),
+                    ts_seed=str(ts_seed) if ts_seed else None,
                     scan_profile=str(profile) if profile else None,
                 )
                 all_s2_results[variant_id] = {
                     "status": "complete",
                     "manifest": s2_manifest,
-                    "ts_seed": Path(ts_seed),
+                    "ts_seed": Path(ts_seed) if ts_seed else None,
                     "intermediate_xyz": Path(intermediate_xyz) if intermediate_xyz else None,
+                    "intermediate_selection_status": s2_manifest_data.get(
+                        "intermediate_selection_status"
+                    ),
+                    "s3_dispatch": dict(s2_manifest_data.get("s3_dispatch", {}) or {}),
+                    "selection_source": s2_manifest_data.get("selection_source"),
+                    "s2_state": s2_manifest_data.get("s2_state")
+                    or (s2_manifest_data.get("s3_dispatch", {}) or {}).get("resolution")
+                    or "unresolved",
+                    "seed_evidence": s2_manifest_data.get("seed_evidence"),
+                    "ts_search_seed": None
+                    if s2_manifest_data.get("ts_search_seed") is None
+                    else dict(s2_manifest_data.get("ts_search_seed") or {}),
+                    "int_search_seed": None
+                    if s2_manifest_data.get("int_search_seed") is None
+                    else dict(s2_manifest_data.get("int_search_seed") or {}),
+                    "has_independent_int": bool(
+                        s2_manifest_data.get("has_independent_int", False)
+                    ),
+                    "rejection_reason": s2_manifest_data.get("rejection_reason"),
                     "variant_id": variant_id,
                     "parent_variant_id": variant_id,
                     "selected_id": (s1_result.get("data") or {}).get("selected"),
@@ -805,6 +869,7 @@ class V4Orchestrator:
                     "confidence": confidence,
                     "degraded_reasons": tuple(degraded),
                     "checkpoint_signature": s2_signature,
+                    "reused": False,
                 }
                 s2_reporter.finish_structure(
                     variant_id,
@@ -813,7 +878,7 @@ class V4Orchestrator:
                     stage_status=stage_status,
                     confidence=confidence,
                     degraded_reasons=list(degraded),
-                    ts_seed=str(ts_seed),
+                    ts_seed=str(ts_seed) if ts_seed else None,
                     intermediate_xyz=str(intermediate_xyz) if intermediate_xyz else None,
                     forming_bonds=[list(pair) for pair in returned_bonds],
                     scan_profile=str(profile) if profile else None,
@@ -913,6 +978,22 @@ class V4Orchestrator:
                 continue
             atom_mapping_table = self._s1_atom_mapping_path(s1_result)
             verified_bonds = [list(b) for b in s2_result.get("forming_bonds", ())]
+            s3_dispatch = dict(s2_result.get("s3_dispatch", {}) or {})
+            # Generated S2 manifests always carry an explicit dispatch
+            # resolution.  Only an explicit unresolved dispatch suppresses
+            # S3; accepting an absent field keeps older/test doubles
+            # backwards-compatible while they migrate to the manifest
+            # contract.
+            if s3_dispatch.get("resolution") == "unresolved":
+                logger.info(
+                    "[V4] Skipping S3 for variant %s: S2 selector/rescue is unresolved",
+                    variant_id,
+                )
+                continue
+            submit_ts = bool(s3_dispatch.get("submit_ts", True)) and bool(
+                s2_result.get("ts_seed")
+            )
+            submit_intermediate = bool(s3_dispatch.get("submit_intermediate", False))
             variant_structures: List[Dict[str, Any]] = [
                 {
                     "id": variant_id,
@@ -932,7 +1013,9 @@ class V4Orchestrator:
                     "mapping_required": True,
                     **self._s1_ensemble_fields(s1_result),
                 },
-                {
+            ]
+            if submit_ts:
+                variant_structures.append({
                     "id": f"{variant_id}_ts",
                     "kind": "ts",
                     "input_xyz": str(Path(s2_result["ts_seed"])),
@@ -950,10 +1033,9 @@ class V4Orchestrator:
                     ),
                     "mapping_audit": str(s2_result["atom_mapping"]),
                     "mapping_required": True,
-                },
-            ]
+                })
             intermediate_path = s2_result.get("intermediate_xyz")
-            if intermediate_path:
+            if submit_intermediate and intermediate_path:
                 variant_structures.insert(
                     1,
                     {
@@ -967,6 +1049,7 @@ class V4Orchestrator:
                         "pathway_id": pathway_id,
                         "parent_structure_id": variant_id,
                         "source_stage": "S2",
+                        "seed_state": "stable_minimum_seed",
                         "forming_bonds": verified_bonds,
                         "atom_mapping": str(
                             (s2_result.get("atom_mapping_tables") or {}).get("intermediate")
@@ -974,6 +1057,11 @@ class V4Orchestrator:
                         ),
                         "mapping_audit": str(s2_result["atom_mapping"]),
                         "mapping_required": True,
+                        "parent_structure": self._reference_geometry_bundle(
+                            variant_id,
+                            s1_result,
+                            precursor_s1_result,
+                        ),
                     },
                 )
             structures.extend(variant_structures)
@@ -989,13 +1077,14 @@ class V4Orchestrator:
         )
         s3_reporter.emit_stage_event("s3_started", total_structures=len(structures))
         s3_payload = {
-            "signature_schema": "s3_signature_v2",
+            "signature_schema": "s3_signature_v3",
             "stage": "s3",
             "structures": self._structure_signatures(structures),
-            "config": self.config.get("theory", {}).get("s3_low_level", {}),
+            "config": self.config.get("refinement", {}).get("s3", {}),
         }
         s3_signature = V4Checkpoint.signature(s3_payload)
-        s3_reused = self._checkpoint_reusable(
+        s3_partial_rerun = bool(self.rerun_failed_s3 or self.s3_structure_ids)
+        s3_reused = False if s3_partial_rerun else self._checkpoint_reusable(
             checkpoint,
             "s3",
             s3_signature,
@@ -1005,14 +1094,21 @@ class V4Orchestrator:
         if s3_reused:
             logger.info("[V4] Reusing S3 manifest")
         else:
-            s3_engine = self._instantiate_with_optional_run_id(
-                LowLevelEngine,
-                self.config,
-                optional_kwargs={"parent_manifest_paths": dict(stage_manifest_paths)},
+            s3_profile = FidelityProfile.from_config(self.config, "S3")
+            s3_engine = RefinementEngine(
+                config=self.config,
+                profile=s3_profile,
+                run_id=self._current_run_id(),
+                parent_manifest_paths=dict(stage_manifest_paths),
             )
-            if hasattr(s3_engine, "set_progress_reporter"):
-                s3_engine.set_progress_reporter(s3_reporter)
-            s3_manifest = s3_engine.run(structures, s3_dir)
+            s3_engine.set_progress_reporter(s3_reporter)
+            s3_manifest =             s3_engine.run(
+                structures,
+                s3_dir,
+                resume_incomplete=self.rerun_failed_s3,
+                structure_ids=self.s3_structure_ids,
+                rescue_only=self.rescue_only,
+            )
             checkpoint.mark(
                 "s3",
                 s3_signature,
@@ -1046,20 +1142,33 @@ class V4Orchestrator:
                 dict(stage_manifest_paths),
                 run_id=self._current_run_id(),
             )
-        self._assert_manifest_run_id(s3_manifest, "S3", "S4")
+        self._assert_manifest_run_id(
+            s3_manifest,
+            "S3",
+            "S4",
+            allow_reused=s3_reused,
+        )
         self._warn_provenance_mismatch(
             s3_manifest,
             boundary_label="S3→S4",
             expected_parent_paths={"s2": stage_manifest_paths.get("s2")},
         )
-        s3_data = json.loads(s3_manifest.read_text(encoding="utf-8"))
+        s3_manifest_data = read_refinement_manifest(s3_manifest)
         s4_structures = [
             {
                 "id": item["id"],
                 "kind": item.get("kind", "minimum"),
-                "input_xyz": item["input_xyz"],
-                "opt_xyz": item.get("opt_xyz"),
-                "fallback_xyz": item.get("input_xyz"),
+                "input_xyz": (
+                    item.get("opt_xyz")
+                    or item.get("fallback_xyz")
+                    or item["input_xyz"]
+                ),
+                "fallback_xyz": item.get("fallback_xyz") or item.get("input_xyz"),
+                "original_seed_xyz": (
+                    item.get("original_seed_xyz")
+                    or item.get("fallback_xyz")
+                    or item.get("input_xyz")
+                ),
                 "charge": item.get("charge"),
                 "multiplicity": item.get("multiplicity"),
                 "structure_id": item.get("structure_id", item["id"]),
@@ -1069,48 +1178,33 @@ class V4Orchestrator:
                 "pathway_id": item.get("pathway_id"),
                 "parent_structure_id": item.get("parent_structure_id"),
                 "source_stage": "S3",
+                "source_s3_manifest": str(s3_manifest),
                 "atom_mapping": item.get("atom_mapping"),
                 "mapping_audit": item.get("mapping_audit"),
                 "mapping_status": item.get("mapping_status"),
                 "mapping_required": item.get("mapping_required", True),
+                "parent_structure": item.get("parent_structure"),
                 "s1_manifest": item.get("s1_manifest"),
                 "s1_ensemble_thermodynamics": item.get("s1_ensemble_thermodynamics"),
                 "s1_thermochemistry_status": item.get("s1_thermochemistry_status"),
                 "ensemble_thermochemistry_correction_hartree": item.get(
                     "ensemble_thermochemistry_correction_hartree"
                 ),
-                "source_s3": {
-                    "structure_status": item.get("status"),
-                    "opt_status": item.get("opt_status"),
-                    "sp_status": item.get("sp_status"),
-                    "frequency_status": item.get("frequency_status"),
-                    "ts_frequency_class": item.get("ts_frequency_class"),
-                    "ts_frequency_valid": item.get("ts_frequency_valid"),
-                    "ts_mode_displacement_verified": item.get("ts_mode_displacement_verified"),
-                    "frequency_count_valid": item.get("frequency_count_valid"),
-                    "mode_displacement_valid": item.get("mode_displacement_valid"),
-                    "irc_valid": item.get("irc_valid"),
-                    "ts_quality_summary": item.get("ts_quality_summary"),
-                    "soft_mode_review": item.get("soft_mode_review"),
-                    "eligible_for_s4_reoptimization": item.get("eligible_for_s4_reoptimization"),
-                    "usable_for_ml": item.get("usable_for_ml"),
-                    "manifest": str(s3_manifest),
-                },
                 **(
                     {"forming_bonds": item.get("forming_bonds")}
-                    if item.get("kind", "minimum") == "ts" and item.get("forming_bonds") is not None
+                    if item.get("forming_bonds") is not None
                     else {}
                 ),
             }
-            for item in s3_data.get("structures", [])
+            for item in s3_manifest_data.get("structures", [])
         ]
         s4_dir = work_dir / "S4_HighLevel"
         s4_manifest = s4_dir / "manifest.json"
         s4_payload = {
-            "signature_schema": "s4_signature_v3",
+            "signature_schema": "s4_signature_v4",
             "stage": "s4",
             "structures": self._structure_signatures(s4_structures),
-            "config": self.config.get("theory", {}).get("s4_high_precision", {}),
+            "config": self.config.get("refinement", {}).get("s4", {}),
         }
         s4_signature = V4Checkpoint.signature(s4_payload)
         if self._checkpoint_reusable(
@@ -1122,15 +1216,15 @@ class V4Orchestrator:
         ):
             logger.info("[V4] Reusing S4 manifest")
         else:
-            s4_manifest = self._instantiate_with_optional_run_id(
-                HighLevelEngine,
-                self.config,
-                optional_kwargs={"parent_manifest_paths": dict(stage_manifest_paths)},
-            ).run(
-                s4_structures,
-                s4_dir,
-                event_callback=ui_reporter.s4_event_callback,
+            s4_profile = FidelityProfile.from_config(self.config, "S4")
+            s4_engine = RefinementEngine(
+                config=self.config,
+                profile=s4_profile,
+                run_id=self._current_run_id(),
+                parent_manifest_paths=dict(stage_manifest_paths),
             )
+            s4_engine.set_event_callback(ui_reporter.s4_event_callback)
+            s4_manifest = s4_engine.run(s4_structures, s4_dir)
             s4_data = self._read_json(s4_manifest)
             s4_checkpoint_status = (
                 "complete" if s4_data.get("status") == "complete" else "incomplete"
@@ -1293,6 +1387,7 @@ class V4Orchestrator:
                 Path(result["manifest"]),
                 stage_name,
                 next_stage_name,
+                allow_reused=bool(result.get("reused", False)),
             )
 
     def _assert_manifest_run_id(
@@ -1300,11 +1395,21 @@ class V4Orchestrator:
         manifest_path: Path,
         stage_name: str,
         next_stage_name: str,
+        *,
+        allow_reused: bool = False,
     ) -> None:
         payload = self._read_json(manifest_path)
         manifest_run_id = payload.get(RUN_ID_FIELD)
         current_run_id = self._current_run_id()
         if manifest_run_id != current_run_id:
+            if allow_reused:
+                logger.info(
+                    "[V4] Allowing validated reused %s manifest from run_id %s while current run_id is %s",
+                    stage_name,
+                    manifest_run_id,
+                    current_run_id,
+                )
+                return
             raise RuntimeError(
                 f"{stage_name} manifest run_id {manifest_run_id} does not match current run_id {current_run_id}. "
                 f"Stale {stage_name} output detected. Refusing to start {next_stage_name}."
@@ -1328,6 +1433,30 @@ class V4Orchestrator:
                 "ensemble_thermochemistry_correction_hartree"
             ),
         }
+
+    @staticmethod
+    def _reference_geometry_bundle(
+        variant_id: str,
+        s1_result: Dict[str, Any],
+        precursor_s1_result: Optional[Dict[str, Any]],
+    ) -> Dict[str, str]:
+        """Reference geometries consumed by ``classify_int`` collapse detection.
+
+        ``classify_int`` compares an intermediate against the precursor and
+        product minima (mapped RMSD + per-bond progress).  The product
+        reference is the S1 selected conformer of the same variant (shared
+        atom ordering with the PEB intermediate seed); the precursor
+        reference is the S1 selected conformer of the precursor.
+        """
+        bundle: Dict[str, str] = {}
+        product_xyz = s1_result.get("selected_xyz")
+        if product_xyz:
+            bundle["product_ref"] = str(Path(product_xyz))
+        if precursor_s1_result is not None:
+            precursor_xyz = precursor_s1_result.get("selected_xyz")
+            if precursor_xyz:
+                bundle["precursor_ref"] = str(Path(precursor_xyz))
+        return bundle
 
     @staticmethod
     def _s1_progress_fields(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -2014,7 +2143,7 @@ class V4Orchestrator:
     @staticmethod
     def _write_s2(
         directory: Path,
-        ts_seed: Path,
+        ts_seed: Optional[Path],
         intermediate_xyz: Optional[Path],
         forming_bonds: Sequence[Tuple[int, int]],
         profile: Optional[Path],
@@ -2032,34 +2161,52 @@ class V4Orchestrator:
         run_id: Optional[str] = None,
         s2_method: str = "legacy_peb",
         extra_metadata: Optional[Mapping[str, Any]] = None,
+        profile_data: Optional[Mapping[str, Any]] = None,
     ) -> Path:
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / "manifest.json"
-        profile_data: Dict[str, Any] = {}
-        if profile is not None:
+        resolved_profile_data: Dict[str, Any]
+        if profile_data is not None:
+            resolved_profile_data = dict(profile_data)
+        elif profile is not None:
             try:
-                profile_data = json.loads(Path(profile).read_text(encoding="utf-8"))
+                resolved_profile_data = json.loads(Path(profile).read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
-                profile_data = {}
+                resolved_profile_data = {}
+        else:
+            resolved_profile_data = {}
+        profile_data = resolved_profile_data
         selections = profile_data.get("selections", {}) or {}
         ts_selection = selections.get("ts_guess", {}) or {}
         intermediate_selection = selections.get("intermediate", {}) or {}
+        path_selection = profile_data.get("selection_decision", {}) or {}
+        s3_dispatch = profile_data.get("s3_dispatch", {}) or {}
+        resolution = s3_dispatch.get("resolution") or "unresolved"
+        s2_state = profile_data.get("s2_state")
+        if s2_state is None:
+            s2_state = resolution
+        shared_ts_int = intermediate_selection.get("selection_mode") == "shared_ts_fallback"
 
         payload: Dict[str, Any] = {
-            "schema_version": "s2_peb_manifest_v9",
+            "schema_version": "s2_peb_manifest_v11",
             "stage": "S2",
             RUN_ID_FIELD: run_id,
             "method": s2_method,
-            "peb_peak": str(ts_seed),
+            "peb_peak": str(ts_seed) if ts_seed else None,
             "intermediate_xyz": str(intermediate_xyz) if intermediate_xyz else None,
             "forming_bonds": [list(item) for item in forming_bonds],
             "mapping_status": "verified" if atom_mapping else "missing",
             "scan_profile": str(profile) if profile is not None else None,
             "scan_plot": profile_data.get("scan_plot"),
             "ts_guess_index": ts_selection.get("index"),
+            "ts_energy_peak_index": ts_selection.get("energy_peak_index", ts_selection.get("index")),
+            "ts_seed_index": ts_selection.get("seed_index", ts_selection.get("index")),
+            "ts_seed_reactant_backoff_A": ts_selection.get("seed_backoff_applied_A", 0.0),
             "ts_selection_method": ts_selection.get("rule"),
             "ts_selection_configured_method": ts_selection.get("configured_method"),
             "ts_selection_actual_method": ts_selection.get("actual_method"),
+            "selected_path_branch": path_selection.get("selected_branch"),
+            "path_selection_rule": path_selection.get("rule"),
             "intermediate_index": intermediate_selection.get("index"),
             "intermediate_selection_method": intermediate_selection.get("rule"),
             "intermediate_selection_status": intermediate_selection.get(
@@ -2080,13 +2227,23 @@ class V4Orchestrator:
             "intermediate_confidence": (profile_data.get("scan_quality", {}) or {}).get(
                 "intermediate_confidence"
             ),
+            "selection_source": profile_data.get("selection_source"),
+            "resolution": resolution,
+            "s2_state": s2_state,
+            "seed_evidence": profile_data.get("seed_evidence"),
+            "ts_search_seed": profile_data.get("ts_search_seed"),
+            "int_search_seed": profile_data.get("int_search_seed"),
+            "has_independent_int": bool(profile_data.get("has_independent_int", False)),
+            "rejection_reason": profile_data.get("rejection_reason"),
+            "s3_dispatch": s3_dispatch,
+            "rescue": profile_data.get("rescue", {}),
             "status": status,
             "confidence": confidence,
             "degraded_reasons": list(degraded),
             "nodes": [
                 {
                     "role": "ts",
-                    "xyz": str(ts_seed),
+                    "xyz": str(ts_seed) if ts_seed else None,
                     "frame_index": ts_selection.get("index"),
                     "point_id": ts_selection.get("point_id"),
                     "source_attempt": ts_selection.get("source_attempt"),
@@ -2094,7 +2251,7 @@ class V4Orchestrator:
                     "selection_actual_method": ts_selection.get("actual_method"),
                     "energy_source": ts_selection.get("energy_source"),
                     "confidence": confidence,
-                    "usable_for_s3": True,
+                    "usable_for_s3": bool(s3_dispatch.get("submit_ts", False)),
                 },
                 {
                     "role": "intermediate",
@@ -2104,13 +2261,20 @@ class V4Orchestrator:
                     "source_attempt": intermediate_selection.get("source_attempt"),
                     "selection_rule": intermediate_selection.get("rule"),
                     "energy_source": intermediate_selection.get("energy_source"),
-                    "status": "selected" if intermediate_xyz else "not_found",
+                    "status": (
+                        "selected"
+                        if intermediate_xyz
+                        else "shared_with_ts" if shared_ts_int else "not_found"
+                    ),
                     "selection_status": intermediate_selection.get("selection_status"),
-                    "reason": intermediate_selection.get("error"),
+                    "reason": intermediate_selection.get("reason") or intermediate_selection.get("error"),
+                    "shared_with_ts": shared_ts_int,
                     "confidence": (profile_data.get("scan_quality", {}) or {}).get(
                         "intermediate_confidence"
                     ),
-                    "usable_for_s3": bool(intermediate_xyz),
+                    "usable_for_s3": bool(
+                        intermediate_xyz and s3_dispatch.get("submit_intermediate", False)
+                    ),
                 },
             ],
         }
@@ -2140,7 +2304,7 @@ class V4Orchestrator:
             forming_bonds=forming_bonds,
             variant_manifest_path=s1_manifest_path,
             extra={
-                "ts_guess_xyz_hash": sha256_of_file(ts_seed),
+                "ts_guess_xyz_hash": sha256_of_file(ts_seed) if ts_seed else "",
                 "intermediate_xyz_hash": sha256_of_file(intermediate_xyz) if intermediate_xyz else "",
             },
         ).to_dict()
@@ -2211,6 +2375,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--refresh-stages",
         help="Comma-separated stages to rerun while retaining other validated artifacts, e.g. s0,s2,s3",
     )
+    s3_partial_group = parser.add_mutually_exclusive_group()
+    s3_partial_group.add_argument(
+        "--rerun-failed-s3",
+        action="store_true",
+        help="Preserve complete S3 structures and rerun only failed or artifact-missing S3 structures",
+    )
+    s3_partial_group.add_argument(
+        "--s3-structures",
+        help="Comma-separated S3 structure ids to rerun while preserving all other S3 structures",
+    )
+    parser.add_argument(
+        "--rescue-only",
+        action="store_true",
+        help="S3 partial rerun: replay failed structures directly into the rescue matrix, skipping a full pass1 re-optimization when a usable stop geometry exists",
+    )
     args = parser.parse_args(argv)
     if args.start_from and args.resume_policy != "use-existing-upstream":
         parser.error("--start-from requires --resume-policy use-existing-upstream")
@@ -2220,6 +2399,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.error("--start-from and --recompute-from cannot be combined")
     if args.refresh_stages and (args.start_from or args.recompute_from):
         parser.error("--refresh-stages cannot be combined with --start-from or --recompute-from")
+    if (args.rerun_failed_s3 or args.s3_structures) and args.refresh_stages:
+        parser.error("S3 partial rerun cannot be combined with --refresh-stages")
+    if (args.rerun_failed_s3 or args.s3_structures) and args.stop_after != "s3":
+        parser.error("S3 partial rerun requires --stop-after s3")
+    if args.rescue_only and not (args.rerun_failed_s3 or args.s3_structures):
+        parser.error("--rescue-only requires --rerun-failed-s3 or --s3-structures")
+    if args.rescue_only and args.stop_after != "s3":
+        parser.error("--rescue-only requires --stop-after s3")
     if args.start_from and V4Checkpoint.stage_order.index(args.start_from) > V4Checkpoint.stage_order.index(args.stop_after):
         parser.error("--start-from cannot be later than --stop-after")
     if args.recompute_from and V4Checkpoint.stage_order.index(args.recompute_from) > V4Checkpoint.stage_order.index(args.stop_after):
@@ -2239,6 +2426,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         orchestrator_kwargs["ui_mode"] = ui_mode
     if args.resume_policy is not None:
         orchestrator_kwargs["resume_policy"] = args.resume_policy
+    if args.rerun_failed_s3:
+        orchestrator_kwargs["rerun_failed_s3"] = True
+    if args.rescue_only:
+        orchestrator_kwargs["rescue_only"] = True
+    if args.s3_structures:
+        orchestrator_kwargs["s3_structure_ids"] = tuple(
+            item.strip() for item in args.s3_structures.split(",") if item.strip()
+        )
     if args.start_from is not None:
         orchestrator_kwargs["start_from"] = args.start_from
     if args.recompute_from is not None:

@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any
 
 from rph_core.utils.live_dashboard import LiveDashboardManager
+from rph_core.utils.run_id import RUN_ID_FIELD
 from rph_core.utils.ui_adapter import (
     UiActiveJob,
     UiBatch,
@@ -45,6 +47,9 @@ else:
 HAS_RICH = _has_rich
 
 
+logger = logging.getLogger(__name__)
+
+
 _STAGE_TITLES = {
     "S0": "Mechanism",
     "S1": "Conformer Search",
@@ -68,6 +73,7 @@ class RichReporter:
     ):
         self.console = console
         self.color = bool(color)
+        self.run_id: str | None = None
         self.mode = mode if mode in {"compact", "balanced", "verbose", "classic", "dashboard"} else "balanced"
         if self.mode == "classic":
             self.mode = "compact"
@@ -106,10 +112,18 @@ class RichReporter:
                 console,
                 log_path=log_path,
                 refresh_per_second=float(dashboard_cfg.get("refresh_per_second", 4.0)),
+                run_id=self.run_id,
             )
             if self.mode == "dashboard"
             else None
         )
+
+    def set_run_id(self, run_id: str | None) -> None:
+        self.run_id = str(run_id).strip() if run_id is not None else None
+        if self.run_id == "":
+            self.run_id = None
+        if self._dashboard is not None:
+            self._dashboard.set_run_id(self.run_id)
 
     def start(self) -> None:
         """Start the optional embedded dashboard."""
@@ -126,6 +140,8 @@ class RichReporter:
             self._dashboard.close()
 
     def event_callback(self, event: str, record: dict[str, Any]) -> None:
+        if self._should_ignore_run_id(record):
+            return
         if self._dashboard is not None and not self._dashboard.failed:
             self._dashboard.event_callback(event, record)
             return
@@ -135,6 +151,25 @@ class RichReporter:
 
     def s4_event_callback(self, event: str, record: dict[str, Any]) -> None:
         self.event_callback(event, record)
+
+    def _should_ignore_run_id(self, record: dict[str, Any]) -> bool:
+        try:
+            if self.run_id is None:
+                return False
+            payload_run_id = record.get(RUN_ID_FIELD)
+            if payload_run_id in (None, ""):
+                return False
+            observed_run_id = str(payload_run_id)
+            if observed_run_id != self.run_id:
+                logger.debug(
+                    "Ignoring event from stale run_id %s (expected %s)",
+                    observed_run_id,
+                    self.run_id,
+                )
+                return True
+        except Exception:  # pragma: no cover - defensive legacy compatibility
+            logger.debug("Run-id event filtering failed; accepting event", exc_info=True)
+        return False
 
     def _activate_classic_fallback(self) -> None:
         if not self._dashboard_warning_printed:
@@ -369,6 +404,7 @@ class RichReporter:
             return table
         table.add_column("id", style="step.title")
         table.add_column("geometry")
+        table.add_column("step")
         table.add_column("status")
         table.add_column("validation")
         table.add_column("SP / Eh", justify="right", style="energy")
@@ -376,6 +412,7 @@ class RichReporter:
         table.add_row(
             _escape(structure.id),
             _escape(structure.geometry_source or structure.source),
+            _escape(structure.current_step),
             self._status_text(structure.status),
             _escape(self._validation_text(structure, row)),
             _escape(self._energy_text(structure.energy_hartree)),
@@ -398,6 +435,7 @@ class RichReporter:
                 stage,
                 structure.id,
                 f"geometry={structure.geometry_source or structure.source}",
+                f"step={structure.current_step or '-'}",
                 f"{self._plain_status(structure.status)} {structure.status.value}",
                 self._validation_text(structure, row),
                 f"sp={self._energy_text(structure.energy_hartree)} Eh",
@@ -500,6 +538,7 @@ class RichReporter:
             "output_candidates", "valid", "failed", "ensemble_members", "representatives",
             "in_window", "selected", "selected_population", "partition_function_relative",
             "conformational_free_energy_correction_kcal", "manifest", "geometry",
+            "selection_source", "s2_state", "seed_evidence",
         )
         results = [f"{name}={step.detail[name]}" for name in result_names if step.detail.get(name) is not None]
         if results:
@@ -652,7 +691,7 @@ class RichReporter:
             return "TS frequency unverified"
         return structure.ts_quality_summary or structure.current_task or "TS pending"
 
-    def _detail_text(self, stage: str, structure: UiStructure, row: dict[str, Any]) -> str:
+    def _detail_text(self, _stage: str, structure: UiStructure, row: dict[str, Any]) -> str:
         pieces: list[str] = []
         if row.get("selected"):
             pieces.append(f"selected={row['selected']}")
@@ -660,6 +699,12 @@ class RichReporter:
             pieces.append(f"selected={row['selected_id']}")
         if row.get("stage_status"):
             pieces.append(f"stage={row['stage_status']}")
+        if row.get("selection_source"):
+            pieces.append(f"selection_source={row['selection_source']}")
+        if row.get("s2_state"):
+            pieces.append(f"s2_state={row['s2_state']}")
+        if row.get("seed_evidence"):
+            pieces.append(f"seed_evidence={row['seed_evidence']}")
         if row.get("confidence"):
             pieces.append(f"confidence={row['confidence']}")
         if row.get("forming_bonds"):
@@ -713,6 +758,9 @@ class RichReporter:
             str(row.get("smiles") or ""),
             str(row.get("confidence") or ""),
             str(row.get("stage_status") or ""),
+            str(row.get("selection_source") or ""),
+            str(row.get("s2_state") or ""),
+            str(row.get("seed_evidence") or ""),
             str(row.get("reused") or ""),
             str(row.get("degraded_reasons") or ""),
         ]

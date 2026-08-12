@@ -10,24 +10,29 @@ class OrcaInputRenderer:
         self.spec = spec
 
     def render_simple_keywords(self, task_type: str = "sp") -> str:
-        parts: List[str] = ["!", self.spec.method]
+        task = str(task_type or "sp").strip().lower()
+        parts: List[str] = ["!"]
+        if task == "irc":
+            parts.extend(["IRC", self.spec.method])
+        else:
+            parts.append(self.spec.method)
 
-        if self.spec.family != "composite_3c" and self.spec.basis:
+        self_contained = self.spec.family in {"composite_3c", "semiempirical_xtb"}
+        if not self_contained and self.spec.basis:
             parts.append(self.spec.basis)
 
         accel = self.spec.scf.accel.strip()
         aux_j = self.spec.scf.aux_j
-        if aux_j and self.spec.family != "composite_3c":
+        if aux_j and not self_contained:
             parts.append(aux_j)
 
-        if accel and accel.lower() != "none":
+        if accel and accel.lower() != "none" and not self_contained:
             parts.append(accel)
 
         aux_c = self.spec.correlation.aux_c
-        if aux_c and self.spec.family != "composite_3c":
+        if aux_c and not self_contained:
             parts.append(aux_c)
 
-        task = str(task_type or "sp").strip().lower()
         if task == "opt":
             parts.append("Opt")
         elif task == "opt_freq":
@@ -36,8 +41,10 @@ class OrcaInputRenderer:
             parts.append("OptTS")
         elif task == "ts_freq":
             parts.extend(["OptTS", "Freq"])
+        elif task == "irc":
+            pass
 
-        if self.spec.family != "composite_3c":
+        if not self_contained:
             parts.append("tightSCF")
 
         if self.spec.pno.preset:

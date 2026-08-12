@@ -4,16 +4,34 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
+
+from rph_core.utils.run_id import RUN_ID_FIELD
 
 logger = logging.getLogger(__name__)
 
 
 def _now() -> float:
     return time.time()
+
+
+def _heartbeat_interval_seconds(
+    config: Optional[Dict[str, Any]],
+    default_fields: Optional[Dict[str, Any]],
+) -> float:
+    ui_cfg: Dict[str, Any] = {}
+    if default_fields is not None:
+        ui_cfg.update(dict(default_fields.get("ui") or {}))
+    if config is not None:
+        ui_cfg.update(dict(config.get("ui", {}) or {}))
+    try:
+        return max(0.01, float(ui_cfg.get("heartbeat_seconds", 30)))
+    except (TypeError, ValueError):
+        return 30.0
 
 
 def _terminal_status(value: Any) -> str:
@@ -31,6 +49,8 @@ class StageProgressReporter:
         stage_name: str,
         default_fields: Optional[Dict[str, Any]] = None,
         event_callback: Callable[[str, dict[str, Any]], None] | None = None,
+        run_id: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
     ):
         self.stage_dir = Path(stage_dir)
         self.stage_name = stage_name
@@ -38,6 +58,8 @@ class StageProgressReporter:
         self._events_path = self.stage_dir / "events.jsonl"
         self._status_path = self.stage_dir / "status.json"
         self._default_fields = dict(default_fields or {})
+        if run_id is not None:
+            self._default_fields[RUN_ID_FIELD] = run_id
         self._event_callback = event_callback
         self._structures: Dict[str, Dict[str, Any]] = {}
         self._batches: Dict[str, Dict[str, Any]] = {}
@@ -51,6 +73,9 @@ class StageProgressReporter:
         self._status = "running"
         self._started_at = _now()
         self._updated_at = self._started_at
+        self._heartbeat_at = self._started_at
+        self._pid = os.getpid()
+        self.heartbeat_interval_seconds = _heartbeat_interval_seconds(config, self._default_fields)
         self._finished_at: Optional[float] = None
         self._lock = threading.RLock()
         self._write_status()
@@ -94,7 +119,7 @@ class StageProgressReporter:
         entry.update(
             {
                 "status": "running",
-                "started_at": entry.get("started_at", _now()),
+                "started_at": entry.get("started_at") or _now(),
                 "finished_at": None,
                 "error": None,
                 **meta,
@@ -102,6 +127,24 @@ class StageProgressReporter:
         )
         self._status = "running"
         self.emit("structure_started", structure_id, **meta)
+        self._write_status()
+
+    def register_structure(self, structure_id: str, **meta: Any) -> None:
+        """Expose a queued structure before a worker starts its QC attempts."""
+
+        entry = self._structures.setdefault(
+            structure_id,
+            {
+                "tasks": {},
+                "current_task": None,
+                "status": "pending",
+                "started_at": None,
+                "finished_at": None,
+            },
+        )
+        entry.update(meta)
+        entry.setdefault("status", "pending")
+        self.emit("structure_queued", structure_id, status=entry["status"], **meta)
         self._write_status()
 
     def finish_structure(self, structure_id: str, status: str, **results: Any) -> None:
@@ -194,9 +237,9 @@ class StageProgressReporter:
         fields = dict(payload or {})
         batch_id = str(fields.get("batch") or "batch")
         job_id = str(fields.get("job_id") or fields.get("current") or "job")
-        batch = dict(self._batches.get(batch_id) or {"label": batch_id})
-        active = dict(batch.get("active_jobs") or {})
-        state = dict(active.get(job_id) or {})
+        batch: Dict[str, Any] = dict(self._batches.get(batch_id) or {"label": batch_id})
+        active: Dict[str, Any] = dict(batch.get("active_jobs") or {})
+        state: Dict[str, Any] = dict(active.get(job_id) or {})
         state.update(fields)
         state.update({"id": job_id, "updated_at": _now()})
         if event == "batch_job_started":
@@ -217,7 +260,7 @@ class StageProgressReporter:
             )
             state["finished_at"] = fields.get("finished_at") or _now()
             active.pop(job_id, None)
-            tail = list(batch.get("completed_job_tail") or [])
+            tail: list[Dict[str, Any]] = list(batch.get("completed_job_tail") or [])
             tail.append(state)
             limit = int((self._default_fields.get("ui") or {}).get("completed_job_tail", 5))
             batch["completed_job_tail"] = tail[-max(1, limit):]
@@ -329,6 +372,53 @@ class StageProgressReporter:
         self.emit(event, structure_id, **event_payload)
         self._write_status()
 
+    def report_structure_subprocess(
+        self,
+        structure_id: str,
+        *,
+        pid: int | None,
+        sandbox_path: str | None,
+    ) -> None:
+        """Record the active QC child process for stale-run recovery and UI."""
+
+        entry = self._structures.setdefault(
+            structure_id,
+            {
+                "tasks": {},
+                "current_task": None,
+                "status": "running",
+                "started_at": _now(),
+                "finished_at": None,
+            },
+        )
+        entry.update({"pid": pid, "sandbox_path": sandbox_path})
+        self.emit(
+            "structure_subprocess",
+            structure_id,
+            pid=pid,
+            sandbox_path=sandbox_path,
+        )
+        self._write_status()
+
+    def touch_structure_heartbeat(self, structure_id: str) -> None:
+        """Refresh the structure heartbeat while a QC child process is active."""
+
+        entry = self._structures.get(structure_id)
+        if entry is None:
+            return
+        entry["heartbeat_at"] = _now()
+        self.emit("structure_heartbeat", structure_id, heartbeat_at=entry["heartbeat_at"])
+        self._write_status()
+
+    def reinitialize_after_archive(self) -> None:
+        """Restore this reporter's live artifacts after a stage-output archive."""
+
+        self.stage_dir.mkdir(parents=True, exist_ok=True)
+        self._events_path = self.stage_dir / "events.jsonl"
+        self._status_path = self.stage_dir / "status.json"
+        self.emit("stage_progress_reinitialized")
+        self._write_status()
+
     def _stage_terminal_status(self) -> str:
         if any(_terminal_status(row.get("status")) in {"failed", "degraded", "error"} for row in self._structures.values()):
             return "completed_with_failures"
@@ -339,7 +429,8 @@ class StageProgressReporter:
             self._write_status_unlocked()
 
     def _write_status_unlocked(self) -> None:
-        self._updated_at = _now()
+        self._heartbeat_at = _now()
+        self._updated_at = self._heartbeat_at
         completed = 0
         failed = 0
         for row in self._structures.values():
@@ -353,6 +444,9 @@ class StageProgressReporter:
             "stage": self.stage_name,
             **self._default_fields,
             "status": self._status,
+            "pid": self._pid,
+            "heartbeat_at": self._heartbeat_at,
+            "heartbeat_interval_seconds": self.heartbeat_interval_seconds,
             "started_at": self._started_at,
             "updated_at": self._updated_at,
             "finished_at": self._finished_at,

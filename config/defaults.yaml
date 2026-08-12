@@ -13,10 +13,25 @@ executables:
     use_wrapper: false
     wrapper_path: ""
   orca:
-    path: /opt/software/orca/orca
-    ld_library_path: /opt/software/orca
+    # Active ORCA install (6.1.1). ORCA 6 forbids launching the main driver
+    # with mpirun; %pal nprocs N end in the input is injected by ORCAInterface.
+    path: /opt/orca_6_1_1/orca
+    ld_library_path: /opt/orca_6_1_1
     mpi_bin_dir: /opt/openmpi418/bin
     mpi_lib_dir: /opt/openmpi418/lib
+    # Active version; `versions` keeps the previous install switchable.
+    version: "6.1.1"
+    versions:
+      "5.0.4":
+        path: /opt/software/orca/orca
+        ld_library_path: /opt/software/orca
+        mpi_bin_dir: /opt/openmpi418/bin
+        mpi_lib_dir: /opt/openmpi418/lib
+      "6.1.1":
+        path: /opt/orca_6_1_1/orca
+        ld_library_path: /opt/orca_6_1_1
+        mpi_bin_dir: /opt/openmpi418/bin
+        mpi_lib_dir: /opt/openmpi418/lib
   crest:
     path: /opt/software/crest/crest
   xtb:
@@ -52,8 +67,16 @@ theory:
       solvent_model: CPCM
       route_minimum: "Opt"
       route_ts: "OptTS"
+      # The S3 TS tail is limited by the maximum displacement criterion.  Keep
+      # OptTS steps conservative without changing the minimum or S4 workflows.
+      ts_trust_radius: 0.15
       route_extras: ""
-      max_cycles: 100
+      # Global 60-cycle cap (S3 standardization 2026-08): converging points
+      # finish well inside (measured 3-17 cycles); the cap bounds failure time.
+      # Non-converged TS/INT enter the rescue matrix instead of a long tail.
+      max_cycles: 60
+      max_cycles_intermediate: 60
+      max_cycles_ts: 60
       timeout: 864000
       # Sequential B97-3c conditioning on the target PES. Only S2-derived
       # intermediate/TS seeds are restrained; final OPT/OptTS is unrestrained.
@@ -64,10 +87,11 @@ theory:
           - ts
         # LooseOpt applies only to the constrained warm-up; the final Opt/OptTS
         # remains unconstrained and retains the standard convergence policy.
+        # Cycles extended to the LooseOpt convergence limit (native early exit).
         convergence: loose
         max_cycles:
-          intermediate: 8
-          ts: 12
+          intermediate: 40
+          ts: 50
         accept_partial_geometry: true
       # V4.1: retry/rank-reduction machinery removed. A failed OPT/OptTS now
       # hard-fails the structure (status="failed", SP/FREQ skipped). Improving
@@ -92,6 +116,9 @@ theory:
       aux_basis: ""
       solvent: acetone
       solvent_model: CPCM
+      # Meta-GGA (r2SCAN family) requires an enhanced numerical integration
+      # grid; DEFGRID2 (6.x default) can be too sparse for accurate SPs.
+      grid: DefGrid3
       timeout: 864000
 
   s4_high_precision:
@@ -132,6 +159,258 @@ theory:
       solvent: acetone
       solvent_model: CPCM
       timeout: 864000
+
+# ===========================================================================
+# Phase 1 (Unified Refinement Engine v1.2) — additive section
+# The `refinement.*` block is consumed by RefinementEngine (new code path).
+# The legacy `theory.s3_low_level` and `theory.s4_high_precision` sections
+# above remain in use by LowLevelEngine / HighLevelEngine until Phase 3.
+# ===========================================================================
+refinement:
+  engine_schema: refinement_engine_v1
+
+  common:
+    workflow:
+      warmup:
+        enabled_roles:
+          - intermediate
+          - ts
+        constraint_mode: freeze_forming_bonds_at_input_distance
+        fallback_to_input_geometry: true
+        accept_partial_geometry: true
+
+      initial_hessian:
+        precursor: model
+        product: model
+        intermediate: calculate
+        ts: calculate
+
+      frequency_always_independent: true
+      # Fail-fast intent: stop the batch on the first failed structure.  The
+      # engine records per-structure isolation; the batch script enforces this.
+      continue_on_structure_failure: false
+
+    rescue:
+      # The monitor records suspected oscillation for diagnostics only.  ORCA
+      # reaches the native 30-cycle checkpoint; Python never terminates it.
+      live_monitor:
+        enabled: false
+        poll_seconds: 20
+        min_cycles: 12
+        window_cycles: 16
+        min_energy_reversals: 4
+        energy_change_floor_hartree: 1.0e-5
+        min_gradient_improvement_fraction: 0.15
+        step_tolerance_ratio: 4.0
+        min_excessive_steps: 6
+
+      # Failed minima use the sole every-step-Hessian fallback. Failed TS jobs
+      # use R1 NEB candidate -> R2 native OptTS -> R3 mode-directed CalcAll.
+      r1_calcall:
+        enabled: false
+        max_cycles_minimum: 80
+        max_cycles_ts: 80
+
+      # Failed-minimum TightOpt rescue (precursor/product with imaginary modes).
+      minimum_rescue:
+        enabled: false
+
+      # A failed R0 TS uses validated INT/product endpoints. A converged
+      # NEB-CI is only a seed; R2 always validates it with an ordinary OptTS.
+      neb_ts:
+        enabled: false
+        variant: LOOSE-NEB-TS
+        max_cycles: 250
+        minimum_endpoint_rmsd_angstrom: 0.10
+
+      # S3 fail-fast mode (2026-08): every rescue/recovery ladder is disabled
+      # so a primary-pass failure is recorded as-is and the batch stops for
+      # investigation.  Re-enable per family once the fail-fast batch passes.
+      ts_rescue:
+        enabled: false
+      ts_nonconvergence_rescue:
+        enabled: false
+      int_rescue:
+        enabled: false
+      int_nonconvergence_rescue:
+        enabled: false
+
+      # S3 rescue matrix (v3.1, 2026-08).  Matrix cells live in code
+      # (rescue_matrix.py); these keys tune the method-level ORCA parameters.
+      # matrix.enabled=false => primary-only mode (S2-seed robustness tests):
+      # failures are classified F1-F6 and recorded, but no rescue methods run.
+      # Now re-enabled for the targeted rescue pass on the 4 failed TS.
+      matrix:
+        enabled: true
+      methods:
+        fresh_hessian_restart:
+          max_cycles: 30
+          recalc_hessian: 5
+        fresh_hessian_mode_monitor:
+          max_cycles: 30
+          recalc_hessian: 5
+        ts_mode_directed:
+          trust: 0.15
+          max_cycles: 12
+          mode_min_overlap: 0.35
+          mode_min_overlap_margin: 0.08
+        mode_displacement:
+          max_cycles: 30
+          displacement_step_angstrom: 0.30
+        saddle_break:
+          max_cycles: 30
+          displacement_step_angstrom: 0.30
+        calcall_opt:
+          max_cycles: 30
+          recalc_hessian: 1
+        irc_midpoint_recovery:
+          max_cycles: 30
+          irc_max_iter: 5
+          irc_direction: both
+          shoulder_energy_window_kcal_mol: 2.0
+
+    irc:
+      enabled: true
+      direction: both
+      max_iter: 30
+      init_hessian: read
+      init_displacement_mode: energy
+      initial_delta_energy_mEh: 2.0
+      scale_initial_displacement: 0.1
+      scale_steepest_descent: 0.15
+      adaptive_step: true
+
+    identity:
+      use_topology: true
+      use_mapped_rmsd: true
+      use_reaction_progress: true
+      validate_all_roles: true
+
+      # INT identity v2 (2026-08): evidence-based intermediate classification.
+      # classify_int_v2 replaces the legacy progress-window fallback that could
+      # silently default to "distinct_intermediate" when reference geometries
+      # were unavailable.  All thresholds live here, never in stage code.
+      # Empirical calibration: 40 INT structures across the s2_gfn2 benchmark
+      # (dipolar intermediates sit 0-2 kcal/mol below their sibling TS with
+      # open forming bonds; product collapses have both bonds <= 1.75 A and
+      # RMSD-to-product <= 0.30 A; rx11/12 minor-rescue INTs are 0.13 kcal/mol
+      # above their TS at RMSD 0.38 A -> merged_with_ts).
+      int_identity_v2:
+        classification_version: "int_identity_v2"
+        imaginary_cutoff_cm1: -10.0
+        product_rmsd_collapse_ang: 0.30
+        formed_bond_max_ang: 1.75
+        dipolar_open_bond_min_ang: 2.40
+        dipolar_open_bond_max_ang: 4.60
+        ts_rmsd_merged_ang: 0.40
+        ts_energy_merged_kcal: 0.5
+        ts_energy_degenerate_kcal: 0.3
+        int_below_ts_min_kcal: 0.2
+        int_above_product_min_kcal: 2.0
+        above_ts_invalid_kcal: 0.5
+        product_like_energy_max_kcal: 2.0
+
+    soft_mode:
+      enabled: false
+      imaginary_cutoff_cm1: -50.0
+      soft_mode_window_cm1: [-50.0, -10.0]
+      mode_alignment_threshold: 0.30
+
+    thermochemistry:
+      temperature_K: 247.55
+      standard_state: "1M"
+      qrrho: true
+      ensemble_correction_source: s1
+      composite_formula: "E_SP + (G_freq - E_freq) + ΔG_ensemble"
+
+    ml_quality:
+      granular: true
+      geometry_consistent_check: true
+
+    output:
+      manifest_schema: refinement_manifest_v1
+
+  s3:
+    fidelity: low
+    profile_id: b97_3c_r2scan_3c_v1
+
+    warmup:
+      max_cycles:
+        intermediate: 40
+        ts: 50
+
+    geometry:
+      method: B97-3c
+      basis: ""
+      route_minimum: Opt
+      route_ts: OptTS
+      # Kept in sync with theory.s3_low_level.optimization during the
+      # refinement-profile dual-read transition. Global 60-cycle cap.
+      ts_trust_radius: 0.15
+      max_cycles_minimum: 60
+      max_cycles_intermediate: 60
+      max_cycles_ts: 60
+      timeout: 864000
+
+    frequency:
+      method: B97-3c
+      basis: ""
+
+    single_point:
+      method: r2SCAN-3c
+      basis: ""
+      # Mirrors theory.s3_low_level.single_point: meta-GGA needs DefGrid3.
+      grid: DefGrid3
+      timeout: 864000
+
+    solvent:
+      solvent: acetone
+      solvent_model: CPCM
+
+    resources:
+      cores_per_worker: 16
+      memory_gb_per_worker: 32
+      max_workers: 1
+
+  s4:
+    fidelity: high
+    profile_id: m062x_wb97mv_v1
+
+    warmup:
+      max_cycles:
+        intermediate: 4
+        ts: 6
+
+    geometry:
+      method: M062X
+      basis: def2-SVP
+      aux_basis: def2/J
+      grid: DefGrid3
+      scf: TightSCF
+      route_minimum: Opt
+      route_ts: OptTS
+      max_cycles_minimum: 200
+      max_cycles_ts: 200
+      timeout: 864000
+
+    frequency:
+      method: M062X
+      basis: def2-SVP
+
+    single_point:
+      method: wB97M-V
+      basis: def2-TZVPP
+      aux_basis: def2/J
+      timeout: 864000
+
+    solvent:
+      solvent: acetone
+      solvent_model: CPCM
+
+    resources:
+      cores_per_worker: 32
+      memory_gb_per_worker: 64
+      max_workers: 1
 
 step1:
   protocol: censo_lite
@@ -225,11 +504,11 @@ step1:
       always_keep_lowest: true
 
 step2:
-  # S2 method: "xtb_path" runs an xTB2 meta-dynamics PATH search from the
-  # pre-distortion frame to the product, refines every PATH frame at B97-3c
-  # SP, and selects TS/INT from the refined profile. The legacy corridor
-  # refinement and NEB-assisted flow have been removed.
-  method: "xtb_path"
+  # Canonical S2 workflow: ORCA GFN2-xTB relaxed scan, full-frame B97-3c
+  # single-point refinement, then the unified endpoint/knee/seed selector.
+  # B97-3c relaxed scan is used only when the GFN2 trajectory is topologically
+  # distorted or its first-round SP refinement is incomplete.
+  method: "orca_gfn2_relaxed_scan"
 
   scan:
     topology_guard_enabled: true
@@ -260,32 +539,134 @@ step2:
       max_extensions: 3
     selection:
       preferred_energy_source: b973c
-      # Select seeds from extrema on the refined PATH energy profile. xTB PATH
-      # TS estimates are retained as diagnostics only, never as the decision.
-      ts_min_prominence_kcal_mol: 0.15
+      # Both direct selection and rescue use this same geometric rule.
+      ts_min_prominence_kcal_mol: 0.40
+      # A topology-clean valid-corridor can still carry a chemically useful,
+      # shallow B97-3c maximum.  It must beat both this local threshold and
+      # the reactant-to-peak barrier below before it outranks a full PATH.
+      valid_corridor_weak_peak_min_prominence_kcal_mol: 0.10
+      valid_corridor_weak_peak_min_barrier_kcal_mol: 3.0
+      # Diagnostic only.  S2 produces search seeds rather than validated
+      # stationary points, so this value is not a hard seed-admission gate.
+      ts_min_reactant_barrier_kcal_mol: 3.0
+      # Compared after excluding atoms in S0 forming_bonds. This rejects PATH
+      # artefacts while allowing the intended reaction core to move.
+      max_nonreactive_scaffold_rmsd_A: 0.75
+      # Rescue topology defects only when the curve has no supported knee
+      # before the first defect, or fewer than this many clean frames remain
+      # between the knee and that defect.
+      minimum_clean_frames_after_knee: 2
+      # Keep false for pathways that may be concerted. Mechanism templates may
+      # enable this when a stepwise INT is chemically mandatory.
+      require_intermediate: false
+      # A full-endpoint peak immediately after topology recovery is a boundary
+      # artefact until this many clean frames precede it.
+      full_endpoint_min_clean_frames_from_boundary: 3
+      # Require clean PATH support on both sides of an eligible peak.  This
+      # prevents the topology-recovery boundary from being mistaken for a TS.
+      ts_min_clean_neighbors: 3
+      # Keep the energy peak as the TS locator, but seed S3 from the nearest
+      # clean pre-peak PATH frame 0.20 A toward the reactant side.  PATH order
+      # is authoritative; the mean forming-bond distance is only a tie-breaker.
+      ts_seed_reactant_backoff_A: 0.20
       int_min_basin_prominence_kcal_mol: 0.50
+      # A flat pre-TS region is a valid MIN-search seed even when it is not a
+      # resolved stationary basin.  It is preferred to duplicating the TS.
+      int_plateau_fallback_enabled: true
+      int_plateau_min_consecutive_frames: 3
+      int_plateau_min_ts_separation_A: 0.10
+      int_plateau_energy_window_kcal_mol: 2.0
+      int_plateau_barrier_fraction: 0.25
+      # PATH arc length is short, so a shallow pre-TS rise can have a large
+      # numerical dE/ds.  The energy window and continuity criteria are the
+      # primary plateau filters; retain ramps up to this value.
+      int_plateau_max_slope_kcal_mol_A: 40.0
+      # These keys feed the one global selector used by both the direct scan
+      # and conditional B97-3c rescue.
+      endpoint_exclusion_frames: 2   # legacy endpoint buffer retained for compatibility
+      min_reaction_progress: 0.10    # only discard the first pathological boundary region
+      min_valid_neighbor_window: 1   # topology-valid neighbors required on each side of a TS candidate
+      allow_monotonic_shoulder: true # legacy diagnostic compatibility; knee selection is authoritative
+      shoulder_max_abs_slope_kcal_mol_per_A: 20.0  # legacy diagnostic compatibility
+      shoulder_min_curvature_signal: 0.05          # legacy fallback for knee curvature
+      allow_shared_search_seed: true # final fallback only when no TS-to-endpoint INT frame exists
+      endpoint:
+        guard_frames: 1
+        min_valid_frames: 3
+      knee:
+        enabled: true
+        smoothing_window: 5
+        minimum_left_support_frames: 2
+        minimum_right_support_frames: 2
+        minimum_curvature_signal: 0.05
+        minimum_slope_change_kcal_mol_per_A: 0.0
+      ts_seed:
+        right_shift:
+          enabled: true
+          base_A: 0.15
+          span_fraction: 0.10
+          min_A: 0.05
+          max_A: 0.40
+          override_A: null  # optional S3-calibrated value; null uses span-adaptive value
+      int_seed:
+        mode: ts_to_effective_endpoint_midpoint
+      int_plateau:
+        min_consecutive_frames: 3
+        energy_window_kcal_mol: 2.0
+        min_ts_separation_A: 0.10
+        max_slope_kcal_mol_A: 40.0
+      admission:
+        require_barrier_for_search_seed: false
+        require_scaffold_for_search_seed: false
 
-  # xTB2 meta-dynamics PATH search parameters. Replaces the former corridor
-  # refinement. The PATH runs from the last topology-valid frame before the
-  # distortion point (anchor "last_valid_before_drift") to the product frame.
-  # PATH frames are then refined at B97-3c SP for the final TS/INT selection.
-  xtb_path:
+  # The primary scan deliberately uses the same coordinate range and point
+  # count as the former B97-3c rescue, but runs through ORCA's GFN2-xTB method.
+  orca_gfn2_scan:
     enabled: true
-    gfn_level: 2
-    npoint: 28
-    nrun: 1
-    anopt: 10
-    kpush: 0.003
-    kpull: -0.015
-    ppull: 0.05
-    alp: 1.2
-    timeout: 86400
+    relaxed_scan:
+      stretch_end_A: 3.40
+      points: 17
+      single_coordinate_use_scants: true
+      # ORCA GFN2-xTB does not accept CPCM/SMD.  Keep the S2
+      # semiempirical scan solvent-specific; S3/S4 retain CPCM.
+      solvent: acetone
+      solvent_model: ALPB
+      # GFN2-xTB SCF shows no OpenMP scaling on these small systems, so a
+      # 4-thread scan is lossless and lets parallel reactions share the node.
+      # maxcore is capped explicitly: the per-core default would balloon to
+      # ~5.3 GB/core at nproc=4 and oversubscribe memory with 4+ reactions.
+      nproc: 4
+      maxcore: 1600
 
-  xtb_settings:
+  # Conditional high-level rescue. It is entered only after the GFN2 scan has
+  # incomplete frame/SP coverage or a topology distortion that occurs before
+  # a supported knee with enough clean post-knee frames.
+  rescue:
+    # GFN2-only robustness mode: topology drift is tolerated (knee-shifted
+    # seeds over clean frames) instead of falling back to a B97-3c relaxed
+    # scan.  Set enabled: true to restore the conditional high-level rescue.
+    enabled: false
+    # It is never a retry route for an S3 failure.
+    relaxed_scan:
+      # ORCA method, solvent, resources, MaxIter and timeout are inherited
+      # from theory.s3_low_level.optimization and resources.  Keep this block
+      # limited to S2 reaction-coordinate and candidate-selection policy.
+      stretch_end_A: 3.40
+      points: 17
+      single_coordinate_use_scants: true
+      # Same 4-core budget as the primary GFN2 scan so a rescue can run
+      # concurrently with the other reactions instead of oversubscribing
+      # the node at the inherited 16-core default.
+      nproc: 4
+      maxcore: 1600
+      # The shared scan.selection block above is authoritative for seed choice.
+      ts_min_prominence_kcal_mol: 0.40
+      ts_min_reactant_barrier_kcal_mol: 3.0
+      max_nonreactive_rmsd_A: 0.75
+
+  scan_charge_spin:
     charge: 0
     multiplicity: 1
-    solvent: acetone
-    nproc: null
   energy_refinement:
     # B97-3c SP refinement now runs on every PATH frame (full coverage).
     enabled: true
@@ -297,7 +678,9 @@ step2:
     solvent: acetone
     solvent_model: CPCM
     route_extras: ""
-    parallel_jobs: 16
+    # 4-way SP parallelism per reaction: with 4 reactions sharing a 32-core
+    # node, the refinement budget matches the scan budget (4 cores/task).
+    parallel_jobs: 4
     cores_per_job: 1
     memory_per_job: 2GB
     timeout: 864000

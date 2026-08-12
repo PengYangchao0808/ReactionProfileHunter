@@ -160,9 +160,8 @@ def _render_s2(stage: dict[str, Any], *, width: int) -> Any:
     table.add_column("Scan", ratio=5)
     table.add_column("Status", ratio=2)
     structures = dict(stage.get("structures") or {})
-    batches = dict(stage.get("batches") or {})
     for structure_id, row in structures.items():
-        batch = next((item for key, item in batches.items() if structure_id in key), {})
+        batch = _variant_batch(stage, structure_id)
         done, total = int(batch.get("done") or 0), int(batch.get("total") or 0)
         status = normalize_status(row.get("status"))
         icon, style = status_style(status)
@@ -172,8 +171,48 @@ def _render_s2(stage: dict[str, Any], *, width: int) -> Any:
     active = _active_batch(stage)
     parts: list[Any] = [Panel(table, title="Variants", border_style="info")]
     if active:
-        current = active.get("current") or "scan"
-        parts.append(Panel(Text(f"{current} · {int(active.get('done') or 0)}/{int(active.get('total') or 0)}"), title="Current work", border_style="info"))
+        done = int(active.get("done") or 0)
+        total = int(active.get("total") or 0)
+        current_lines = Text()
+        current_lines.append(str(active.get("label") or "S2 work"), style="step.title")
+        current_lines.append("\n")
+        current_lines.append_text(_progress_line(done, total, width=38))
+        active_jobs = list((active.get("active_jobs") or {}).values())
+        current_lines.append(
+            f" · {len(active_jobs)} active · {int(active.get('failed') or 0)} failed"
+        )
+        started = active.get("started_at")
+        elapsed = (
+            time.time() - float(started)
+            if isinstance(started, (int, float))
+            else float(active.get("elapsed_seconds") or 0.0)
+        )
+        current_lines.append(f" · elapsed {_duration(elapsed)}")
+        rate = active.get("rate_per_minute")
+        eta = active.get("eta_seconds")
+        if rate:
+            current_lines.append(f" · {float(rate):.1f}/min")
+        if eta is not None and done < total:
+            current_lines.append(f" · ETA {_duration(float(eta))}")
+        if active.get("current"):
+            current_lines.append(f"\nlatest: {active['current']}", style="dim")
+        if active_jobs:
+            current_lines.append("\nactive: ", style="dim")
+            current_lines.append(
+                " · ".join(_job_label(job) for job in active_jobs[:6]), style="dim"
+            )
+        parts.append(Panel(current_lines, title="Current work", border_style="info"))
+    else:
+        current_step_key = stage.get("current_step")
+        current_step = (stage.get("steps") or {}).get(current_step_key, {}) if current_step_key else {}
+        if current_step:
+            parts.append(
+                Panel(
+                    Text(str(current_step.get("label") or current_step.get("step"))),
+                    title="Current work",
+                    border_style="info",
+                )
+            )
     return Group(*parts)
 
 
@@ -301,10 +340,19 @@ def _active_batch(stage: dict[str, Any]) -> dict[str, Any]:
 
 
 def _variant_batch(stage: dict[str, Any], variant: str) -> dict[str, Any]:
-    for key, row in (stage.get("batches") or {}).items():
-        if variant and variant in str(key):
-            return row
-    return {}
+    matches = [
+        row
+        for key, row in (stage.get("batches") or {}).items()
+        if variant and variant in str(key)
+    ]
+    return next(
+        (
+            row
+            for row in matches
+            if normalize_status(row.get("status")) == UiStatus.RUNNING
+        ),
+        matches[-1] if matches else {},
+    )
 
 
 def _funnel_line(stage: dict[str, Any]) -> str:

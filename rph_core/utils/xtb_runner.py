@@ -21,6 +21,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from rph_core.utils.file_io import split_multixyz
 from rph_core.utils.log_manager import LoggerMixin
 from rph_core.utils.data_types import QCResult, ScanResult, PathSearchResult
 
@@ -345,6 +346,131 @@ class XTBRunner(LoggerMixin):
                 error_message=f"XTB failed: {e.stderr}"
             )
 
+    def hessian(
+        self,
+        structure: Path,
+        solvent: Optional[str] = None,
+        charge: int = 0,
+        uhf: int = 0,
+        gfn_level: int = 2,
+    ) -> QCResult:
+        """
+        Run an XTB Hessian calculation and return vibrational frequencies.
+
+        Executes ``xtb <xyz> --hess`` (no geometry relaxation) and parses
+        frequencies from ``g98.out`` (primary) or ``vibspectrum`` (fallback).
+        Imaginary modes appear as negative values.
+
+        Returns:
+            QCResult with ``frequencies`` (tuple of cm^-1 values) on success.
+        """
+        structure = Path(structure)
+        if not structure.exists():
+            return QCResult(
+                success=False,
+                error_message=f"XTB hessian input structure not found: {structure}"
+            )
+
+        local_structure = self.work_dir / structure.name
+        if local_structure.resolve() != structure.resolve():
+            local_structure.write_text(structure.read_text())
+
+        cmd = [self.xtb_path, local_structure.name, "--hess"]
+        nproc = self.config.get('resources', {}).get('nproc', 1)
+        cmd.extend(["-P", str(nproc)])
+        cmd.extend(["--chrg", str(charge)])
+        if uhf > 0:
+            cmd.extend(["--uhf", str(uhf)])
+        if solvent:
+            cmd.extend(["--gfn", str(int(gfn_level)), "--alpb", str(solvent)])
+        elif int(gfn_level) != 2:
+            cmd.extend(["--gfn", str(int(gfn_level))])
+
+        hessian_log = self.work_dir / "xtb_hessian.log"
+        self.logger.info("Running XTB hessian: %s", " ".join(cmd))
+
+        try:
+            self._run_command(cmd, log_file=hessian_log)
+        except subprocess.CalledProcessError as e:
+            return QCResult(
+                success=False,
+                error_message=f"XTB hessian failed: {e.stderr}",
+                output_file=hessian_log,
+            )
+
+        frequencies = self._parse_g98_frequencies(self.work_dir / "g98.out")
+        if not frequencies:
+            frequencies = self._parse_vibspectrum_frequencies(self.work_dir / "vibspectrum")
+        if not frequencies:
+            return QCResult(
+                success=False,
+                error_message="XTB hessian finished but no frequencies parsed "
+                              "(g98.out / vibspectrum missing or unreadable)",
+                output_file=hessian_log,
+            )
+
+        energy = None
+        try:
+            for line in hessian_log.read_text(errors="replace").splitlines():
+                energy = self._extract_energy_from_line(line)
+                if energy is not None:
+                    break
+        except OSError:
+            energy = None
+
+        return QCResult(
+            success=True,
+            energy=energy,
+            frequencies=tuple(frequencies),
+            output_file=hessian_log,
+        )
+
+    def _parse_g98_frequencies(self, g98_file: Path) -> List[float]:
+        """Parse frequencies from the Gaussian98-style mock output xTB writes."""
+        frequencies: List[float] = []
+        try:
+            if not g98_file.is_file():
+                return frequencies
+            for line in g98_file.read_text(errors="replace").splitlines():
+                if "Frequencies --" not in line:
+                    continue
+                for token in line.split("--", 1)[1].split():
+                    try:
+                        frequencies.append(float(token))
+                    except ValueError:
+                        continue
+        except OSError as exc:
+            self.logger.warning("Failed to parse %s: %s", g98_file, exc)
+        return frequencies
+
+    def _parse_vibspectrum_frequencies(self, vibspectrum_file: Path) -> List[float]:
+        """Parse frequencies from the TurboMole-style ``vibspectrum`` file.
+
+        Data rows hold: mode index, optional symmetry label, frequency (cm^-1),
+        IR intensity. The first float after the integer mode index is the
+        frequency (symmetry labels are non-numeric).
+        """
+        frequencies: List[float] = []
+        try:
+            if not vibspectrum_file.is_file():
+                return frequencies
+            for line in vibspectrum_file.read_text(errors="replace").splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith(("#", "$")):
+                    continue
+                tokens = stripped.split()
+                if not tokens[0].isdigit():
+                    continue
+                for token in tokens[1:]:
+                    try:
+                        frequencies.append(float(token))
+                        break
+                    except ValueError:
+                        continue
+        except OSError as exc:
+            self.logger.warning("Failed to parse %s: %s", vibspectrum_file, exc)
+        return frequencies
+
     def _run_command(self, cmd: List[str], log_file: Optional[Path] = None) -> subprocess.CompletedProcess[str]:
         try:
             result = subprocess.run(
@@ -385,7 +511,8 @@ class XTBRunner(LoggerMixin):
         gfn_level: int = 2,
         etemp: Optional[float] = None,
         charge: int = 0,
-        uhf: int = 0
+        uhf: int = 0,
+        fixed_constraints: Optional[Dict[str, float]] = None,
     ) -> ScanResult:
         input_xyz = Path(input_xyz)
         if not input_xyz.exists():
@@ -398,6 +525,7 @@ class XTBRunner(LoggerMixin):
 
         scan_input = self._write_scan_input(
             constraints=constraints,
+            fixed_constraints=fixed_constraints,
             scan_range=scan_range,
             scan_steps=scan_steps,
             scan_mode=scan_mode,
@@ -444,28 +572,39 @@ class XTBRunner(LoggerMixin):
 
     def _parse_energy(self, output_file: Path) -> Optional[float]:
         """
-        Parse total energy from XTB output.
+        Parse total energy from XTB output (xyz or log).
 
-        XTB writes energy information to stdout, but we can also
-        check the xyz file comments for energy information.
+        Two-pass strategy:
+        1. Fast path — check line 2 for xyz comment-line energy
+           (e.g. ``energy: -67.3747... xtb: 6.7.1``).
+        2. Fallback — scan with ``_ENERGY_LINE_PATTERNS`` for log files
+           where energy appears deep in stdout
+           (e.g. ``:: total energy  -67.37476105 Eh ::``).
 
         Args:
-            output_file: Path to xtbopt.xyz file
+            output_file: Path to xtbopt.xyz or xTB stdout log file.
 
         Returns:
-            Energy in Hartree, or None if parsing fails
+            Energy in Hartree, or None if parsing fails.
         """
         try:
-            # XTB xyz files often have energy in the comment line (line 2)
             lines = output_file.read_text().splitlines()
+
+            # Fast path: XYZ comment line (line 2)
             if len(lines) >= 2:
-                # Try to extract energy from comment line
-                comment = lines[1]
-                # Look for energy pattern (e.g., "energy: -123.456")
-                import re
-                energy_match = re.search(r'-?\d+\.\d+', comment)
+                energy_match = re.search(r'-?\d+\.\d+', lines[1])
                 if energy_match:
                     return float(energy_match.group())
+
+            # Fallback: scan with explicit energy-line patterns
+            for line in lines:
+                for pattern in self._ENERGY_LINE_PATTERNS:
+                    match = pattern.search(line)
+                    if match is not None:
+                        try:
+                            return float(match.group(1))
+                        except (TypeError, ValueError):
+                            continue
 
         except Exception as e:
             self.logger.warning(f"Failed to parse energy from output: {e}")
@@ -479,6 +618,7 @@ class XTBRunner(LoggerMixin):
         scan_steps: int,
         scan_mode: str = "concerted",
         scan_force_constant: float = 1.0,
+        fixed_constraints: Optional[Dict[str, float]] = None,
     ) -> Path:
         if not constraints:
             raise ValueError("scan constraints must not be empty")
@@ -503,11 +643,19 @@ class XTBRunner(LoggerMixin):
             atom1 = atom1_raw + 1
             atom2 = atom2_raw + 1
             parsed_constraints.append((atom1, atom2, distance))
+        parsed_fixed_constraints: List[Tuple[int, int, float]] = []
+        for atoms, distance in (fixed_constraints or {}).items():
+            atom1_raw, atom2_raw = map(int, atoms.split())
+            atom1 = atom1_raw + 1
+            atom2 = atom2_raw + 1
+            parsed_fixed_constraints.append((atom1, atom2, float(distance)))
 
         with scan_file.open("w") as f:
             f.write("$constrain\n")
             f.write(f"  force constant={scan_force_constant:.3f}\n")
             for atom1, atom2, distance in parsed_constraints:
+                f.write(f"  distance: {atom1}, {atom2}, {distance:.3f}\n")
+            for atom1, atom2, distance in parsed_fixed_constraints:
                 f.write(f"  distance: {atom1}, {atom2}, {distance:.3f}\n")
 
             f.write("$scan\n")
@@ -520,9 +668,10 @@ class XTBRunner(LoggerMixin):
             f.write("$end\n")
 
         self.logger.debug(
-            "Wrote scan input file: %s (constraints=%d, mode=%s, steps=%d)",
+            "Wrote scan input file: %s (scan_constraints=%d, fixed_constraints=%d, mode=%s, steps=%d)",
             scan_file,
             len(parsed_constraints),
+            len(parsed_fixed_constraints),
             mode,
             scan_steps,
         )
@@ -770,8 +919,40 @@ class XTBRunner(LoggerMixin):
             self._run_command(cmd, log_file=path_log)
             parsed = self._parse_path_log(path_log)
 
-            path_xyz_files = sorted(self.work_dir.glob("xtbpath_*.xyz"))
+            # 读取最终 refined 路径 xtbpath.xyz，拆分为单帧文件
+            # 参考: xTB path 输出中 xtbpath.xyz 是经过 refinement 的最终路径，
+            # 而 xtbpath_N.xyz 是不同 trial bias 下的完整 trial path（multi-XYZ）。
+            # 详见 docs/WSL_TEST_PLAN_V4.md 或 xTB 官方文档。
+            final_path = self.work_dir / "xtbpath.xyz"
+            if final_path.exists():
+                frames_dir = self.work_dir / "path_frames"
+                path_xyz_files = split_multixyz(final_path, frames_dir, prefix="path_frame")
+            else:
+                # fallback: 无 xtbpath.xyz 时使用 xtbpath_0.xyz (pre-refinement 路径)
+                fallback_path = self.work_dir / "xtbpath_0.xyz"
+                if fallback_path.exists():
+                    frames_dir = self.work_dir / "path_frames"
+                    path_xyz_files = split_multixyz(fallback_path, frames_dir, prefix="path_frame")
+                else:
+                    path_xyz_files = []
 
+            if not path_xyz_files:
+                return PathSearchResult(
+                    success=False,
+                    path_xyz_files=path_xyz_files,
+                    path_log=path_log,
+                    error_message="xtbpath.xyz contains zero frames or is missing",
+                )
+
+            # 验证帧数合理性
+            npath = parsed.get("reported_path_npoints", 0)
+            if npath > 0 and abs(len(path_xyz_files) - npath) > 3:
+                self.logger.warning(
+                    "xTB PATH frame count mismatch: %d frames in xtbpath.xyz vs %d reported by xTB",
+                    len(path_xyz_files), npath,
+                )
+
+            # TS guess: xtbpath_ts.xyz 是 xTB 从最终路径最高能点单独提取的结构
             ts_guess_path = self.work_dir / "xtbpath_ts.xyz"
             if not ts_guess_path.exists():
                 return PathSearchResult(
@@ -816,12 +997,22 @@ class XTBRunner(LoggerMixin):
         if rxn_energy_match:
             result["reaction_energy_kcal"] = float(rxn_energy_match.group(1))
 
-        ts_point_match = re.search(r"estimated\s+TS\s+on\s+file.*?point:\s*(\d+)", content, re.IGNORECASE)
+        ts_point_match = re.search(
+            r"norm\(g\)\s+at\s+est\.?\s*TS.*?point:\s*[.\d]+\s+(\d+)",
+            content, re.IGNORECASE,
+        )
         if ts_point_match:
-            result["estimated_ts_point"] = int(ts_point_match.group(1))
+            # xTB reports 1-based point number; convert to 0-based index
+            xtb_point_1based = int(ts_point_match.group(1))
+            result["estimated_ts_point"] = xtb_point_1based - 1
 
-        grad_norm_match = re.search(r"norm\(g\)\s+at\s+est\.\s+TS.*?:\s*([-+]?\d*\.?\d+)", content, re.IGNORECASE)
+        grad_norm_match = re.search(
+            r"norm\(g\)\s+at\s+est\.?\s*TS.*?:\s*([-+]?\d*\.?\d+(?:[EeDd][+-]?\d+)?)",
+            content, re.IGNORECASE,
+        )
         if grad_norm_match:
-            result["gradient_norm_at_ts"] = float(grad_norm_match.group(1))
+            result["gradient_norm_at_ts"] = float(
+                grad_norm_match.group(1).replace("D", "E").replace("d", "e")
+            )
 
         return result

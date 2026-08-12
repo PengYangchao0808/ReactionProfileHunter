@@ -13,7 +13,7 @@ Date: 2026-01-15
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, NewType, Optional, Union
+from typing import Any, Dict, List, NewType, Optional, Tuple, Union
 
 
 MapId = NewType("MapId", int)
@@ -57,6 +57,12 @@ class QCResult:
     chk_file: Optional[Path] = None
     fchk_file: Optional[Path] = None
     qm_output_file: Optional[Path] = None
+    final_xyz_path: Optional[str] = None
+    failure_type: Optional[str] = None
+    failure_evidence_lines: Optional[Tuple[str, ...]] = None
+    failure_retry_hint: Optional[str] = None
+    optimization_converged: Optional[bool] = None
+    stop_reason: Optional[str] = None
 
 
 @dataclass

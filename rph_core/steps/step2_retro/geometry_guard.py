@@ -62,14 +62,21 @@ def compare_graph_topology(
     symbols: List[str],
     forming_bonds: Sequence[Tuple[int, int]],
     graph_scale: float = 1.25,
-    min_dist: float = 0.6
+    min_dist: float = 0.6,
+    topology_grace_edges: int = 0,
 ) -> TopologyGuardResult:
     """
     Compare bond graph topology between product and candidate geometry.
-    
+
     Expected changes: only the forming_bonds should be DELETED (stretched).
     Any NEW edges or loss of non-forming edges indicates topology drift.
-    
+
+    For an open intermediate (forming bond stretched) the two fragments may
+    rotate, bringing a forming-bond atom into contact with a neighbouring
+    atom.  Such contacts are legitimate intermediate conformations, so new
+    edges that touch a forming-bond atom are excluded from the drift signal
+    and up to ``topology_grace_edges`` remaining new edges are tolerated.
+
     Args:
         product_coords: Product geometry (N, 3)
         candidate_coords: Candidate geometry (N, 3) - seed or xTB output
@@ -77,7 +84,8 @@ def compare_graph_topology(
         forming_bonds: List of (i, j) tuples for bonds being broken
         graph_scale: Covalent radius multiplier for bond detection
         min_dist: Minimum distance to consider (avoid pathological overlaps)
-    
+        topology_grace_edges: Number of non-forming new edges tolerated
+
     Returns:
         TopologyGuardResult with validation status and details
     """
@@ -99,48 +107,57 @@ def compare_graph_topology(
             forming_bonds=set(canonicalize_bond_pairs(forming_bonds)),
             graph_scale=graph_scale
         )
-    
+
     # Convert to edge sets
     product_edges: Set[Tuple[int, int]] = set()
     for i, neighbors in product_graph.items():
         for j in neighbors:
             if i < j:  # Avoid duplicates
                 product_edges.add((i, j))
-    
+
     candidate_edges: Set[Tuple[int, int]] = set()
     for i, neighbors in candidate_graph.items():
         for j in neighbors:
             if i < j:
                 candidate_edges.add((i, j))
-    
+
     forming_set: Set[Tuple[int, int]] = set(canonicalize_bond_pairs(forming_bonds))
-    
+    forming_atoms: Set[int] = set()
+    for atom_i, atom_j in forming_set:
+        forming_atoms.add(atom_i)
+        forming_atoms.add(atom_j)
+
     # Find new edges (in candidate but not in product)
     new_edges_raw = candidate_edges - product_edges
     new_edges: List[Tuple[int, int, float]] = []
     for i, j in sorted(new_edges_raw):
+        # Contacts that touch a forming-bond atom are expected once the
+        # forming bond opens and the fragments rotate (dipolar intermediate).
+        if i in forming_atoms or j in forming_atoms:
+            continue
         dist = GeometryUtils.calculate_distance(candidate_coords, i, j)
         new_edges.append((i, j, dist))
-    
+
     # Find lost edges (in product but not in candidate, excluding forming bonds)
     lost_edges_raw = product_edges - candidate_edges - forming_set
     lost_edges: List[Tuple[int, int]] = sorted(lost_edges_raw)
-    
-    # Valid if: no new edges AND no loss of non-forming edges
-    is_valid = len(new_edges) == 0 and len(lost_edges) == 0
-    
+
+    # Valid if: no lost non-forming edges AND at most `topology_grace_edges`
+    # new non-forming edges.
+    is_valid = len(lost_edges) == 0 and len(new_edges) <= topology_grace_edges
+
     if not is_valid:
         if new_edges:
-            logger.warning(
+            logger.debug(
                 f"Topology drift: {len(new_edges)} new edge(s) detected: "
                 f"{[(i, j, f'{d:.3f}Å') for i, j, d in new_edges[:3]]}"
             )
         if lost_edges:
-            logger.warning(
+            logger.debug(
                 f"Topology drift: {len(lost_edges)} non-forming edge(s) lost: "
                 f"{lost_edges[:3]}"
             )
-    
+
     return TopologyGuardResult(
         is_valid=is_valid,
         new_edges=new_edges,
@@ -397,6 +414,23 @@ def check_scan_trajectory(
                 })
         
         prev_coords = frame_coords_np
+
+    topology_drift_frames = sorted(
+        {
+            issue["frame_index"]
+            for issue in frame_issues
+            if issue.get("reason") == "topology_drift"
+        }
+    )
+    if topology_drift_frames:
+        logger.warning(
+            "Topology drift in %d/%d scan frames (frames %d-%d); "
+            "per-frame edge details at DEBUG level",
+            len(topology_drift_frames),
+            total_frames,
+            topology_drift_frames[0],
+            topology_drift_frames[-1],
+        )
 
     return {
         "checked": total_frames > 0,

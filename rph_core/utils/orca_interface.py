@@ -12,17 +12,20 @@ Session: #3 - ORCAInterface._find_orca_binary() + _run_orca()
 Session: #4 - ORCAInterface.single_point()
 """
 
-from pathlib import Path
-from dataclasses import dataclass
-from typing import Mapping, Optional, Union, TYPE_CHECKING, Dict, Any, List, Tuple
-import uuid
+from __future__ import annotations
+
 import hashlib
 import json
+import logging
+import os
 import re
 import subprocess
 import shutil
-import os
-import logging
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -40,10 +43,54 @@ from rph_core.utils.geometry_tools import CoordinateExtractor
 from rph_core.utils.data_types import QCResult
 from rph_core.utils.keyword_translator import KeywordTranslator
 from rph_core.utils.method_registry import MethodRegistry, NormalizedMethodSpec
+from rph_core.utils.qc_models import (
+    IRCJobSpec,
+    NEBJobSpec,
+    QCJobResult,
+    QCJobSpec,
+    SurfaceScanSpec,
+)
 from rph_core.utils.capability_validator import CapabilityValidator
+from rph_core.utils.orca_failure_classifier import (
+    OrcaFailureClassification,
+    OrcaFailureType,
+    classify_orca_failure_for_config,
+    has_normal_termination,
+)
 from rph_core.utils.orca_input_renderer import OrcaInputRenderer
 
 logger = logging.getLogger(__name__)
+
+_ORCA_VERSION_RE = re.compile(r"Program\s+Version\s+([^\n\r]+)", re.IGNORECASE)
+
+
+def _parse_orca_major_version(version_str: Optional[str]) -> Optional[int]:
+    """Extract the ORCA major version from a version string like ``6.1.1`` -> 6."""
+    if not version_str:
+        return None
+    match = re.search(r"(\d+)(?:\.\d+)*", str(version_str).strip())
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except (ValueError, IndexError):
+        return None
+
+
+def _resolve_orca_version_from_path(path: Optional[Path]) -> Optional[int]:
+    """Fallback version detection from the ORCA directory name (e.g. ``/opt/orca_6_1_1``)."""
+    if path is None:
+        return None
+    parent_name = path.parent.name
+    compact = parent_name.replace("_", ".").replace("-", ".")
+    return _parse_orca_major_version(compact)
+
+
+@dataclass(frozen=True)
+class _OrcaRunMetadata:
+    returncode: Optional[int] = None
+    stderr_text: str = ""
+    timed_out: bool = False
 
 
 def _parse_orca_angstrom_lines(coord_lines: List[str]) -> Optional[NDArray[np.float64]]:
@@ -88,6 +135,222 @@ def _write_orca_xyz_file(
     for i in range(n):
         xyz_lines.append(f"{symbols[i]:2s}  {coords[i,0]:12.6f}  {coords[i,1]:12.6f}  {coords[i,2]:12.6f}")
     xyz_path.write_text("\n".join(xyz_lines) + "\n", encoding="utf-8")
+
+
+def _orca_xyz_text_from_coords(
+    coords: NDArray[np.float64],
+    input_xyz: Optional[Path] = None,
+) -> str:
+    symbols: List[str] = ["X"] * coords.shape[0]
+    if input_xyz is not None and input_xyz.exists():
+        try:
+            lines = input_xyz.read_text(encoding="utf-8").splitlines()
+            if len(lines) > 2:
+                for index, line in enumerate(lines[2:2 + coords.shape[0]]):
+                    parts = line.split()
+                    if parts:
+                        symbols[index] = parts[0]
+        except Exception:
+            pass
+    xyz_lines = [f"{coords.shape[0]}", "ORCA fallback coordinates"]
+    for index in range(coords.shape[0]):
+        xyz_lines.append(
+            f"{symbols[index]:2s}  {coords[index,0]:12.6f}  {coords[index,1]:12.6f}  {coords[index,2]:12.6f}"
+        )
+    return "\n".join(xyz_lines) + "\n"
+
+
+def _expected_atom_count(input_xyz: Optional[Path]) -> int | None:
+    if input_xyz is None or not input_xyz.exists():
+        return None
+    try:
+        lines = input_xyz.read_text(encoding="utf-8").splitlines()
+        return int(lines[0].strip()) if lines else None
+    except (OSError, ValueError, IndexError, UnicodeDecodeError):
+        return None
+
+
+def extract_orca_version_from_output(output_file: Optional[Path]) -> Optional[str]:
+    if output_file is None:
+        return None
+    try:
+        content = Path(output_file).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    match = _ORCA_VERSION_RE.search(content)
+    return match.group(1).strip() if match else None
+
+
+def _render_irc_block(spec: IRCJobSpec) -> str:
+    direction = str(spec.direction or "both").strip().lower()
+    if direction not in {"both", "forward", "backward"}:
+        raise ValueError(f"Unsupported ORCA IRC direction: {spec.direction!r}")
+
+    init_hessian = str(spec.init_hessian or "read").strip().lower()
+    if init_hessian not in {"read", "calc_anfreq", "calc_numfreq"}:
+        raise ValueError(f"Unsupported ORCA IRC InitHess mode: {spec.init_hessian!r}")
+
+    init_displacement_mode = str(spec.init_displacement_mode or "energy").strip().lower()
+    if init_displacement_mode not in {"energy", "length"}:
+        raise ValueError(
+            f"Unsupported ORCA IRC initial displacement mode: {spec.init_displacement_mode!r}"
+        )
+
+    lines = [
+        "%irc",
+        f"  MaxIter {int(spec.max_iter)}",
+        f"  Direction {direction}",
+        f"  InitHess {init_hessian}",
+    ]
+    if spec.hessian_filename:
+        lines.append(f'  Hess_Filename "{spec.hessian_filename}"')
+    lines.append(f"  HessMode {int(spec.hessian_mode)}")
+    if init_displacement_mode == "energy":
+        lines.append(f"  DE_INIT_DISPL {float(spec.initial_delta_energy_mEh)}")
+    lines.append(f"  SCALE_INIT_DISPL {float(spec.scale_initial_displacement)}")
+    lines.append(f"  SCALE_DISPL_SD {float(spec.scale_steepest_descent)}")
+    if spec.adaptive_step:
+        lines.append("  ADAPT_SCALE_DISPL true")
+    lines.append("end")
+    return "\n".join(lines)
+
+
+def _irc_direction_for_filename(path: Path) -> Optional[str]:
+    lowered = path.name.lower()
+    if "forward" in lowered or re.search(r"(^|[_\-.])fwd([_\-.]|$)", lowered):
+        return "forward"
+    if (
+        "backward" in lowered
+        or "reverse" in lowered
+        or re.search(r"(^|[_\-.])bwd([_\-.]|$)", lowered)
+    ):
+        return "backward"
+    return None
+
+
+def _extract_last_xyz_frame_text(xyz_like_file: Path) -> Optional[str]:
+    try:
+        lines = xyz_like_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return None
+
+    last_frame: Optional[List[str]] = None
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if not stripped or stripped.startswith("---"):
+            index += 1
+            continue
+        try:
+            n_atoms = int(stripped)
+        except ValueError:
+            index += 1
+            continue
+
+        frame_end = index + n_atoms + 2
+        if frame_end > len(lines):
+            break
+        last_frame = lines[index:frame_end]
+        index = frame_end
+
+    if not last_frame:
+        return None
+    return "\n".join(last_frame).rstrip() + "\n"
+
+
+def _materialize_irc_endpoint(source_file: Path, destination: Path) -> Optional[Path]:
+    frame_text = _extract_last_xyz_frame_text(source_file)
+    if frame_text is None:
+        return None
+    destination.write_text(frame_text, encoding="utf-8")
+    return destination
+
+
+def _collect_irc_candidate_files(output_dir: Path, *, exclude_names: Tuple[str, ...]) -> List[Path]:
+    patterns = ("*.xyz", "*.irc", "*.path")
+    seen: set[Path] = set()
+    candidates: List[Path] = []
+    for pattern in patterns:
+        for candidate in sorted(output_dir.glob(pattern)):
+            if (
+                not candidate.is_file()
+                or candidate.name in exclude_names
+                or candidate in seen
+            ):
+                continue
+            lowered = candidate.name.lower()
+            if not any(token in lowered for token in ("irc", "forward", "backward", "path")):
+                continue
+            seen.add(candidate)
+            candidates.append(candidate)
+    return candidates
+
+
+def _resolve_irc_endpoint_sources(
+    output_dir: Path,
+    *,
+    direction: str,
+    exclude_names: Tuple[str, ...],
+) -> List[Path]:
+    candidates = _collect_irc_candidate_files(output_dir, exclude_names=exclude_names)
+    forward = [path for path in candidates if _irc_direction_for_filename(path) == "forward"]
+    backward = [path for path in candidates if _irc_direction_for_filename(path) == "backward"]
+    other = [path for path in candidates if _irc_direction_for_filename(path) is None]
+
+    selected: List[Path] = []
+    if direction in {"both", "forward"} and forward:
+        selected.append(forward[0])
+    if direction in {"both", "backward"} and backward:
+        selected.append(backward[0])
+
+    fallback_pool = [path for path in other + forward + backward if path not in selected]
+    required = 2 if direction == "both" else 1
+    while len(selected) < required and fallback_pool:
+        selected.append(fallback_pool.pop(0))
+    return selected
+
+
+def extract_last_orca_geometry_xyz_text(
+    output_file: Optional[Path],
+    input_xyz: Optional[Path] = None,
+) -> Optional[str]:
+    if output_file is None:
+        return None
+
+    output_path = Path(output_file)
+    sibling_xyz = output_path.with_suffix(".xyz")
+    if sibling_xyz.is_file():
+        try:
+            text = sibling_xyz.read_text(encoding="utf-8")
+            lines = text.splitlines()
+            if lines:
+                parsed_atoms = int(lines[0].strip())
+                expected_atoms = _expected_atom_count(input_xyz)
+                if expected_atoms is None or parsed_atoms == expected_atoms:
+                    return text if text.endswith("\n") else f"{text}\n"
+        except (OSError, ValueError, IndexError, UnicodeDecodeError):
+            pass
+
+    try:
+        content = output_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+
+    coord_blocks = re.findall(
+        r"CARTESIAN COORDINATES \(ANGSTROEM\)\s*\n-+\n((?:\s*[A-Za-z]{1,3}\s+[\d\.\-]+\s+[\d\.\-]+\s+[\d\.\-]+(?:\n|$))+)",
+        content,
+        re.DOTALL,
+    )
+    if not coord_blocks:
+        return None
+    coord_lines = [line for line in coord_blocks[-1].split("\n") if line.strip()]
+    coords = _parse_orca_angstrom_lines(coord_lines)
+    if coords is None:
+        return None
+    expected_atoms = _expected_atom_count(input_xyz)
+    if expected_atoms is not None and coords.shape[0] != expected_atoms:
+        return None
+    return _orca_xyz_text_from_coords(coords, input_xyz)
 
 
 def _parse_orca_displacement_vectors(content: str) -> Dict[int, NDArray[np.float64]]:
@@ -173,6 +436,98 @@ def _parse_orca_displacement_vectors(content: str) -> Dict[int, NDArray[np.float
     return result
 
 
+_ELEMENT_MASS: Dict[str, float] = {
+    "H": 1.008, "He": 4.003, "Li": 6.941, "Be": 9.012, "B": 10.811, "C": 12.011,
+    "N": 14.007, "O": 15.999, "F": 18.998, "Ne": 20.180, "Na": 22.990, "Mg": 24.305,
+    "Al": 26.982, "Si": 28.086, "P": 30.974, "S": 32.065, "Cl": 35.453, "Ar": 39.948,
+    "K": 39.098, "Ca": 40.078, "Fe": 55.845, "Cu": 63.546, "Zn": 65.380,
+    "Br": 79.904, "I": 126.904,
+}
+
+
+def parse_orca6_normal_mode_vectors(
+    content: str,
+    element_symbols: Sequence[str],
+) -> Dict[int, NDArray[np.float64]]:
+    """Parse ORCA 6 ``NORMAL MODES`` blocks into mass-deweighted displacement vectors.
+
+    ORCA 6 writes the mass-weighted mode matrix::
+
+        NORMAL MODES
+        ------------
+        These modes are the Cartesian displacements weighted by the diagonal
+        matrix M(i,i)=1/sqrt(m[i]) ...
+        <mode-index header row>
+        <coordinate-row> <value>...
+
+    Each block repeats a header row of up to six mode indices, followed by one
+    row per Cartesian coordinate (3 per atom).  Modes are mass-weighted, so the
+    returned vectors are deweighted by ``sqrt(m[atom])`` and renormalised to
+    unit norm, matching the semantics of ``_parse_orca_displacement_vectors``
+    (Cartesian displacement mode vectors).
+
+    Returns
+    -------
+    dict[int, np.ndarray]
+        *mode_index* → (*N_atoms*, 3) deweighted displacement vectors.
+        Empty dict on parse errors.
+    """
+    header_pattern = re.compile(r"^\s*\d+(\s+\d+)*\s*$")
+    lines = content.splitlines()
+    start = next((i for i, line in enumerate(lines) if line.strip() == "NORMAL MODES"), None)
+    if start is None:
+        return {}
+
+    masses = [
+        _ELEMENT_MASS.get(str(symbol).strip().capitalize(), 12.011)
+        for symbol in element_symbols
+    ]
+
+    modes: Dict[int, List[float]] = {}
+    active_modes: List[int] = []
+    for line in lines[start + 1:]:
+        if header_pattern.match(line):
+            active_modes = [int(token) for token in line.split()]
+            continue
+        tokens = line.split()
+        if not tokens or not tokens[0].isdigit():
+            continue
+        row = int(tokens[0])
+        if active_modes and row == 0 and not modes:
+            modes = {mode: [] for mode in active_modes}
+            for offset, value in enumerate(tokens[1:]):
+                if offset < len(active_modes):
+                    modes[active_modes[offset]].append(float(value))
+            continue
+        if not active_modes:
+            continue
+        for offset, value in enumerate(tokens[1:]):
+            if offset < len(active_modes):
+                modes.setdefault(active_modes[offset], []).append(float(value))
+
+    if not modes:
+        return {}
+
+    n_atoms = len(masses)
+    result: Dict[int, NDArray[np.float64]] = {}
+    for mode_index, values in modes.items():
+        if len(values) != 3 * n_atoms:
+            continue
+        raw = np.asarray(values, dtype=np.float64).reshape((n_atoms, 3))
+        deweighted = raw * np.sqrt(np.asarray(masses, dtype=np.float64))[:, None]
+        norm = float(np.linalg.norm(deweighted))
+        if norm <= 1e-12:
+            continue
+        result[mode_index] = deweighted / norm
+    if result:
+        logger.debug(
+            "Extracted %d ORCA6 normal-mode displacement vector(s)",
+            len(result),
+        )
+    return result
+
+
+
 class ORCAInterface:
     """ORCA 接口 - 高精度单点能计算"""
 
@@ -185,6 +540,7 @@ class ORCAInterface:
         maxcore: Optional[int] = None,
         solvent: str = "acetone",
         route_extras: str = "",
+        scf_maxiter: Optional[int] = None,
         solvent_model: Optional[str] = None,
         orca_binary_path: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
@@ -233,7 +589,17 @@ class ORCAInterface:
         self.nprocs = nprocs
         self.solvent = self.method_spec.solvent or solvent
         self.solvent_model = self._resolve_solvent_model(config, raw_method_spec)
+        if self.method_spec.family == "semiempirical_xtb" and self.solvent_model != "ALPB":
+            # ORCA's GFN-xTB family accepts only ALPB (CPCM/SMD abort the run).
+            _logger = logging.getLogger(f"{__name__}.{method}/{basis}")
+            _logger.warning(
+                "[ORCA] %s supports only ALPB solvation; translating solvent_model=%s -> ALPB",
+                self.method,
+                self.solvent_model,
+            )
+            self.solvent_model = "ALPB"
         self.route_extras = self.method_spec.route_extras
+        self.scf_maxiter = int(scf_maxiter) if scf_maxiter is not None else None
 
         # 处理 maxcore：如果未提供，从配置派生
         if maxcore is None and config:
@@ -244,16 +610,17 @@ class ORCAInterface:
         else:
             self.maxcore = maxcore if maxcore is not None else 4000
 
+        # 设置日志（必须在使用 self.logger 的任何辅助方法之前初始化）
+        self.logger = logging.getLogger(f"{__name__}.{method}/{basis}")
+
         validation_errors = CapabilityValidator.validate(self.method_spec, task_type="sp")
         if validation_errors:
-            self.logger = logging.getLogger(f"{__name__}.{method}/{basis}")
             self.logger.warning("ORCA method spec validation issues: %s", "; ".join(validation_errors))
 
         # 查找 ORCA 二进制文件（集成新的配置系统）
         self.orca_binary = self._find_orca_binary(orca_binary_path, config)
+        self._orca_major_version = self._detect_orca_major_version(config)
 
-        # 设置日志
-        self.logger = logging.getLogger(f"{__name__}.{method}/{basis}")
         self.config = config
 
         # SP cache (in-memory, per-process)
@@ -261,6 +628,8 @@ class ORCAInterface:
         self._sp_cache_hits = 0
         self._sp_cache_misses = 0
         self._last_resolved_final_xyz: Optional[Path] = None
+        self._last_orca_run_metadata = _OrcaRunMetadata()
+        self._last_subprocess: subprocess.Popen[Any] | None = None
 
     def _pal_block(self, nprocs: Optional[int] = None) -> str:
         effective_nprocs = self.nprocs if nprocs is None else nprocs
@@ -321,7 +690,16 @@ class ORCAInterface:
         return self._get_renderer().render_simple_keywords(task_type=task_type)
 
     def render_blocks(self) -> Dict[str, str]:
-        return self._get_renderer().render_blocks()
+        blocks = dict(self._get_renderer().render_blocks())
+        if self.scf_maxiter is not None:
+            blocks["scf"] = "\n".join(
+                [
+                    "%scf",
+                    f"  MaxIter {int(self.scf_maxiter)}",
+                    "end",
+                ]
+            )
+        return blocks
 
     @staticmethod
     def _resolve_solvent_model(config: Optional[Dict[str, Any]], method_spec: Mapping[str, Any]) -> str:
@@ -353,8 +731,9 @@ class ORCAInterface:
         route = self.render_simple_keywords(task_type=task_type)
         if not self.solvent or str(self.solvent).upper() == "NONE":
             return route
-        if self.solvent_model in {"CPCM", "PCM"}:
-            solvent_keyword = f"CPCM({self._solvent_name_for_orca()})"
+        if self.solvent_model in {"CPCM", "PCM", "ALPB"}:
+            model_keyword = "ALPB" if self.solvent_model == "ALPB" else "CPCM"
+            solvent_keyword = f"{model_keyword}({self._solvent_name_for_orca()})"
             if solvent_keyword.lower() not in route.lower():
                 return f"{route} {solvent_keyword}"
         return route
@@ -513,7 +892,13 @@ class ORCAInterface:
 
         try:
             out_file = self._run_orca(inp_file, output_dir, timeout=timeout)
-            result = self._parse_output(out_file, require_optimization_convergence=True)
+            result = self._parse_output(
+                out_file,
+                require_optimization_convergence=True,
+                returncode=self._last_orca_run_metadata.returncode,
+                stderr_text=self._last_orca_run_metadata.stderr_text,
+                timed_out=self._last_orca_run_metadata.timed_out,
+            )
 
             result.coordinates = self._extract_final_orca_coordinates(out_file, xyz_copy)
 
@@ -535,8 +920,10 @@ class ORCAInterface:
         charge: int,
         spin: int,
         geom_block: Optional[str] = None,
+        max_cycles_opt: Optional[int] = None,
         timeout: Optional[int] = None,
         job_tag: Optional[str] = None,
+        subprocess_callback: Callable[[subprocess.Popen[Any]], None] | None = None,
     ) -> QCResult:
         """Run an ORCA optimization with an explicit ORCA task type."""
         normalized_task = str(task_type or "").strip().lower()
@@ -583,8 +970,20 @@ class ORCAInterface:
         inp_file.write_text(inp_content)
 
         try:
-            out_file = self._run_orca(inp_file, output_dir, timeout=timeout)
-            result = self._parse_output(out_file, require_optimization_convergence=True)
+            out_file = self._run_orca(
+                inp_file,
+                output_dir,
+                timeout=timeout,
+                subprocess_callback=subprocess_callback,
+            )
+            result = self._parse_output(
+                out_file,
+                require_optimization_convergence=True,
+                returncode=self._last_orca_run_metadata.returncode,
+                stderr_text=self._last_orca_run_metadata.stderr_text,
+                timed_out=self._last_orca_run_metadata.timed_out,
+                max_cycles_opt=max_cycles_opt,
+            )
             result.coordinates = self._extract_final_orca_coordinates(out_file, xyz_copy)
 
             if normalized_task in {"ts", "ts_freq", "opt_freq"}:
@@ -600,11 +999,480 @@ class ORCAInterface:
                 error_message=str(e)
             )
 
+    def run_irc(
+        self,
+        spec: IRCJobSpec,
+        input_xyz: Path,
+        output_dir: Path,
+        charge: int = 0,
+        spin: int = 1,
+        timeout: Optional[int] = None,
+        subprocess_callback: Optional[Callable[[Any], None]] = None,
+    ) -> QCJobResult:
+        """Execute an ORCA IRC calculation for TS endpoint discovery."""
+
+        input_xyz = Path(input_xyz)
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        if not str(spec.method or "").strip():
+            raise ValueError("IRCJobSpec.method is required for ORCA IRC jobs")
+
+        route = self._render_route(task_type="irc")
+        cpcm_block = self._render_cpcm_block()
+        rendered_blocks = self._render_named_blocks(self.render_blocks())
+        irc_block = _render_irc_block(spec)
+
+        job_tag = uuid.uuid4().hex[:8]
+        base_name = f"{input_xyz.stem}_irc_{job_tag}"
+        xyz_copy = output_dir / f"{base_name}{input_xyz.suffix}"
+        shutil.copy(input_xyz, xyz_copy)
+
+        xyz_lines = xyz_copy.read_text(encoding="utf-8").splitlines()
+        xyz_content = "\n".join(xyz_lines[2:]) if len(xyz_lines) > 2 else xyz_copy.read_text(encoding="utf-8")
+        pal_block = self._pal_block()
+        inp_content = (
+            f"{route}\n"
+            f" %maxcore {self.maxcore}\n"
+            f" {pal_block}{cpcm_block}{rendered_blocks}\n"
+            f"{irc_block}\n"
+            f"  * xyz {int(charge)} {int(spin)}\n"
+            f"{xyz_content}\n"
+            "  *\n"
+        )
+        inp_file = output_dir / f"{base_name}.inp"
+        inp_file.write_text(inp_content, encoding="utf-8")
+
+        try:
+            out_file = self._run_orca(
+                inp_file,
+                output_dir,
+                timeout=timeout,
+                subprocess_callback=subprocess_callback,
+            )
+            parsed = self._parse_output(
+                out_file,
+                require_optimization_convergence=False,
+                returncode=self._last_orca_run_metadata.returncode,
+                stderr_text=self._last_orca_run_metadata.stderr_text,
+                timed_out=self._last_orca_run_metadata.timed_out,
+            )
+        except Exception as exc:
+            self.logger.error("ORCA IRC execution failed: %s", exc)
+            return QCJobResult(
+                status="failed",
+                input_xyz=input_xyz,
+                output_xyz=input_xyz,
+                error=str(exc),
+            )
+
+        if not parsed.converged:
+            return QCJobResult(
+                status="failed",
+                input_xyz=input_xyz,
+                output_xyz=input_xyz,
+                output_file=getattr(parsed, "output_file", out_file),
+                energy_hartree=getattr(parsed, "energy", None),
+                error=getattr(parsed, "error_message", None),
+                failure_type=getattr(parsed, "failure_type", None),
+                failure_evidence_lines=getattr(parsed, "failure_evidence_lines", None),
+                returncode=self._last_orca_run_metadata.returncode,
+                stderr_text=self._last_orca_run_metadata.stderr_text,
+                timed_out=self._last_orca_run_metadata.timed_out,
+                orca_version=extract_orca_version_from_output(getattr(parsed, "output_file", out_file)),
+            )
+
+        normalized_direction = str(spec.direction or "both").strip().lower()
+        endpoint_sources = _resolve_irc_endpoint_sources(
+            output_dir,
+            direction=normalized_direction,
+            exclude_names=(xyz_copy.name, inp_file.name, out_file.name),
+        )
+        required_endpoints = 2 if normalized_direction == "both" else 1
+        if len(endpoint_sources) < required_endpoints:
+            error_message = (
+                f"Unable to locate ORCA IRC endpoint geometries in {output_dir}; "
+                f"inspect {out_file} manually"
+            )
+            self.logger.warning(error_message)
+            return QCJobResult(
+                status="failed",
+                input_xyz=input_xyz,
+                output_xyz=input_xyz,
+                output_file=out_file,
+                energy_hartree=getattr(parsed, "energy", None),
+                error=error_message,
+                returncode=self._last_orca_run_metadata.returncode,
+                stderr_text=self._last_orca_run_metadata.stderr_text,
+                timed_out=self._last_orca_run_metadata.timed_out,
+                orca_version=extract_orca_version_from_output(out_file),
+            )
+
+        endpoint_a_xyz = output_dir / "irc_endpoint_a.xyz"
+        materialized_a = _materialize_irc_endpoint(endpoint_sources[0], endpoint_a_xyz)
+        endpoint_b_xyz: Optional[Path] = None
+        materialized_b: Optional[Path] = None
+        if required_endpoints == 2:
+            endpoint_b_xyz = output_dir / "irc_endpoint_b.xyz"
+            materialized_b = _materialize_irc_endpoint(endpoint_sources[1], endpoint_b_xyz)
+
+        if materialized_a is None or (required_endpoints == 2 and materialized_b is None):
+            error_message = (
+                f"Failed to parse ORCA IRC endpoint geometries from {output_dir}; "
+                f"inspect {out_file} manually"
+            )
+            self.logger.warning(error_message)
+            return QCJobResult(
+                status="failed",
+                input_xyz=input_xyz,
+                output_xyz=input_xyz,
+                output_file=out_file,
+                energy_hartree=getattr(parsed, "energy", None),
+                error=error_message,
+                returncode=self._last_orca_run_metadata.returncode,
+                stderr_text=self._last_orca_run_metadata.stderr_text,
+                timed_out=self._last_orca_run_metadata.timed_out,
+                orca_version=extract_orca_version_from_output(out_file),
+            )
+
+        extra: Dict[str, Any] = {
+            "endpoint_a_xyz": materialized_a,
+            "irc_trajectory_dir": output_dir,
+        }
+        if materialized_b is not None:
+            extra["endpoint_b_xyz"] = materialized_b
+
+        return QCJobResult(
+            status="complete",
+            input_xyz=input_xyz,
+            output_xyz=input_xyz,
+            output_file=out_file,
+            energy_hartree=getattr(parsed, "energy", None),
+            error=getattr(parsed, "error_message", None),
+            failure_type=getattr(parsed, "failure_type", None),
+            failure_evidence_lines=getattr(parsed, "failure_evidence_lines", None),
+            returncode=self._last_orca_run_metadata.returncode,
+            stderr_text=self._last_orca_run_metadata.stderr_text,
+            timed_out=self._last_orca_run_metadata.timed_out,
+            orca_version=extract_orca_version_from_output(out_file),
+            extra=extra,
+        )
+
+    def run_surface_scan(
+        self,
+        spec: SurfaceScanSpec,
+        input_xyz: Path,
+        output_dir: Path,
+        subprocess_callback: Optional[Callable[[Any], None]] = None,
+    ) -> QCJobResult:
+        """Run an ORCA relaxed scan and preserve every optimized scan frame.
+
+        This is deliberately an interface primitive.  S2 owns when a scan is
+        warranted and how a peak is interpreted; the interface only renders
+        ORCA input, executes it, and returns recoverable scan artefacts.
+        """
+
+        input_xyz = Path(input_xyz)
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if not input_xyz.exists():
+            return QCJobResult(status="failed", input_xyz=input_xyz, error="Surface-scan input XYZ is unavailable")
+        if not spec.coordinates or len(spec.coordinates) > 3:
+            return QCJobResult(status="failed", input_xyz=input_xyz, error="Surface scan requires one to three coordinates")
+        if spec.scan_ts and len(spec.coordinates) != 1:
+            return QCJobResult(status="failed", input_xyz=input_xyz, error="ScanTS supports one local coordinate only")
+
+        job_tag = uuid.uuid4().hex[:8]
+        base_name = f"{input_xyz.stem}_surface_scan_{job_tag}"
+        input_copy = output_dir / f"{base_name}_start.xyz"
+        shutil.copy(input_xyz, input_copy)
+        scan_lines: List[str] = []
+        for coordinate in spec.coordinates:
+            kind = str(coordinate.kind).upper()
+            expected = {"B": 2, "A": 3, "D": 4}.get(kind)
+            atoms = tuple(int(atom) for atom in coordinate.atoms)
+            if expected is None or len(atoms) != expected or min(atoms, default=-1) < 0:
+                return QCJobResult(status="failed", input_xyz=input_xyz, error=f"Invalid scan coordinate: {coordinate!r}")
+            if int(coordinate.steps) < 3:
+                return QCJobResult(status="failed", input_xyz=input_xyz, error="Surface scan requires at least three points")
+            scan_lines.append(
+                f"    {kind} {' '.join(str(atom) for atom in atoms)} = "
+                f"{float(coordinate.start):.8f}, {float(coordinate.end):.8f}, {int(coordinate.steps)}"
+            )
+
+        route = self._render_route(task_type="opt").replace(" noautostart", "")
+        if spec.scan_ts:
+            route = re.sub(r"\\bOpt\\b", "ScanTS", route, count=1, flags=re.IGNORECASE)
+            if "scants" not in route.lower():
+                route = f"{route} ScanTS"
+        geom_lines = ["%geom", "  Scan", *scan_lines, "  end"]
+        if spec.simultaneous and len(spec.coordinates) > 1:
+            geom_lines.append("  Simul_Scan true")
+        if spec.scan_ts and spec.full_scan:
+            geom_lines.append("  FullScan true")
+        if spec.max_cycles is not None:
+            geom_lines.append(f"  MaxIter {int(spec.max_cycles)}")
+        geom_lines.append("end")
+        cpcm_block = self._render_cpcm_block()
+        rendered_blocks = self._render_named_blocks(self.render_blocks())
+        pal_block = self._pal_block()
+        inp_file = output_dir / f"{base_name}.inp"
+        geom_block = "\n".join(geom_lines)
+        inp_file.write_text(
+            f"{route}\n%maxcore {self.maxcore}\n{pal_block}{cpcm_block}{rendered_blocks}\n"
+            f"{geom_block}\n"
+            f"* xyzfile {int(spec.charge)} {int(spec.multiplicity)} {input_copy.name}\n",
+            encoding="utf-8",
+        )
+        if self.method_spec.family == "semiempirical_xtb" and self.orca_binary is not None:
+            orca_dir = self.orca_binary.parent
+            if not (orca_dir / "otool_xtb").is_file() and not (orca_dir / "xtb").is_file():
+                return QCJobResult(
+                    status="failed",
+                    input_xyz=input_xyz,
+                    error=(
+                        "ORCA GFN-xTB requires the xtb binary in the ORCA directory; "
+                        f"neither {orca_dir / 'otool_xtb'} nor {orca_dir / 'xtb'} exists. "
+                        f"Fix: ln -s <path-to-xtb> {orca_dir / 'xtb'}"
+                    ),
+                )
+        try:
+            out_file = self._run_orca(
+                inp_file, output_dir, timeout=spec.timeout, subprocess_callback=subprocess_callback
+            )
+            out_text = out_file.read_text(encoding="utf-8", errors="ignore")
+        except Exception as exc:
+            return QCJobResult(status="failed", input_xyz=input_xyz, error=str(exc))
+
+        allxyz_files = sorted(output_dir.glob(f"{base_name}*.allxyz"))
+        frames: List[Path] = []
+        if allxyz_files:
+            lines = allxyz_files[-1].read_text(encoding="utf-8", errors="ignore").splitlines()
+            cursor = 0
+            frame_dir = output_dir / "scan_frames"
+            frame_dir.mkdir(parents=True, exist_ok=True)
+            while cursor < len(lines):
+                try:
+                    atom_count = int(lines[cursor].strip())
+                except ValueError:
+                    cursor += 1
+                    continue
+                end = cursor + atom_count + 2
+                if atom_count <= 0 or end > len(lines):
+                    break
+                frame = frame_dir / f"frame_{len(frames):04d}.xyz"
+                frame.write_text("\n".join(lines[cursor:end]) + "\n", encoding="utf-8")
+                frames.append(frame)
+                cursor = end
+        # ORCA 5 writes the optimized energy of each relaxed-scan point to
+        # ``*.relaxscanact.dat``.  The main output contains many inner OPT
+        # cycles and may omit/compact some ``FINAL SINGLE POINT ENERGY`` lines
+        # under ``miniprint``; it is therefore neither a complete nor a
+        # one-to-one frame-energy ledger.  Prefer the dedicated scan ledger.
+        scan_energy_file: Optional[Path] = None
+        scan_energies: List[float] = []
+        for candidate_file in sorted(output_dir.glob(f"{base_name}*.relaxscanact.dat")):
+            parsed = self._parse_relaxed_scan_energy_ledger(
+                candidate_file,
+                coordinate_count=len(spec.coordinates),
+            )
+            if len(parsed) >= len(scan_energies):
+                scan_energy_file = candidate_file
+                scan_energies = parsed
+        energy_values = [
+            float(value)
+            for value in re.findall(
+                r"FINAL\\s+SINGLE\\s+POINT\\s+ENERGY\\s+([-+]?\\d+(?:\\.\\d+)?(?:[Ee][-+]?\\d+)?)",
+                out_text,
+                flags=re.IGNORECASE,
+            )
+        ]
+        energies: List[Optional[float]] = [None] * len(frames)
+        if len(scan_energies) >= len(frames):
+            energies = [float(value) for value in scan_energies[:len(frames)]]
+        elif len(energy_values) >= len(frames):
+            energies = [float(value) for value in energy_values[:len(frames)]]
+        ts_candidates = sorted(
+            [*output_dir.glob(f"{base_name}*TS*.xyz"), *output_dir.glob(f"{base_name}*opt*.xyz")]
+        )
+        candidate = ts_candidates[-1] if spec.scan_ts and ts_candidates else None
+        normal = has_normal_termination(out_text)
+        status = "complete" if normal and frames else "failed"
+        error = None if status == "complete" else "ORCA relaxed scan did not yield optimized frames"
+        if status == "failed":
+            classification = classify_orca_failure_for_config(
+                output_text=out_text,
+                stderr_text=self._last_orca_run_metadata.stderr_text,
+                returncode=self._last_orca_run_metadata.returncode,
+                timed_out=self._last_orca_run_metadata.timed_out,
+                config=self.config,
+            )
+            if classification is not None:
+                error = classification.summary
+                if classification.failure_type == OrcaFailureType.XTB_BINARY_UNAVAILABLE:
+                    orca_dir = self.orca_binary.parent if self.orca_binary is not None else Path(".")
+                    error = (
+                        f"{classification.summary}: {orca_dir}. "
+                        f"Fix: ln -s <path-to-xtb> {orca_dir / 'xtb'}"
+                    )
+        return QCJobResult(
+            status=status,
+            input_xyz=input_xyz,
+            output_xyz=candidate,
+            output_file=out_file,
+            energy_hartree=energy_values[-1] if energy_values else None,
+            error=error,
+            returncode=self._last_orca_run_metadata.returncode,
+            stderr_text=self._last_orca_run_metadata.stderr_text,
+            timed_out=self._last_orca_run_metadata.timed_out,
+            orca_version=extract_orca_version_from_output(out_file),
+            extra={
+                "frames": [str(frame) for frame in frames],
+                "energies_hartree": energies,
+                "energy_source": (
+                    str(scan_energy_file)
+                    if scan_energy_file is not None and len(scan_energies) >= len(frames)
+                    else "output_final_single_point_energy"
+                ),
+                "scan_ts_candidate_xyz": str(candidate) if candidate else None,
+                "scan_coordinate_count": len(spec.coordinates),
+            },
+        )
+
+    @staticmethod
+    def _parse_relaxed_scan_energy_ledger(
+        path: Path,
+        *,
+        coordinate_count: int,
+    ) -> List[float]:
+        """Read ORCA's per-point optimized-energy ledger for a relaxed scan."""
+
+        energies: List[float] = []
+        try:
+            for raw_line in Path(path).read_text(encoding="utf-8", errors="ignore").splitlines():
+                values = raw_line.split()
+                if len(values) < coordinate_count + 1:
+                    continue
+                try:
+                    energies.append(float(values[coordinate_count]))
+                except ValueError:
+                    continue
+        except OSError:
+            return []
+        return energies
+
+    def run_neb_ts(
+        self,
+        spec: QCJobSpec,
+        input_xyz: Path,
+        output_dir: Path,
+        subprocess_callback: Optional[Callable[[Any], None]] = None,
+    ) -> QCJobResult:
+        """Run ORCA's double-ended NEB-TS and preserve the best TS seed.
+
+        This intentionally lives in the low-level interface so refinement code
+        never invokes ORCA directly.  A partially converged NEB is returned as
+        ``partial`` when a final highest-energy image can be materialized.
+        """
+        input_xyz = Path(input_xyz)
+        end_xyz = Path(spec.neb_end_xyz) if spec.neb_end_xyz else None
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if end_xyz is None or not end_xyz.exists():
+            return QCJobResult(status="failed", input_xyz=input_xyz, error="NEB end-point XYZ is unavailable")
+
+        route = self._render_route(task_type="sp").replace(" noautostart", "")
+        route = route.replace("! ", "! ", 1)
+        route = route.replace(self.method, f"{self.method} {spec.route or 'LOOSE-NEB-TS'}", 1)
+        cpcm_block = self._render_cpcm_block()
+        rendered_blocks = self._render_named_blocks(self.render_blocks())
+        job_tag = uuid.uuid4().hex[:8]
+        base_name = f"{input_xyz.stem}_neb_ts_{job_tag}"
+        start_copy = output_dir / f"{base_name}_start.xyz"
+        end_copy = output_dir / f"{base_name}_end.xyz"
+        shutil.copy(input_xyz, start_copy)
+        shutil.copy(end_xyz, end_copy)
+        # ORCA's NEB parser does not reliably honour quoted absolute paths
+        # containing whitespace.  The job runner may move this input into a
+        # clean sandbox, so all NEB references must be local sandbox names.
+        start_ref = start_copy.name
+        end_ref = end_copy.name
+        ts_guess_line = ""
+        if spec.neb_ts_guess_xyz and Path(spec.neb_ts_guess_xyz).exists():
+            guess_copy = output_dir / f"{base_name}_guess.xyz"
+            shutil.copy(Path(spec.neb_ts_guess_xyz), guess_copy)
+            ts_guess_line = f'  NEB_TS_XYZFILE "{guess_copy.name}"\n'
+        neb_block = (
+            "%neb\n"
+            f'  NEB_END_XYZFILE "{end_ref}"\n'
+            f"{ts_guess_line}"
+            "end\n"
+        )
+        pal_block = self._pal_block()
+        inp_content = (
+            f"{route}\n %maxcore {self.maxcore}\n {pal_block}{cpcm_block}{rendered_blocks}\n"
+            # ORCA 5 accepts quoted filenames in the %neb assignments but
+            # treats quotes as literal characters in `* xyzfile`.  The
+            # sandbox-local basename has no whitespace, so it must be emitted
+            # unquoted here.
+            f"{neb_block}* xyzfile {int(spec.charge)} {int(spec.multiplicity)} {start_ref}\n"
+        )
+        inp_file = output_dir / f"{base_name}.inp"
+        inp_file.write_text(inp_content, encoding="utf-8")
+        try:
+            out_file = self._run_orca(inp_file, output_dir, timeout=spec.timeout, subprocess_callback=subprocess_callback)
+            text = out_file.read_text(encoding="utf-8", errors="ignore")
+        except Exception as exc:
+            return QCJobResult(status="failed", input_xyz=input_xyz, error=str(exc))
+
+        # ORCA writes the climbing-image result as ``*_NEB-CI_converged.xyz``
+        # for several NEB-TS variants.  That file is the intended TS seed even
+        # when the output does not contain the ordinary OptTS convergence
+        # banner, so do not silently discard it in favour of the warm-up
+        # geometry.  A converged CI is a *candidate*, not yet a validated TS;
+        # refinement performs the subsequent OptTS/FREQ validation.
+        converged_candidates = sorted(
+            [
+                *output_dir.glob("*_NEB-TS_converged.xyz"),
+                *output_dir.glob("*_NEB-CI_converged.xyz"),
+            ]
+        )
+        partial_candidates = sorted(
+            [
+                *output_dir.glob("*_NEB-TS*.xyz"),
+                *output_dir.glob("*_NEB-CI*.xyz"),
+            ]
+        )
+        candidate = (converged_candidates or partial_candidates or [None])[-1]
+        status = "complete" if converged_candidates else ("partial" if candidate else "failed")
+        return QCJobResult(
+            status=status,
+            input_xyz=input_xyz,
+            output_xyz=candidate,
+            output_file=out_file,
+            error=None if status == "complete" else "ORCA NEB-TS did not fully converge",
+            extra={
+                "candidate_xyz": str(candidate) if candidate else None,
+                "candidate_kind": (
+                    "neb_ci_converged" if candidate and "_NEB-CI_converged.xyz" in candidate.name
+                    else "neb_ts_converged" if candidate and "_NEB-TS_converged.xyz" in candidate.name
+                    else "partial_neb_image" if candidate else None
+                ),
+                "start_xyz": str(start_copy),
+                "end_xyz": str(end_copy),
+            },
+        )
+
     def _parse_output(
         self,
         out_file: Path,
         *,
         require_optimization_convergence: bool = False,
+        stderr_text: Optional[str] = None,
+        returncode: Optional[int] = None,
+        timed_out: Optional[bool] = None,
+        max_cycles_opt: Optional[int] = None,
+        scf_converged: Optional[bool] = None,
     ) -> QCResult:
         """
         解析 ORCA 输出文件
@@ -615,31 +1483,79 @@ class ORCAInterface:
         Returns:
             QCResult 对象
         """
+        run_metadata = getattr(self, "_last_orca_run_metadata", _OrcaRunMetadata())
+        effective_stderr_text = run_metadata.stderr_text if stderr_text is None else stderr_text
+        effective_returncode = run_metadata.returncode if returncode is None else returncode
+        effective_timed_out = run_metadata.timed_out if timed_out is None else timed_out
+
+        def _failure_result(
+            message: str,
+            *,
+            classification: Optional[OrcaFailureClassification] = None,
+        ) -> QCResult:
+            result = QCResult(
+                energy=0.0,
+                converged=False,
+                output_file=out_file,
+                error_message=message,
+            )
+            if classification is not None:
+                result.failure_type = classification.failure_type.value
+                result.failure_evidence_lines = classification.evidence_lines
+                setattr(result, "failure_retry_hint", classification.retry_hint)
+            return result
+
         # 读取输出文件内容
         try:
-            content = out_file.read_text()
+            content = out_file.read_text(encoding="utf-8", errors="ignore")
         except Exception as e:
             return QCResult(
                 energy=0.0,
                 converged=False,
-                error_message=f"无法读取输出文件: {e}"
+                output_file=out_file,
+                error_message=f"Unable to read ORCA output file: {e}",
             )
+
+        optimization_converged = "THE OPTIMIZATION HAS CONVERGED" in content
+        classification = classify_orca_failure_for_config(
+            output_text=content,
+            stderr_text=effective_stderr_text,
+            returncode=effective_returncode,
+            timed_out=effective_timed_out,
+            max_cycles_opt=max_cycles_opt,
+            scf_converged=scf_converged,
+            config=getattr(self, "config", None),
+        )
+        normal_termination = has_normal_termination(content)
+        geometry_partial_success = False
+
+        if classification is not None:
+            geometry_partial_success = (
+                normal_termination
+                and require_optimization_convergence
+                and not optimization_converged
+                and classification.failure_type == OrcaFailureType.GEOMETRY_OPTIMIZATION_NOT_CONVERGED
+            )
+            if not geometry_partial_success:
+                return _failure_result(classification.summary, classification=classification)
 
         # 检查是否正常终止
-        if "ORCA TERMINATED NORMALLY" not in content:
-            return QCResult(
-                energy=0.0,
-                converged=False,
-                error_message="ORCA 未正常终止"
-            )
+        if not normal_termination:
+            if classification is not None:
+                return _failure_result(classification.summary, classification=classification)
+            return _failure_result("ORCA did not terminate normally")
 
         # 提取最终单点能
-        energy_match = re.search(r"FINAL SINGLE POINT ENERGY\s+([\-\d\.]+)", content)
+        energy_match = re.search(
+            r"FINAL\s+SINGLE\s+POINT\s+ENERGY\s+([-+]?\d+\.\d+(?:[Ee][-+]?\d+)?)",
+            content,
+        )
         if not energy_match:
             return QCResult(
                 energy=0.0,
                 converged=False,
-                error_message="无法找到能量信息"
+                output_file=out_file,
+                error_message="Could not find ORCA final single-point energy",
             )
 
         # 解析能量
@@ -649,7 +1565,8 @@ class ORCAInterface:
             return QCResult(
                 energy=0.0,
                 converged=False,
-                error_message=f"能量格式错误: {energy_match.group(1)}"
+                output_file=out_file,
+                error_message=f"Invalid ORCA energy value: {energy_match.group(1)}",
             )
 
         coordinates = None
@@ -671,22 +1588,48 @@ class ORCAInterface:
         except Exception as e:
             self.logger.warning("Failed to extract ORCA coordinates from %s: %s", out_file, e)
 
-        # 成功解析
-        return QCResult(
+        # A normal ORCA process exit is not equivalent to an optimized
+        # stationary point. Preserve the terminal MaxIter classification so
+        # downstream S3 rescue can distinguish it from a generic failure.
+        result = QCResult(
             energy=energy,
             converged=(
                 not require_optimization_convergence
-                or "THE OPTIMIZATION HAS CONVERGED" in content
+                or optimization_converged
             ),
             coordinates=coordinates,
             output_file=out_file,
             error_message=(
                 None
                 if not require_optimization_convergence
-                or "THE OPTIMIZATION HAS CONVERGED" in content
+                or optimization_converged
                 else "ORCA terminated normally, but the geometry optimization did not converge"
-            )
+            ),
+            failure_type=(
+                classification.failure_type.value
+                if classification is not None and not optimization_converged
+                else None
+            ),
+            failure_evidence_lines=(
+                classification.evidence_lines
+                if classification is not None and not optimization_converged
+                else None
+            ),
+            failure_retry_hint=(
+                classification.retry_hint
+                if classification is not None and not optimization_converged
+                else None
+            ),
+            optimization_converged=(
+                optimization_converged if require_optimization_convergence else None
+            ),
+            stop_reason=(
+                "native_maxiter_checkpoint"
+                if geometry_partial_success
+                else None
+            ),
         )
+        return result
 
     def extract_frequencies_from_output(self, out_file: Path) -> Optional[NDArray[np.float64]]:
         """Extract vibrational frequencies from a completed ORCA output."""
@@ -844,6 +1787,20 @@ class ORCAInterface:
             self.logger.warning("Failed to read XYZ coordinates from %s: %s", xyz_path, e)
             return None
 
+    def _detect_orca_major_version(self, config: Optional[Dict[str, Any]] = None) -> Optional[int]:
+        """Resolve the active ORCA major version from config or the binary path."""
+        if config:
+            orca_cfg = config.get("executables", {}).get("orca", {}) or {}
+            if isinstance(orca_cfg, Mapping) and orca_cfg.get("version"):
+                version = _parse_orca_major_version(str(orca_cfg.get("version")))
+                if version is not None:
+                    self.logger.debug("ORCA major version from config: %s", version)
+                    return version
+        path_version = _resolve_orca_version_from_path(self.orca_binary)
+        if path_version is not None:
+            self.logger.debug("ORCA major version from binary path: %s", path_version)
+        return path_version
+
     def _find_orca_binary(self, provided_path: Optional[str] = None, config: Optional[Dict[str, Any]] = None) -> Optional[Path]:
         """
         查找 ORCA 可执行文件（集成新的配置系统）
@@ -915,6 +1872,7 @@ class ORCAInterface:
             mpi_bin_candidates.append(Path(mpi_bin_from_config))
             self.logger.debug(f"ORCA MPI bin dir from config: {mpi_bin_from_config}")
         mpi_bin_candidates += [
+            orca_dir / "openmpi418" / "bin",
             orca_dir / "openmpi" / "bin",
             orca_dir / "mpi" / "bin",
             orca_dir / "bin",
@@ -967,6 +1925,7 @@ class ORCAInterface:
             mpi_lib_candidates.append(Path(mpi_lib_from_config))
             self.logger.debug(f"ORCA MPI lib dir from config: {mpi_lib_from_config}")
         mpi_lib_candidates += [
+            orca_dir / "openmpi418" / "lib",
             orca_dir / "openmpi" / "lib",
             orca_dir / "mpi" / "lib",
             orca_dir / "lib",
@@ -994,17 +1953,108 @@ class ORCAInterface:
         env.setdefault("ORCA_PATH", str(orca_dir))
         env.setdefault("ORCA_DIR", str(orca_dir))
 
-        if os.getuid() == 0:
+        # ORCA >= 6 launches its parallel modules from the serial driver itself;
+        # the OMPI_ALLOW_RUN_AS_ROOT injection is only meaningful for the 5.x
+        # external-mpirun path.  WSL2/container shared-memory tuning is handled
+        # by OMPI_MCA_btl_vader_single_copy_mechanism=none at the environment
+        # level instead.
+        major_version = getattr(self, "_orca_major_version", None)
+        self.logger.debug("Detected ORCA major version for runtime env: %s", major_version)
+        if os.getuid() == 0 and (major_version is None or major_version < 6):
             env.setdefault("OMPI_ALLOW_RUN_AS_ROOT", "1")
             env.setdefault("OMPI_ALLOW_RUN_AS_ROOT_CONFIRM", "1")
 
         return env
 
+    def _execute_orca_process(
+        self,
+        *,
+        cmd: List[str],
+        cwd: Path,
+        out_file: Path,
+        env: Dict[str, str],
+        timeout: Optional[int],
+        subprocess_callback: Callable[[subprocess.Popen[Any]], None] | None = None,
+    ) -> _OrcaRunMetadata:
+        stderr_text = ""
+        timed_out = False
+
+        with open(out_file, 'w') as out_f:
+            process = subprocess.Popen(
+                cmd,
+                stdout=out_f,
+                stderr=subprocess.PIPE,
+                cwd=str(cwd),
+                text=True,
+                env=env,
+                # A live S3 monitor must be able to terminate ORCA together
+                # with its MPI children without touching unrelated jobs.
+                start_new_session=(os.name == "posix"),
+            )
+            self._last_subprocess = process
+            # The refinement monitor needs the active file when a toxic-path
+            # sandbox is in use.  Keep this private, process-local metadata so
+            # the public callback signature remains backward compatible.
+            setattr(process, "_rph_orca_output_path", str(out_file))
+            if subprocess_callback is not None:
+                try:
+                    subprocess_callback(process)
+                except Exception as exc:
+                    self.logger.warning("Ignoring ORCA subprocess callback failure: %s", exc)
+
+            try:
+                try:
+                    _, stderr_text = process.communicate(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    timed_out = True
+                    _, stderr_text = process.communicate()
+            finally:
+                self._last_subprocess = None
+
+        return _OrcaRunMetadata(
+            returncode=process.returncode,
+            stderr_text=stderr_text or "",
+            timed_out=timed_out,
+        )
+
+    def _log_orca_failure_diagnostics(
+        self,
+        out_file: Path,
+        *,
+        stderr_text: str,
+        returncode: Optional[int],
+        timed_out: bool,
+        sandbox_dir: Optional[Path] = None,
+    ) -> None:
+        if stderr_text.strip():
+            stderr_tail = stderr_text.splitlines()[-50:]
+            self.logger.error("ORCA stderr:\n%s", "\n".join(stderr_tail))
+
+        try:
+            if out_file.exists():
+                tail_lines = out_file.read_text(errors='ignore').splitlines()[-50:]
+                if tail_lines:
+                    label = "ORCA sandbox run" if sandbox_dir is not None else "ORCA run"
+                    detail = "timed out" if timed_out else f"failed (rc={returncode})"
+                    self.logger.error(
+                        "%s %s; last 50 lines of output:\n%s",
+                        label,
+                        detail,
+                        "\n".join(tail_lines),
+                    )
+        except Exception as tail_e:
+            self.logger.warning("Failed to read ORCA output tail: %s", tail_e)
+
+        if sandbox_dir is not None:
+            self.logger.error("ORCA sandbox dir preserved for debugging: %s", sandbox_dir)
+
     def _run_orca(
         self,
         inp_file: Path,
         output_dir: Path,
-        timeout: Optional[int] = 3600
+        timeout: Optional[int] = 3600,
+        subprocess_callback: Callable[[subprocess.Popen[Any]], None] | None = None,
     ) -> Path:
         """
         运行 ORCA 计算
@@ -1019,8 +2069,7 @@ class ORCAInterface:
 
         Raises:
             RuntimeError: ORCA 二进制文件未找到
-            RuntimeError: ORCA 运行失败
-            TimeoutError: 计算超时
+            RuntimeError: ORCA 进程启动失败
         """
         # 检查 ORCA 是否可用
         if self.orca_binary is None:
@@ -1032,6 +2081,7 @@ class ORCAInterface:
             )
 
         out_file = inp_file.with_suffix('.out')
+        self._last_orca_run_metadata = _OrcaRunMetadata()
 
         # ORCA / MPI 对含空格或特殊字符的路径支持较差；检测到 toxic path 时使用临时目录运行
         from rph_core.utils.path_compat import is_toxic_path
@@ -1054,56 +2104,92 @@ class ORCAInterface:
                 temp_out_file = temp_inp_file.with_suffix('.out')
                 shutil.copy(inp_file, temp_inp_file)
 
-                # Copy referenced XYZ files into sandbox temp dir
+                # Copy every locally referenced XYZ file into the sandbox.
+                # NEB needs a start, end and optional TS-guess geometry.  Do
+                # not preserve external paths here: the input renderer emits
+                # basenames specifically so ORCA only ever sees sandbox-local
+                # files, including when the original worktree has spaces.
                 inp_text = temp_inp_file.read_text()
+                referenced_xyz: List[str] = []
                 for line in inp_text.splitlines():
                     stripped = line.strip()
                     if stripped.startswith("* xyzfile "):
                         parts = stripped.split()
                         if len(parts) >= 4:
-                            xyz_ref = parts[-1]
-                            xyz_src = output_dir / xyz_ref
-                            if xyz_src.is_file():
-                                shutil.copy(xyz_src, temp_dir / xyz_ref)
+                            referenced_xyz.append(parts[-1].strip('"'))
+                        continue
+                    neb_xyz_match = re.match(
+                        r'NEB_(?:END|TS)_XYZFILE\s+"?([^"\s]+)"?',
+                        stripped,
+                        re.IGNORECASE,
+                    )
+                    if neb_xyz_match:
+                        referenced_xyz.append(neb_xyz_match.group(1))
+                for xyz_ref in referenced_xyz:
+                    xyz_name = Path(xyz_ref).name
+                    xyz_src = output_dir / xyz_name
+                    if xyz_src.is_file():
+                        shutil.copy(xyz_src, temp_dir / xyz_name)
+
+                # A mode-directed rescue starts from the Hessian generated by
+                # its local mode-analysis job.  Its source directory may have
+                # spaces, so make that Hessian sandbox-local too and rewrite
+                # the input reference just as we do for NEB XYZ endpoints.
+                # This preserves ``InHess Read`` + ``TS_Mode`` on Windows/WSL
+                # toxic paths instead of silently losing the selected mode.
+                inp_text = temp_inp_file.read_text(encoding="utf-8", errors="ignore")
+                hessian_refs = re.findall(
+                    r'(?im)^\s*InHessName\s+"([^"]+)"\s*$', inp_text
+                )
+                for hessian_ref in hessian_refs:
+                    hessian_src = Path(hessian_ref)
+                    if not hessian_src.is_file():
+                        hessian_src = output_dir / hessian_src.name
+                    if not hessian_src.is_file():
+                        continue
+                    hessian_name = hessian_src.name
+                    shutil.copy(hessian_src, temp_dir / hessian_name)
+                    inp_text = inp_text.replace(
+                        f'InHessName "{hessian_ref}"',
+                        f'InHessName "{hessian_name}"',
+                    )
+                temp_inp_file.write_text(inp_text, encoding="utf-8")
 
                 cmd = [str(self.orca_binary), str(temp_inp_file.resolve())]
 
                 env = self._build_orca_runtime_env()
                 env['ORCA_TEMP_DIR'] = str(temp_dir)
 
-                with open(temp_out_file, 'w') as out_f:
-                    process = subprocess.Popen(
-                        cmd,
-                        stdout=out_f,
-                        stderr=subprocess.PIPE,
-                        cwd=str(temp_dir),
-                        text=True,
-                        env=env
-                    )
+                metadata = self._execute_orca_process(
+                    cmd=cmd,
+                    cwd=temp_dir,
+                    out_file=temp_out_file,
+                    env=env,
+                    timeout=timeout,
+                    subprocess_callback=subprocess_callback,
+                )
+                self._last_orca_run_metadata = metadata
 
-                    try:
-                        _, stderr = process.communicate(timeout=timeout)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        raise TimeoutError(
-                            f"ORCA 计算超时 (>{timeout}秒): {inp_file.name}"
-                        )
-
-                    if process.returncode != 0:
-                        if stderr.strip():
-                            self.logger.error("ORCA stderr:\n%s", stderr[-4000:])
-                        raise RuntimeError(
-                            f"ORCA 运行失败 (返回码 {process.returncode})\n"
-                            f"错误信息: {stderr}"
-                        )
-
-                shutil.copy(temp_out_file, out_file)
-                succeeded = True
+                if temp_out_file.exists():
+                    shutil.copy(temp_out_file, out_file)
+                else:
+                    out_file.touch(exist_ok=True)
 
                 for f in temp_dir.glob('*'):
                     if f.is_file() and f not in [temp_inp_file, temp_out_file]:
                         shutil.copy(f, output_dir / f.name)
 
+                if metadata.timed_out or metadata.returncode not in (None, 0):
+                    self._log_orca_failure_diagnostics(
+                        out_file,
+                        stderr_text=metadata.stderr_text,
+                        returncode=metadata.returncode,
+                        timed_out=metadata.timed_out,
+                        sandbox_dir=temp_dir,
+                    )
+                    return out_file
+
+                succeeded = True
                 return out_file
 
             except Exception as e:
@@ -1129,33 +2215,25 @@ class ORCAInterface:
         cmd = [str(self.orca_binary), str(inp_file_abs)]
 
         try:
-            with open(out_file, 'w') as out_f:
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=out_f,
-                    stderr=subprocess.PIPE,
-                    cwd=str(output_dir),
-                    text=True,
-                    env=self._build_orca_runtime_env()
+            metadata = self._execute_orca_process(
+                cmd=cmd,
+                cwd=output_dir,
+                out_file=out_file,
+                env=self._build_orca_runtime_env(),
+                timeout=timeout,
+                subprocess_callback=subprocess_callback,
+            )
+            self._last_orca_run_metadata = metadata
+            if not out_file.exists():
+                out_file.touch(exist_ok=True)
+
+            if metadata.timed_out or metadata.returncode not in (None, 0):
+                self._log_orca_failure_diagnostics(
+                    out_file,
+                    stderr_text=metadata.stderr_text,
+                    returncode=metadata.returncode,
+                    timed_out=metadata.timed_out,
                 )
-
-                # 等待进程完成或超时
-                try:
-                    _, stderr = process.communicate(timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    raise TimeoutError(
-                        f"ORCA 计算超时 (>{timeout}秒): {inp_file.name}"
-                    )
-
-                # 检查返回码
-                if process.returncode != 0:
-                    if stderr.strip():
-                        self.logger.error("ORCA stderr:\n%s", stderr[-4000:])
-                    raise RuntimeError(
-                        f"ORCA 运行失败 (返回码 {process.returncode})\n"
-                        f"错误信息: {stderr}"
-                    )
 
         except Exception as e:
             # Provide output tail for faster diagnosis
@@ -1172,13 +2250,101 @@ class ORCAInterface:
 
         return out_file
 
+    def render_neb_input(
+        self,
+        reactant_xyz: Path,
+        product_xyz: Path,
+        output_dir: Path,
+        *,
+        charge: int = 0,
+        spin: int = 1,
+        n_images: int = 10,
+        interpolation: str = "XTB2",
+        method_keyword: str = "XTB2",
+        job_basename: str = "neb_ts",
+    ) -> Path:
+        """
+        渲染 ORCA NEB-TS 输入文件（默认 XTB2 级别）
+
+        起止几何以确定性文件名复制到输出目录，使 NEB 产物
+        （<basename>_NEB-TS_converged.xyz 等）路径可预测。
+
+        Returns:
+            生成的 .inp 文件路径
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        import shutil
+        start_copy = output_dir / f"{job_basename}_start.xyz"
+        end_copy = output_dir / f"{job_basename}_end.xyz"
+        shutil.copy(Path(reactant_xyz), start_copy)
+        shutil.copy(Path(product_xyz), end_copy)
+
+        route = f"! {method_keyword} NEB-TS noautostart miniprint nopop"
+        pal_block = self._pal_block()
+        neb_block = (
+            "%neb\n"
+            f'  NEB_END_XYZFILE "{end_copy.name}"\n'
+            f"  NImages {int(n_images)}\n"
+            f"  Interpolation {interpolation}\n"
+            "end\n"
+        )
+        inp_content = (
+            f"{route}\n"
+            f" %maxcore {self.maxcore}\n"
+            f" {pal_block}"
+            f"{neb_block}\n"
+            f"* xyzfile {int(charge)} {int(spin)} {start_copy.name}\n"
+        )
+        inp_file = output_dir / f"{job_basename}.inp"
+        inp_file.write_text(inp_content)
+        return inp_file
+
+    def run_neb_xtb2(
+        self,
+        reactant_xyz: Path,
+        product_xyz: Path,
+        output_dir: Path,
+        *,
+        charge: int = 0,
+        spin: int = 1,
+        n_images: int = 10,
+        interpolation: str = "XTB2",
+        job_basename: str = "neb_ts",
+        timeout: Optional[int] = None,
+        subprocess_callback: Callable[[subprocess.Popen[Any]], None] | None = None,
+    ) -> Path:
+        """
+        执行 XTB2 NEB-TS 计算并返回 .out 文件路径
+
+        仅负责输入渲染与执行；NEB 产物解析由 orca_neb_runner 完成。
+        """
+        inp_file = self.render_neb_input(
+            reactant_xyz,
+            product_xyz,
+            output_dir,
+            charge=charge,
+            spin=spin,
+            n_images=n_images,
+            interpolation=interpolation,
+            job_basename=job_basename,
+        )
+        return self._run_orca(
+            inp_file,
+            Path(output_dir),
+            timeout=timeout,
+            subprocess_callback=subprocess_callback,
+        )
+
     def single_point(
         self,
         xyz_file: Path,
         output_dir: Path,
         timeout: Optional[int] = None,
         charge: Optional[int] = None,
-        spin: Optional[int] = None
+        spin: Optional[int] = None,
+        subprocess_callback: Callable[[subprocess.Popen[Any]], None] | None = None,
     ) -> QCResult:
         """
         执行单点能计算（端到端流程）
@@ -1240,12 +2406,22 @@ class ORCAInterface:
 
             # 步骤 2: 运行 ORCA
             self.logger.debug("  运行 ORCA 计算...")
-            out_file = self._run_orca(inp_file, output_dir, timeout=timeout)
+            out_file = self._run_orca(
+                inp_file,
+                output_dir,
+                timeout=timeout,
+                subprocess_callback=subprocess_callback,
+            )
             self.logger.debug(f"  输出文件: {out_file}")
 
             # 步骤 3: 解析输出
             self.logger.debug("  解析 ORCA 输出...")
-            result = self._parse_output(out_file)
+            result = self._parse_output(
+                out_file,
+                returncode=self._last_orca_run_metadata.returncode,
+                stderr_text=self._last_orca_run_metadata.stderr_text,
+                timed_out=self._last_orca_run_metadata.timed_out,
+            )
             # Frequency jobs are routed through this entrypoint by qc_jobs.
             # _parse_output() owns common energy parsing, so explicitly
             # populate frequencies when the output contains a Hessian block.
@@ -1381,7 +2557,13 @@ class ORCAInterface:
         # 运行 ORCA
         try:
             out_file = self._run_orca(inp_file, output_dir, timeout=timeout)
-            result = self._parse_output(out_file, require_optimization_convergence=True)
+            result = self._parse_output(
+                out_file,
+                require_optimization_convergence=True,
+                returncode=self._last_orca_run_metadata.returncode,
+                stderr_text=self._last_orca_run_metadata.stderr_text,
+                timed_out=self._last_orca_run_metadata.timed_out,
+            )
 
             # 提取频率
             freq_block = re.search(r'VIBRATIONAL FREQUENCIES\s*\n((?:\s*[\d\.\-]+\s+[\d\.\-]+\s+[\d\.\-]+(?:\n|$))+)', out_file.read_text(), re.DOTALL)
@@ -1654,7 +2836,10 @@ class ORCAInterface:
         converged = "THE OPTIMIZATION HAS CONVERGED" in content
 
         # 提取最终能量
-        energy_match = re.search(r'FINAL SINGLE POINT ENERGY\s+([\-\d\.]+)', content)
+        energy_match = re.search(
+            r'FINAL\s+SINGLE\s+POINT\s+ENERGY\s+([-+]?\d+\.\d+(?:[Ee][-+]?\d+)?)',
+            content,
+        )
         energy = float(energy_match.group(1)) if energy_match else 0.0
 
         # 提取频率 — 使用最后一个 VIBRATIONAL FREQUENCIES 块（最终收敛频率）
