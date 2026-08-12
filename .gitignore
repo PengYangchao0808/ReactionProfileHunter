@@ -71,3 +71,6 @@ benchmark_shit/
 # Backup files (single-file pattern)
 *.backup_*
 
+# Exploratory ML training scripts (out-of-scope for V4 pipeline; belong in RPH_Postprocess)
+scripts/audit/
+

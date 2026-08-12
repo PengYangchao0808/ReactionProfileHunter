@@ -1,11 +1,11 @@
 """
-ReactionProfileHunter v5 - Serial Architecture
-===============================================
+ReactionProfileHunter v4 - S0–S4 DFT Pipeline
+==============================================
 
-过渡态搜索与特征提取的串行工作流系统
+Product-driven DFT reaction mechanism pipeline:
+S0 mechanism → S1 CENSO-LITE → S2 PEB → S3 low-level → S4 high-level
 
 Author: QCcalc Team
-Date: 2026-01-09
 """
 
 from rph_core.version import __version__
